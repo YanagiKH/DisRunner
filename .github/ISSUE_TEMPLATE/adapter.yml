@@ -1,0 +1,45 @@
+name: Adapter or compatibility request
+description: Request support for a bot framework/version or document protocol drift.
+title: '[Adapter]: '
+labels: [adapter, compatibility, needs-triage]
+body:
+  - type: input
+    id: framework
+    attributes:
+      label: Framework and exact version
+      placeholder: discord.js 14.x / discord.py 2.x / raw HTTP
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Integration mode
+      options:
+        - Gateway + REST
+        - Interaction endpoint
+        - Simulator SDK
+        - Library shim
+        - Generic executable
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: Compatibility gap
+      description: Provide the minimal synthetic behavior/payload and expected documented result.
+    validations:
+      required: true
+  - type: textarea
+    id: test
+    attributes:
+      label: Contract-test proposal
+      description: Describe success/failure fixtures, version pin, and offline verification.
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Data safety
+      options:
+        - label: Fixtures and logs are synthetic/redacted and contain no live token or private user data.
+          required: true

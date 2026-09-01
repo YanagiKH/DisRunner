@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+  - examples/*
+
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true

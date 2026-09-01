@@ -1,0 +1,194 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 1
+  NODE_VERSION: 22.23.2
+  PNPM_VERSION: 11.19.0
+
+jobs:
+  quality:
+    name: Quality, contracts, offline, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check documentation links and assets
+        run: node .github/scripts/check-docs.mjs
+
+      - name: Check workspace versions
+        run: pnpm run check:versions
+
+      - name: Test credential scanner symlink boundaries
+        run: pnpm run test:secret-scanner
+
+      - name: Check formatting
+        run: pnpm run format:check
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Type-check
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm run test:unit
+
+      - name: Protocol contract tests
+        run: pnpm run test:contract
+
+      - name: Integration tests
+        run: pnpm run test:integration
+
+      - name: Offline egress tests
+        run: pnpm run test:offline
+
+      - name: Security tests
+        run: pnpm run test:security
+
+      - name: Desktop unit tests
+        run: pnpm run test:desktop
+
+      - name: Raw webhook adapter tests
+        run: pnpm run test:raw-webhook
+
+      - name: Build all workspaces
+        run: pnpm run build
+
+      - name: Upload build evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-build-${{ github.sha }}
+          path: |
+            apps/*/dist/**
+            apps/*/dist-electron/**
+            packages/*/dist/**
+          if-no-files-found: error
+          retention-days: 14
+
+  cross-platform-e2e:
+    name: E2E (${{ matrix.os }})
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x64
+          - os: windows-latest
+            artifact: windows-x64
+          - os: macos-15
+            artifact: macos-arm64
+          - os: macos-15-intel
+            artifact: macos-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Install Linux browser dependencies
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/desktop exec playwright install-deps chromium
+      - name: Install Chromium for E2E
+        run: pnpm --filter @disrunner/desktop exec playwright install chromium
+      - name: Run desktop E2E
+        run: pnpm run test:e2e
+      - name: Build unpacked desktop package
+        run: pnpm --filter @disrunner/desktop run package --dir --publish never
+      - name: Smoke packaged Electron
+        if: runner.os != 'Linux'
+        run: pnpm --filter @disrunner/desktop run test:package-smoke
+      - name: Smoke packaged Electron on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a pnpm --filter @disrunner/desktop run test:package-smoke
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-failure-${{ matrix.artifact }}-${{ github.sha }}
+          path: |
+            apps/desktop/playwright-report/**
+            apps/desktop/test-results/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  performance:
+    name: Deterministic performance checks
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test:perf
+
+  all-green:
+    name: All green
+    if: always()
+    needs: [quality, cross-platform-e2e, performance]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce every required job
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          E2E: ${{ needs.cross-platform-e2e.result }}
+          PERFORMANCE: ${{ needs.performance.result }}
+        run: |
+          test "$QUALITY" = success
+          test "$E2E" = success
+          test "$PERFORMANCE" = success

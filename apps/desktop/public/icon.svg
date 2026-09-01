@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DisRunner cube mark">
+  <rect width="64" height="64" rx="15" fill="#14161B"/>
+  <path d="M32 8 52 19.5v24L32 56 12 43.5v-24L32 8Z" fill="none" stroke="#6677F4" stroke-width="3" stroke-linejoin="round"/>
+  <path d="m12 19.5 20 12 20-12M32 31.5V56" fill="none" stroke="#42D392" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="32" cy="8" r="4" fill="#6677F4"/><circle cx="12" cy="19.5" r="4" fill="#6677F4"/><circle cx="52" cy="19.5" r="4" fill="#6677F4"/><circle cx="32" cy="31.5" r="4" fill="#42D392"/><circle cx="12" cy="43.5" r="4" fill="#42D392"/><circle cx="52" cy="43.5" r="4" fill="#42D392"/><circle cx="32" cy="56" r="4" fill="#42D392"/>
+</svg>

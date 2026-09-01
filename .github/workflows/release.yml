@@ -1,0 +1,669 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated semantic-version tag; dispatch this workflow from the same tag ref
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disrunner-canonical-release
+  cancel-in-progress: false
+
+env:
+  CI: 1
+  NODE_VERSION: 22.23.2
+  PNPM_VERSION: 11.19.0
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  preflight:
+    name: Confirm immutable main commit and required checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      checks: read
+      contents: read
+    outputs:
+      release_sha: ${{ steps.resolve.outputs.release_sha }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve one annotated tag at current main
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" || {
+            echo "Release runs must be triggered from refs/tags/$RELEASE_TAG. For a manual run, use: gh workflow run release.yml --ref '$RELEASE_TAG' -f tag='$RELEASE_TAG'" >&2
+            exit 1
+          }
+          test "$GITHUB_REF_TYPE" = tag
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          git fetch --force --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          TAG_SHA="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          MAIN_SHA="$(git rev-parse refs/remotes/origin/main)"
+          test "$GITHUB_SHA" = "$TAG_SHA" || {
+            echo "The workflow run SHA must be the commit resolved by $GITHUB_REF so provenance binds to the release tag." >&2
+            exit 1
+          }
+          test "$TAG_SHA" = "$MAIN_SHA" || {
+            echo "Release tag must resolve to the current main HEAD." >&2
+            exit 1
+          }
+          echo "release_sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for trusted required checks on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.resolve.outputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REQUIRED=("All green" "CodeQL" "Code scanning high-severity policy" "pnpm audit and security suite")
+          for attempt in $(seq 1 60); do
+            all_green=true
+            for check in "${REQUIRED[@]}"; do
+              conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/check-runs?per_page=100" --jq ".check_runs | map(select(.name == \"${check}\" and .app.slug == \"github-actions\" and .check_suite.head_branch == \"main\")) | sort_by(.started_at) | last | (.conclusion // \"pending\")")"
+              echo "${check}: ${conclusion}"
+              case "$conclusion" in
+                success) ;;
+                failure|cancelled|timed_out|action_required|stale)
+                  echo "Required check failed: ${check} (${conclusion})" >&2
+                  exit 1
+                  ;;
+                *) all_green=false ;;
+              esac
+            done
+            if [ "$all_green" = true ]; then exit 0; fi
+            sleep 30
+          done
+          echo "Timed out waiting for trusted required checks." >&2
+          exit 1
+
+  validate-release:
+    name: Release gate (${{ matrix.platform }})
+    needs: preflight
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-15
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Verify immutable commit and every package version
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          node .github/scripts/check-versions.mjs
+      - run: pnpm install --frozen-lockfile
+      - name: Install Linux browser dependencies
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/desktop exec playwright install-deps chromium
+      - name: Install Chromium for release E2E
+        run: pnpm --filter @disrunner/desktop exec playwright install chromium
+      - run: pnpm run verify:release
+      - name: Audit high-severity dependency findings
+        run: pnpm audit --audit-level=high
+
+  package:
+    name: Package and smoke (${{ matrix.platform }})
+    needs: [preflight, validate-release]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            arch: x64
+            environment: release-linux
+          - os: windows-latest
+            platform: windows-x64
+            arch: x64
+            environment: release-windows
+          - os: macos-15
+            platform: macos-arm64
+            arch: arm64
+            environment: release-macos
+          - os: macos-15-intel
+            platform: macos-x64
+            arch: x64
+            environment: release-macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    environment: ${{ matrix.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build Windows package
+        if: runner.os == 'Windows'
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never
+
+      - name: Build macOS package
+        if: runner.os == 'macOS'
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never
+
+      - name: Build Linux package
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never
+
+      - name: Smoke packaged Electron
+        if: runner.os != 'Linux'
+        run: pnpm --filter @disrunner/desktop run test:package-smoke
+      - name: Smoke packaged Electron on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a pnpm --filter @disrunner/desktop run test:package-smoke
+
+      - name: Scan built and packaged application payloads for credentials
+        run: node .github/scripts/scan-secrets.mjs apps/desktop/dist apps/desktop/dist-electron apps/desktop/release
+
+      - name: Upload immutable package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: disrunner-${{ matrix.platform }}-${{ env.RELEASE_TAG }}
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.exe.blockmap
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.dmg.blockmap
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.AppImage.blockmap
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-canonical:
+    name: Publish canonical DisRunner release
+    needs: [preflight, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      actions: read
+      attestations: write
+      checks: read
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: disrunner-*-${{ env.RELEASE_TAG }}
+          path: artifacts
+          merge-multiple: true
+
+      - name: Reconfirm tag identity
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - name: Generate SBOM and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm sbom --lockfile-only --sbom-format cyclonedx --sbom-spec-version 1.7 --out "artifacts/disrunner-${RELEASE_TAG}-sbom.cdx.json"
+          (cd artifacts && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+
+      - name: Scan release artifacts for credentials
+        run: node .github/scripts/scan-secrets.mjs artifacts
+
+      - name: Attest release provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          create-storage-record: false
+          subject-checksums: artifacts/SHA256SUMS.txt
+
+      - name: Stage the signed provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$BUNDLE_PATH"
+          cp --no-clobber "$BUNDLE_PATH" "artifacts/disrunner-${RELEASE_TAG}-provenance.sigstore.json"
+
+      - name: Reconfirm main and trusted checks immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$RELEASE_SHA"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/disrunner-release-verify"
+          test "$(git cat-file -t refs/tags/disrunner-release-verify)" = tag
+          test "$(git rev-parse 'refs/tags/disrunner-release-verify^{commit}')" = "$RELEASE_SHA"
+          REQUIRED=("All green" "CodeQL" "Code scanning high-severity policy" "pnpm audit and security suite")
+          for check in "${REQUIRED[@]}"; do
+            conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/check-runs?per_page=100" --jq ".check_runs | map(select(.name == \"${check}\" and .app.slug == \"github-actions\" and .check_suite.head_branch == \"main\")) | sort_by(.started_at) | last | (.conclusion // \"missing\")")"
+            test "$conclusion" = success || {
+              echo "Final required check is not green: ${check} (${conclusion})." >&2
+              exit 1
+            }
+          done
+
+      - name: Create or resume verified draft and publish canonical release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          provenance_name="disrunner-${RELEASE_TAG}-provenance.sigstore.json"
+          release_version="${RELEASE_TAG#v}"
+          transaction_marker="$(printf '<!-- disrunner-release-transaction\nrepository=%s\ntag=%s\nsha=%s\n-->' \
+            "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$RELEASE_SHA")"
+
+          tag_object="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.type + " " + .object.sha')"
+          read -r tag_type tag_sha <<< "$tag_object"
+          test "$tag_type" = tag
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.sha)" = "$RELEASE_SHA"
+
+          test -f artifacts/SHA256SUMS.txt
+          test -f "artifacts/$provenance_name"
+          test -z "$(find artifacts -mindepth 1 -type d -print -quit)"
+          (cd artifacts && sha256sum --check --strict SHA256SUMS.txt)
+
+          expected_manifest="$RUNNER_TEMP/canonical-expected-assets.tsv"
+          release_json="$RUNNER_TEMP/canonical-release.json"
+          release_pages="$RUNNER_TEMP/canonical-release-pages.json"
+          : > "$expected_manifest"
+          while IFS= read -r -d '' asset; do
+            name="${asset##*/}"
+            [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$ ]]
+            size="$(stat --format='%s' "$asset")"
+            digest="$(sha256sum "$asset" | awk '{print $1}')"
+            printf '%s\t%s\t%s\n' "$name" "$size" "$digest" >> "$expected_manifest"
+          done < <(find artifacts -maxdepth 1 -type f -print0 | sort -z)
+          test -s "$expected_manifest"
+          test "$(cut -f1 "$expected_manifest" | wc -l)" = "$(cut -f1 "$expected_manifest" | sort -u | wc -l)"
+
+          fetch_release() {
+            gh api --paginate --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$release_pages"
+            local matches
+            matches="$(jq -r --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)] | length' "$release_pages")"
+            case "$matches" in
+              0)
+                printf '{}\n' > "$release_json"
+                printf '404'
+                ;;
+              1)
+                jq --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)] | .[0]' \
+                  "$release_pages" > "$release_json"
+                printf '200'
+                ;;
+              *)
+                echo "Multiple releases unexpectedly use tag $RELEASE_TAG." >&2
+                return 1
+                ;;
+            esac
+          }
+
+          validate_release_metadata() {
+            local expected_draft="$1"
+            jq -e --arg tag "$RELEASE_TAG" --argjson draft "$expected_draft" '
+              .tag_name == $tag and
+              .draft == $draft and
+              .prerelease == false and
+              (.id | type == "number") and
+              (.assets | type == "array") and
+              (.assets | all(
+                (.id | type == "number") and
+                (.size | type == "number" and . >= 0 and floor == .) and
+                (.state == "uploaded") and
+                (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+                (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")))) and
+              (([.assets[].name] | length) == ([.assets[].name] | unique | length))
+            ' "$release_json" >/dev/null
+          }
+
+          verify_release_payload() {
+            local asset_dir="$1"
+            local subject_names actual_subjects line_count valid_name_count
+            subject_names="$(mktemp "$RUNNER_TEMP/canonical-subjects.XXXXXX")" || return 1
+            actual_subjects="$(mktemp "$RUNNER_TEMP/canonical-actual.XXXXXX")" || return 1
+
+            test -f "$asset_dir/SHA256SUMS.txt" || return 1
+            test -f "$asset_dir/$provenance_name" || return 1
+            awk '{ name = $2; sub(/^\*/, "", name); sub(/^\.\//, "", name); print name }' \
+              "$asset_dir/SHA256SUMS.txt" | sort > "$subject_names" || return 1
+            test -s "$subject_names" || return 1
+            line_count="$(wc -l < "$subject_names")" || return 1
+            test "$line_count" = "$(sort -u "$subject_names" | wc -l)" || return 1
+            valid_name_count="$(grep -Ec '^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$' "$subject_names" || true)"
+            test "$valid_name_count" = "$line_count" || return 1
+            ! grep -Fxq SHA256SUMS.txt "$subject_names" || return 1
+            ! grep -Fxq "$provenance_name" "$subject_names" || return 1
+            grep -Eq '\.exe$' "$subject_names" || return 1
+            grep -Eq '\.dmg$' "$subject_names" || return 1
+            grep -Eq '\.AppImage$' "$subject_names" || return 1
+            grep -Eq -- '-sbom\.cdx\.json$' "$subject_names" || return 1
+            for required_name in \
+              "DisRunner-${release_version}-win-x64.exe" \
+              "DisRunner-${release_version}-mac-arm64.dmg" \
+              "DisRunner-${release_version}-mac-x64.dmg" \
+              "DisRunner-${release_version}-linux-x64.AppImage" \
+              "disrunner-${RELEASE_TAG}-sbom.cdx.json"; do
+              grep -Fxq "$required_name" "$subject_names" || return 1
+            done
+            while IFS= read -r name; do
+              case "$name" in
+                "DisRunner-${release_version}-win-x64.exe" | \
+                  "DisRunner-${release_version}-win-x64.exe.blockmap" | \
+                  "DisRunner-${release_version}-mac-arm64.dmg" | \
+                  "DisRunner-${release_version}-mac-arm64.dmg.blockmap" | \
+                  "DisRunner-${release_version}-mac-x64.dmg" | \
+                  "DisRunner-${release_version}-mac-x64.dmg.blockmap" | \
+                  "DisRunner-${release_version}-linux-x64.AppImage" | \
+                  "DisRunner-${release_version}-linux-x64.AppImage.blockmap" | \
+                  "disrunner-${RELEASE_TAG}-sbom.cdx.json") ;;
+                *) return 1 ;;
+              esac
+            done < "$subject_names"
+
+            find "$asset_dir" -maxdepth 1 -type f ! -name SHA256SUMS.txt ! -name "$provenance_name" \
+              -printf '%f\n' | sort > "$actual_subjects" || return 1
+            cmp -s "$subject_names" "$actual_subjects" || return 1
+            (cd "$asset_dir" && sha256sum --check --strict SHA256SUMS.txt >/dev/null) || return 1
+
+            while IFS= read -r name; do
+              (
+                cd "$asset_dir" &&
+                  gh attestation verify "$name" \
+                    --bundle "$provenance_name" \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+                    --source-digest "$RELEASE_SHA" \
+                    --source-ref "refs/tags/$RELEASE_TAG" >/dev/null
+              ) || return 1
+            done < "$subject_names"
+          }
+
+          verify_remote_release_integrity() {
+            local expected_draft="$1"
+            local verify_dir actual_digest
+            validate_release_metadata "$expected_draft" || return 1
+            verify_dir="$(mktemp -d "$RUNNER_TEMP/canonical-integrity.XXXXXX")" || return 1
+            while IFS=$'\t' read -r name remote_size declared_digest asset_id; do
+              gh api -H "Accept: application/octet-stream" \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$verify_dir/$name" || return 1
+              test "$(stat --format='%s' "$verify_dir/$name")" = "$remote_size" || return 1
+              actual_digest="sha256:$(sha256sum "$verify_dir/$name" | awk '{print $1}')" || return 1
+              test "$actual_digest" = "$declared_digest" || return 1
+            done < <(jq -r '.assets[] | [.name, (.size | tostring), .digest, (.id | tostring)] | @tsv' "$release_json" | sort)
+            verify_release_payload "$verify_dir" || return 1
+          }
+
+          is_owned_draft() {
+            jq -e --arg marker "$transaction_marker" '
+              .draft == true and
+              .author.login == "github-actions[bot]" and
+              ((.body // "") | contains($marker))
+            ' "$release_json" >/dev/null
+          }
+
+          delete_owned_draft() {
+            local draft_id="$1"
+            local delete_json="$RUNNER_TEMP/canonical-delete-${draft_id}.json"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${draft_id}" > "$delete_json"
+            jq -e --argjson id "$draft_id" --arg marker "$transaction_marker" '
+              .id == $id and
+              .draft == true and
+              .author.login == "github-actions[bot]" and
+              ((.body // "") | contains($marker))
+            ' "$delete_json" >/dev/null || {
+              echo "Refusing to delete a release that is no longer the expected workflow-owned draft." >&2
+              return 1
+            }
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${draft_id}" --silent
+          }
+
+          active_draft_id=""
+          cleanup_active_draft() {
+            local status="$?"
+            trap - EXIT
+            if [ "$status" -ne 0 ] && [ -n "$active_draft_id" ]; then
+              set +e
+              if delete_owned_draft "$active_draft_id" 2>/dev/null; then
+                echo "Removed the incomplete workflow-owned draft; the release tag was preserved." >&2
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_active_draft EXIT
+
+          verify_exact_remote_assets() {
+            local expected_draft="$1"
+            validate_release_metadata "$expected_draft"
+            local verify_dir expected_names remote_names
+            verify_dir="$(mktemp -d "$RUNNER_TEMP/canonical-exact.XXXXXX")"
+            expected_names="$verify_dir/expected-names.txt"
+            remote_names="$verify_dir/remote-names.txt"
+            cut -f1 "$expected_manifest" | sort > "$expected_names"
+            jq -r '.assets[].name' "$release_json" | sort > "$remote_names"
+            cmp -s "$expected_names" "$remote_names" || {
+              echo "Remote release asset names are not the exact expected set." >&2
+              exit 1
+            }
+            while IFS=$'\t' read -r name expected_size expected_digest; do
+              asset_id="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+              remote_size="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .size' "$release_json")"
+              declared_digest="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .digest' "$release_json")"
+              test "$remote_size" = "$expected_size" || {
+                echo "Remote release asset size differs: $name" >&2
+                exit 1
+              }
+              test "$declared_digest" = "sha256:$expected_digest" || {
+                echo "Remote release API digest differs: $name" >&2
+                exit 1
+              }
+              gh api -H "Accept: application/octet-stream" \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$verify_dir/$name"
+              test "$(stat --format='%s' "$verify_dir/$name")" = "$expected_size"
+              test "$(sha256sum "$verify_dir/$name" | awk '{print $1}')" = "$expected_digest" || {
+                echo "Remote release asset digest differs: $name" >&2
+                exit 1
+              }
+            done < "$expected_manifest"
+          }
+
+          create_owned_draft() {
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --generate-notes \
+              --notes "$transaction_marker" \
+              --title "DisRunner $RELEASE_TAG"
+            test "$(fetch_release)" = 200
+            validate_release_metadata true
+            is_owned_draft
+            test "$(jq -r '.assets | length' "$release_json")" = 0
+            active_draft_id="$(jq -er '.id' "$release_json")"
+          }
+
+          verify_release_payload artifacts
+
+          status="$(fetch_release)"
+          case "$status" in
+            200) ;;
+            404)
+              create_owned_draft
+              ;;
+            *)
+              echo "Unable to inspect the canonical release (HTTP $status)." >&2
+              exit 1
+              ;;
+          esac
+
+          draft_state="$(jq -er '.draft | if . == true then "true" elif . == false then "false" else error("invalid draft state") end' "$release_json")"
+          if [ "$draft_state" = false ]; then
+            verify_remote_release_integrity false
+            echo "Canonical release already exists with a complete, internally verified immutable asset set." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          validate_release_metadata true
+          is_owned_draft || {
+            echo "An existing draft was not created by this release transaction; refusing to mutate it." >&2
+            exit 1
+          }
+
+          uploaded_current=false
+          asset_count="$(jq -r '.assets | length' "$release_json")"
+          if [ "$asset_count" = 0 ]; then
+            active_draft_id="$(jq -er '.id' "$release_json")"
+            uploaded_current=true
+          elif verify_remote_release_integrity true; then
+            echo "Resuming a complete workflow-owned draft verified by checksums and provenance." >> "$GITHUB_STEP_SUMMARY"
+          else
+            stale_draft_id="$(jq -er '.id' "$release_json")"
+            delete_owned_draft "$stale_draft_id"
+            test "$(fetch_release)" = 404
+            echo "Replaced an incomplete workflow-owned draft without changing the release tag." >> "$GITHUB_STEP_SUMMARY"
+            create_owned_draft
+            uploaded_current=true
+          fi
+
+          if [ "$uploaded_current" = true ]; then
+            while IFS=$'\t' read -r name _size _digest; do
+              gh release upload "$RELEASE_TAG" "artifacts/$name" --repo "$GITHUB_REPOSITORY"
+            done < "$expected_manifest"
+          fi
+
+          tag_object="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.type + " " + .object.sha')"
+          read -r tag_type tag_sha <<< "$tag_object"
+          test "$tag_type" = tag
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.sha)" = "$RELEASE_SHA"
+
+          if [ "$uploaded_current" = true ]; then
+            test "$(fetch_release)" = 200
+            verify_exact_remote_assets true
+          fi
+
+          verified_release_id="$(jq -er '.id' "$release_json")"
+          verified_assets="$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")"
+
+          git fetch --force --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$RELEASE_SHA"
+          REQUIRED=("All green" "CodeQL" "Code scanning high-severity policy" "pnpm audit and security suite")
+          for check in "${REQUIRED[@]}"; do
+            conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/check-runs?per_page=100" --jq ".check_runs | map(select(.name == \"${check}\" and .app.slug == \"github-actions\" and .check_suite.head_branch == \"main\")) | sort_by(.started_at) | last | (.conclusion // \"missing\")")"
+            test "$conclusion" = success || {
+              echo "Final required check is not green: ${check} (${conclusion})." >&2
+              exit 1
+            }
+          done
+          tag_object="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.type + " " + .object.sha')"
+          read -r tag_type tag_sha <<< "$tag_object"
+          test "$tag_type" = tag
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.sha)" = "$RELEASE_SHA"
+
+          test "$(fetch_release)" = 200
+          validate_release_metadata true
+          is_owned_draft
+          test "$(jq -er '.id' "$release_json")" = "$verified_release_id"
+          test "$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")" = "$verified_assets"
+
+          release_id="$(jq -er '.id' "$release_json")"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false \
+            -f make_latest=true > "$RUNNER_TEMP/canonical-published.json"
+          jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false' \
+            "$RUNNER_TEMP/canonical-published.json" >/dev/null
+          active_draft_id=""
+
+          test "$(fetch_release)" = 200
+          validate_release_metadata false
+          test "$(jq -er '.id' "$release_json")" = "$verified_release_id"
+          test "$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")" = "$verified_assets"
+          echo "Published the canonical release only after exact remote name, size, SHA-256, checksum, and provenance verification." >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-electron
+coverage
+release
+playwright-report
+test-results
+package-lock.json
+pnpm-lock.yaml

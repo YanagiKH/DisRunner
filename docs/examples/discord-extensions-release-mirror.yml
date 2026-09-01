@@ -1,0 +1,316 @@
+name: Mirror DisRunner release
+
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-disrunner-release
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Verify and mirror latest canonical release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download and verify the latest DisRunner release
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPOSITORY: YanagiKH/DisRunner
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_headers=(
+            --header 'Accept: application/vnd.github+json'
+            --header "Authorization: Bearer ${GH_TOKEN}"
+            --header 'X-GitHub-Api-Version: 2022-11-28'
+          )
+          status="$(curl --proto '=https' --tlsv1.2 --silent --show-error --location \
+            "${api_headers[@]}" \
+            --output release.json --write-out '%{http_code}' \
+            "https://api.github.com/repos/${SOURCE_REPOSITORY}/releases/latest")"
+          if [ "$status" = 404 ]; then
+            echo 'No canonical DisRunner release exists yet.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test "$status" = 200
+
+          tag="$(jq -er '.tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' release.json)"
+          jq -e '.draft == false and .prerelease == false' release.json >/dev/null
+          source_url="$(jq -er '.html_url' release.json)"
+
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "${api_headers[@]}" \
+            "https://api.github.com/repos/${SOURCE_REPOSITORY}/git/ref/tags/${tag}" \
+            --output tag-ref.json
+          test "$(jq -r '.object.type' tag-ref.json)" = tag
+          tag_object_url="$(jq -er '.object.url' tag-ref.json)"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "${api_headers[@]}" "$tag_object_url" --output tag-object.json
+          tag_sha="$(jq -er '.object.sha' tag-object.json)"
+          comparison="$(curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "${api_headers[@]}" \
+            "https://api.github.com/repos/${SOURCE_REPOSITORY}/compare/${tag_sha}...main" | jq -er '.status')"
+          [[ "$comparison" = identical || "$comparison" = ahead ]]
+
+          jq -e '.assets | any(.name | endswith(".exe"))' release.json >/dev/null
+          jq -e '.assets | any(.name | endswith(".dmg"))' release.json >/dev/null
+          jq -e '.assets | any(.name | endswith(".AppImage"))' release.json >/dev/null
+          jq -e '.assets | any(.name == "SHA256SUMS.txt")' release.json >/dev/null
+          jq -e '.assets | any(.name | endswith("-sbom.cdx.json"))' release.json >/dev/null
+          provenance_name="disrunner-${tag}-provenance.sigstore.json"
+          jq -e --arg name "$provenance_name" '.assets | any(.name == $name)' release.json >/dev/null
+
+          mkdir -p assets
+          while IFS=$'\t' read -r name url; do
+            [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$ ]]
+            test ! -e "assets/$name"
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+              --max-filesize 536870912 "$url" --output "assets/$name"
+          done < <(jq -r '.assets[] | [.name, .browser_download_url] | @tsv' release.json)
+          (
+            cd assets
+            awk '{ name = $2; sub(/^\*/, "", name); sub(/^\.\//, "", name); print name }' SHA256SUMS.txt | sort > ../expected-assets.txt
+            test "$(wc -l < ../expected-assets.txt)" = "$(sort -u ../expected-assets.txt | wc -l)"
+            grep -Ex '[A-Za-z0-9][A-Za-z0-9._+-]{0,199}' ../expected-assets.txt >/dev/null
+            sha256sum --check --strict SHA256SUMS.txt
+            find . -maxdepth 1 -type f ! -name SHA256SUMS.txt ! -name "$provenance_name" -printf '%P\n' | sort > ../actual-assets.txt
+            cmp ../expected-assets.txt ../actual-assets.txt
+            while IFS= read -r name; do
+              gh attestation verify "$name" \
+                --bundle "$provenance_name" \
+                --repo "$SOURCE_REPOSITORY" \
+                --signer-workflow YanagiKH/DisRunner/.github/workflows/release.yml \
+                --source-digest "$tag_sha" \
+                --source-ref "refs/tags/$tag" >/dev/null
+            done < ../expected-assets.txt
+            rm ../actual-assets.txt ../expected-assets.txt
+          )
+
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "source_url=$source_url" >> "$GITHUB_OUTPUT"
+
+      - name: Create or resume verified draft and publish immutable mirror
+        if: steps.source.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIRROR_REPOSITORY: YanagiKH/Discord-Extensions
+          SOURCE_TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_URL: ${{ steps.source.outputs.source_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mirror_tag="disrunner-${SOURCE_TAG}"
+          transaction_marker="$(printf '<!-- disrunner-mirror-transaction\nrepository=%s\nsource-tag=%s\n-->' \
+            "$MIRROR_REPOSITORY" "$SOURCE_TAG")"
+
+          test -z "$(find assets -mindepth 1 -type d -print -quit)"
+          expected_manifest="$RUNNER_TEMP/mirror-expected-assets.tsv"
+          release_json="$RUNNER_TEMP/mirror-release.json"
+          release_pages="$RUNNER_TEMP/mirror-release-pages.json"
+          : > "$expected_manifest"
+          while IFS= read -r -d '' asset; do
+            name="${asset##*/}"
+            [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$ ]]
+            size="$(stat --format='%s' "$asset")"
+            digest="$(sha256sum "$asset" | awk '{print $1}')"
+            printf '%s\t%s\t%s\n' "$name" "$size" "$digest" >> "$expected_manifest"
+          done < <(find assets -maxdepth 1 -type f -print0 | sort -z)
+          test -s "$expected_manifest"
+          test "$(cut -f1 "$expected_manifest" | wc -l)" = "$(cut -f1 "$expected_manifest" | sort -u | wc -l)"
+
+          printf '%s\n\n%s\n' \
+            'Cryptographically verified mirror of the canonical DisRunner release. Checksums and the GitHub Actions provenance bundle were validated before publication. Use the attached DisRunner assets; this repository’s generated source archives are unrelated.' \
+            "Canonical release: ${SOURCE_URL}" > notes.md
+          printf '\n%s\n' "$transaction_marker" >> notes.md
+
+          fetch_release() {
+            gh api --paginate --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/${MIRROR_REPOSITORY}/releases?per_page=100" > "$release_pages"
+            local matches
+            matches="$(jq -r --arg tag "$mirror_tag" '[.[][] | select(.tag_name == $tag)] | length' "$release_pages")"
+            case "$matches" in
+              0)
+                printf '{}\n' > "$release_json"
+                printf '404'
+                ;;
+              1)
+                jq --arg tag "$mirror_tag" '[.[][] | select(.tag_name == $tag)] | .[0]' \
+                  "$release_pages" > "$release_json"
+                printf '200'
+                ;;
+              *)
+                echo "Multiple releases unexpectedly use tag $mirror_tag." >&2
+                return 1
+                ;;
+            esac
+          }
+
+          validate_release_metadata() {
+            local expected_draft="$1"
+            jq -e --arg tag "$mirror_tag" --argjson draft "$expected_draft" '
+              .tag_name == $tag and
+              .draft == $draft and
+              .prerelease == false and
+              (.id | type == "number") and
+              (.assets | type == "array") and
+              (.assets | all(
+                (.id | type == "number") and
+                (.size | type == "number" and . >= 0 and floor == .) and
+                (.state == "uploaded") and
+                (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+                (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")))) and
+              (([.assets[].name] | length) == ([.assets[].name] | unique | length))
+            ' "$release_json" >/dev/null
+          }
+
+          is_owned_draft() {
+            jq -e --arg marker "$transaction_marker" '
+              .draft == true and
+              .author.login == "github-actions[bot]" and
+              ((.body // "") | contains($marker))
+            ' "$release_json" >/dev/null
+          }
+
+          verify_remote_subset() {
+            validate_release_metadata true
+            local verify_dir
+            verify_dir="$(mktemp -d "$RUNNER_TEMP/mirror-subset.XXXXXX")"
+            while IFS=$'\t' read -r name remote_size declared_digest asset_id; do
+              expected="$(awk -F '\t' -v candidate="$name" '$1 == candidate { print $2 "\t" $3 }' "$expected_manifest")"
+              test -n "$expected" || {
+                echo "Draft mirror contains unexpected asset: $name" >&2
+                exit 1
+              }
+              IFS=$'\t' read -r expected_size expected_digest <<< "$expected"
+              test "$remote_size" = "$expected_size" || {
+                echo "Draft mirror asset size differs from the verified canonical asset: $name" >&2
+                exit 1
+              }
+              test "$declared_digest" = "sha256:$expected_digest" || {
+                echo "Draft mirror API digest differs from the verified canonical asset: $name" >&2
+                exit 1
+              }
+              gh api -H "Accept: application/octet-stream" \
+                "repos/${MIRROR_REPOSITORY}/releases/assets/${asset_id}" > "$verify_dir/$name"
+              test "$(stat --format='%s' "$verify_dir/$name")" = "$expected_size"
+              test "$(sha256sum "$verify_dir/$name" | awk '{print $1}')" = "$expected_digest" || {
+                echo "Draft mirror asset digest differs from the verified canonical asset: $name" >&2
+                exit 1
+              }
+            done < <(jq -r '.assets[] | [.name, (.size | tostring), .digest, (.id | tostring)] | @tsv' "$release_json" | sort)
+          }
+
+          verify_exact_remote_assets() {
+            local expected_draft="$1"
+            validate_release_metadata "$expected_draft"
+            local verify_dir expected_names remote_names
+            verify_dir="$(mktemp -d "$RUNNER_TEMP/mirror-exact.XXXXXX")"
+            expected_names="$verify_dir/expected-names.txt"
+            remote_names="$verify_dir/remote-names.txt"
+            cut -f1 "$expected_manifest" | sort > "$expected_names"
+            jq -r '.assets[].name' "$release_json" | sort > "$remote_names"
+            cmp -s "$expected_names" "$remote_names" || {
+              echo "Remote mirror asset names are not the exact verified canonical set." >&2
+              exit 1
+            }
+            while IFS=$'\t' read -r name expected_size expected_digest; do
+              asset_id="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+              remote_size="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .size' "$release_json")"
+              declared_digest="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .digest' "$release_json")"
+              test "$remote_size" = "$expected_size" || {
+                echo "Remote mirror asset size differs: $name" >&2
+                exit 1
+              }
+              test "$declared_digest" = "sha256:$expected_digest" || {
+                echo "Remote mirror API digest differs: $name" >&2
+                exit 1
+              }
+              gh api -H "Accept: application/octet-stream" \
+                "repos/${MIRROR_REPOSITORY}/releases/assets/${asset_id}" > "$verify_dir/$name"
+              test "$(stat --format='%s' "$verify_dir/$name")" = "$expected_size"
+              test "$(sha256sum "$verify_dir/$name" | awk '{print $1}')" = "$expected_digest" || {
+                echo "Remote mirror asset digest differs: $name" >&2
+                exit 1
+              }
+            done < "$expected_manifest"
+          }
+
+          status="$(fetch_release)"
+          case "$status" in
+            200) ;;
+            404)
+              gh release create "$mirror_tag" \
+                --repo "$MIRROR_REPOSITORY" \
+                --target main \
+                --draft \
+                --title "DisRunner ${SOURCE_TAG}" \
+                --notes-file notes.md \
+                --latest=false
+              test "$(fetch_release)" = 200
+              ;;
+            *)
+              echo "Unable to inspect the mirror release (HTTP $status)." >&2
+              exit 1
+              ;;
+          esac
+
+          draft_state="$(jq -er '.draft | if . == true then "true" elif . == false then "false" else error("invalid draft state") end' "$release_json")"
+          if [ "$draft_state" = false ]; then
+            verify_exact_remote_assets false
+            echo "${mirror_tag} already exists with the exact verified canonical asset set." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          validate_release_metadata true
+          is_owned_draft || {
+            echo "An existing mirror draft was not created by this transaction; refusing to mutate it." >&2
+            exit 1
+          }
+          transaction_draft_id="$(jq -er '.id' "$release_json")"
+          transaction_assets="$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")"
+          verify_remote_subset
+          test "$(fetch_release)" = 200
+          validate_release_metadata true
+          is_owned_draft
+          test "$(jq -er '.id' "$release_json")" = "$transaction_draft_id"
+          test "$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")" = "$transaction_assets"
+          while IFS=$'\t' read -r name _size _digest; do
+            if ! jq -e --arg name "$name" '.assets | any(.name == $name)' "$release_json" >/dev/null; then
+              gh release upload "$mirror_tag" "assets/$name" --repo "$MIRROR_REPOSITORY"
+            fi
+          done < "$expected_manifest"
+
+          test "$(fetch_release)" = 200
+          verify_exact_remote_assets true
+          is_owned_draft
+          test "$(jq -er '.id' "$release_json")" = "$transaction_draft_id"
+
+          release_id="$(jq -er '.id' "$release_json")"
+          verified_assets="$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")"
+          test "$(fetch_release)" = 200
+          validate_release_metadata true
+          is_owned_draft
+          test "$(jq -er '.id' "$release_json")" = "$release_id"
+          test "$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")" = "$verified_assets"
+          gh api --method PATCH "repos/${MIRROR_REPOSITORY}/releases/${release_id}" \
+            -F draft=false \
+            -f make_latest=false > "$RUNNER_TEMP/mirror-published.json"
+          jq -e --arg tag "$mirror_tag" '.tag_name == $tag and .draft == false and .prerelease == false' \
+            "$RUNNER_TEMP/mirror-published.json" >/dev/null
+
+          test "$(fetch_release)" = 200
+          validate_release_metadata false
+          test "$(jq -er '.id' "$release_json")" = "$release_id"
+          test "$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")" = "$verified_assets"
+          echo "Published ${mirror_tag} only after exact remote name, size, and SHA-256 verification." >> "$GITHUB_STEP_SUMMARY"

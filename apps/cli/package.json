@@ -1,0 +1,22 @@
+{
+  "name": "@disrunner/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "disrunner": "./dist/index.js",
+    "discord-simulator": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run"
+  },
+  "dependencies": {
+    "@disrunner/core": "workspace:*"
+  }
+}

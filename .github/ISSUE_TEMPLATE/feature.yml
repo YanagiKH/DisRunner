@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a simulator capability or workflow improvement.
+title: '[Feature]: '
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and user outcome
+      description: What test/development problem exists and what observable result is needed?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Include success, failure, edge, and UI/CLI behavior without prescribing unnecessary implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Verification approach
+      description: Describe deterministic tests, protocol references, and required reports/trace evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility and security impact
+      description: Note schemas, adapters, offline boundary, permissions, privacy, performance, and migrations.
+    validations:
+      required: true

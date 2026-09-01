@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "guild": {
+    "id": "9001",
+    "name": "Package Smoke Guild",
+    "roles": [],
+    "channels": [
+      {
+        "id": "9002",
+        "name": "package-smoke",
+        "type": 0
+      }
+    ]
+  }
+}

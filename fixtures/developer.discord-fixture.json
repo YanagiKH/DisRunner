@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "user": {
+    "id": "3000",
+    "username": "DevUser",
+    "global_name": "Developer",
+    "bot": false
+  }
+}

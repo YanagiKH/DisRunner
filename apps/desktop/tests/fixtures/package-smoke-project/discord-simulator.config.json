@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "bot": {
+    "name": "DisRunner Package Smoke Bot",
+    "runtime": "node",
+    "startCommand": "node bot.mjs",
+    "entryPoint": "bot.mjs",
+    "workingDirectory": "."
+  },
+  "adapter": {
+    "type": "raw-interaction-webhook",
+    "interactionEndpoint": "http://127.0.0.1:${DISRUNNER_BOT_PORT}/interactions"
+  },
+  "environment": {
+    "DISRUNNER_PACKAGE_SMOKE": "1"
+  },
+  "profile": {
+    "mode": "strict",
+    "seed": 42042,
+    "networkPolicy": "offline",
+    "hotReload": false
+  },
+  "fixtures": {
+    "guild": "guild.discord-fixture.json",
+    "user": "user.discord-fixture.json"
+  }
+}

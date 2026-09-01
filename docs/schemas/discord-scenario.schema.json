@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/YanagiKH/DisRunner/blob/main/docs/schemas/discord-scenario.schema.json",
+  "title": "DisRunner scenario",
+  "description": "Version 1 deterministic scenario. Supports the canonical step dialect and the concise timeline compatibility dialect.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 4000 },
+    "tags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+    },
+    "seed": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "mode": { "enum": ["strict", "lenient"] },
+    "initialState": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/resource" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "object" }
+          }
+        }
+      ]
+    },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/canonicalAction" }
+    },
+    "actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/timelineAction" }
+    },
+    "assertions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/assertion" }
+    }
+  },
+  "oneOf": [{ "required": ["steps"] }, { "required": ["actions"] }],
+  "$defs": {
+    "resourceType": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "resource": {
+      "type": "object",
+      "required": ["resourceType"],
+      "properties": { "resourceType": { "$ref": "#/$defs/resourceType" } },
+      "additionalProperties": true
+    },
+    "canonicalAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "ms"],
+          "properties": {
+            "type": { "const": "advance-time" },
+            "ms": { "type": "number", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "resourceType", "data"],
+          "properties": {
+            "type": { "const": "create-resource" },
+            "resourceType": { "$ref": "#/$defs/resourceType" },
+            "data": { "type": "object" },
+            "saveAs": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "resourceType", "id", "changes"],
+          "properties": {
+            "type": { "const": "update-resource" },
+            "resourceType": { "$ref": "#/$defs/resourceType" },
+            "id": { "type": "string", "minLength": 1 },
+            "changes": { "type": "object" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "resourceType", "id"],
+          "properties": {
+            "type": { "const": "delete-resource" },
+            "resourceType": { "$ref": "#/$defs/resourceType" },
+            "id": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "channelId", "authorId", "content"],
+          "properties": {
+            "type": { "const": "send-message" },
+            "channelId": { "type": "string", "minLength": 1 },
+            "authorId": { "type": "string", "minLength": 1 },
+            "content": { "type": "string" },
+            "saveAs": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "event", "data"],
+          "properties": {
+            "type": { "const": "gateway-dispatch" },
+            "event": { "type": "string" },
+            "data": true
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["gateway-disconnect", "gateway-resume"] },
+            "sequence": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "interaction-create" },
+            "interactionType": { "type": "string" },
+            "data": { "type": "object" },
+            "saveAs": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "interactionId", "responseType"],
+          "properties": {
+            "type": { "const": "interaction-respond" },
+            "interactionId": { "type": "string", "minLength": 1 },
+            "responseType": {
+              "enum": ["message", "defer", "update", "defer-update", "autocomplete", "modal"]
+            },
+            "data": { "type": "object" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "interactionId"],
+          "properties": {
+            "type": { "const": "interaction-followup" },
+            "interactionId": { "type": "string", "minLength": 1 },
+            "data": { "type": "object" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "method", "path"],
+          "properties": {
+            "type": { "const": "rate-limit-request" },
+            "method": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "timelineAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["at", "type", "command", "acknowledgeAfterMs"],
+          "properties": {
+            "at": { "type": "number", "minimum": 0 },
+            "type": { "const": "interaction" },
+            "command": { "type": "string", "minLength": 1 },
+            "acknowledgeAfterMs": { "type": "number", "minimum": 0 },
+            "followUpAfterMs": { "type": "number", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["at", "type"],
+          "properties": {
+            "at": { "type": "number", "minimum": 0 },
+            "type": { "const": "gateway-disconnect" },
+            "resumable": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["at", "type"],
+          "properties": {
+            "at": { "type": "number", "minimum": 0 },
+            "type": { "const": "gateway-resume" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["at", "type", "permission", "expected"],
+          "properties": {
+            "at": { "type": "number", "minimum": 0 },
+            "type": { "const": "permission-check" },
+            "permission": { "type": "string", "minLength": 1 },
+            "expected": { "enum": ["allowed", "denied"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["at", "type", "route"],
+          "properties": {
+            "at": { "type": "number", "minimum": 0 },
+            "type": { "const": "rest-request" },
+            "route": { "type": "string", "minLength": 1 },
+            "repeat": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "assertion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "resourceType", "id"],
+          "properties": {
+            "type": { "const": "resource-exists" },
+            "resourceType": { "$ref": "#/$defs/resourceType" },
+            "id": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "resourceType", "id", "field", "expected"],
+          "properties": {
+            "type": { "const": "resource-field-equals" },
+            "resourceType": { "$ref": "#/$defs/resourceType" },
+            "id": { "type": "string" },
+            "field": { "type": "string" },
+            "expected": true
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "event"],
+          "properties": {
+            "type": { "const": "event-received" },
+            "event": { "type": "string" },
+            "count": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "ruleId"],
+          "properties": {
+            "type": { "enum": ["risk-present", "risk-absent", "risk-detected"] },
+            "ruleId": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "interactionId", "state"],
+          "properties": {
+            "type": { "const": "interaction-state" },
+            "interactionId": { "type": "string" },
+            "state": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "expected"],
+          "properties": { "type": { "const": "state-hash" }, "expected": { "type": "string" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "command", "withinMs"],
+          "properties": {
+            "type": { "const": "interaction-acknowledged" },
+            "command": { "type": "string" },
+            "withinMs": { "type": "number", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "enum": ["gateway-resumed", "no-secret-leak"] } }
+        }
+      ]
+    }
+  }
+}

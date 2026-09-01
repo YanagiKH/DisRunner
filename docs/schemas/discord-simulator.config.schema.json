@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/YanagiKH/DisRunner/blob/main/docs/schemas/discord-simulator.config.schema.json",
+  "title": "DisRunner project configuration",
+  "description": "Version 1 configuration for an imported bot project. Runtime validation additionally enforces the selected network policy and workspace path boundary.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "bot", "adapter", "profile"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "bot": { "$ref": "#/$defs/bot" },
+    "adapter": { "$ref": "#/$defs/adapter" },
+    "environment": {
+      "type": "object",
+      "description": "Explicit non-secret environment values. Real Discord credentials must not be stored here.",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "additionalProperties": { "type": "string" },
+      "default": {}
+    },
+    "profile": { "$ref": "#/$defs/profile" },
+    "fixtures": { "$ref": "#/$defs/fixtures" }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Resolved relative to the configuration file and checked against the selected workspace boundary at runtime."
+    },
+    "bot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "runtime", "startCommand", "workingDirectory"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "runtime": { "enum": ["node", "python", "executable"] },
+        "startCommand": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Command configured by the user. DisRunner must parse/execute it without unsafe shell concatenation."
+        },
+        "entryPoint": { "$ref": "#/$defs/relativePath" },
+        "workingDirectory": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "description": "v0.1 accepts only the tested raw interaction webhook adapter. Framework and generic Gateway adapters are planned and fail closed.",
+          "enum": ["raw-interaction-webhook"]
+        },
+        "interactionEndpoint": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "restBaseUrl": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "gatewayUrl": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "seed", "networkPolicy"],
+      "properties": {
+        "mode": { "enum": ["strict", "lenient"] },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "intents": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "default": []
+        },
+        "networkPolicy": { "const": "offline" },
+        "hotReload": { "type": "boolean", "default": false }
+      }
+    },
+    "fixtures": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "guild": { "$ref": "#/$defs/relativePath" },
+        "user": { "$ref": "#/$defs/relativePath" }
+      }
+    }
+  }
+}

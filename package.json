@@ -1,0 +1,59 @@
+{
+  "name": "disrunner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic offline Discord bot simulator for local development and CI.",
+  "license": "MIT",
+  "packageManager": "pnpm@11.19.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.23.2 <23",
+    "pnpm": "11.19.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "dev": "pnpm --filter @disrunner/desktop dev",
+    "dev:web": "pnpm --filter @disrunner/desktop dev:web",
+    "build": "pnpm -r --if-present run build",
+    "build:core": "pnpm --filter @disrunner/core build",
+    "build:desktop": "pnpm --filter @disrunner/desktop build",
+    "build:cli": "pnpm --filter @disrunner/cli build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check:versions": "node .github/scripts/check-versions.mjs",
+    "lint": "pnpm run build:core && eslint . --max-warnings=0",
+    "typecheck": "pnpm run build:core && pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test",
+    "test:unit": "pnpm --filter @disrunner/core test:unit",
+    "test:contract": "pnpm --filter @disrunner/core test:contract",
+    "test:integration": "pnpm -r --if-present run test:integration",
+    "test:offline": "pnpm --filter @disrunner/core test:offline",
+    "test:security": "pnpm --filter @disrunner/core test:security",
+    "test:desktop": "pnpm --filter @disrunner/desktop test",
+    "test:raw-webhook": "pnpm --filter @disrunner/example-raw-webhook-bot test",
+    "test:secret-scanner": "node .github/scripts/scan-secrets.test.mjs",
+    "test:e2e": "pnpm --filter @disrunner/desktop test:e2e",
+    "test:perf": "pnpm --filter @disrunner/core test:perf",
+    "verify": "pnpm run check:versions && pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test:unit && pnpm run test:contract && pnpm run test:integration && pnpm run test:offline && pnpm run test:security && pnpm run test:desktop && pnpm run test:raw-webhook && pnpm run test:secret-scanner && pnpm run build",
+    "verify:release": "pnpm run verify && pnpm run test:e2e && pnpm run test:perf",
+    "cli": "pnpm --filter @disrunner/cli start",
+    "clean": "node scripts/clean.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.35.0",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.35.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.3.0",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.41.0",
+    "vitest": "^3.2.4"
+  }
+}

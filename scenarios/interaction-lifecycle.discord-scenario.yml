@@ -1,0 +1,51 @@
+version: 1
+name: interaction-lifecycle
+description: Immediate, deferred, late, permission, rate-limit, and gateway-resume coverage.
+seed: 42042
+mode: strict
+initialState:
+  guilds:
+    - id: '1000'
+      name: Foundation Lab
+  channels:
+    - id: '2000'
+      guildId: '1000'
+      name: bot-testing
+actions:
+  - at: 0
+    type: interaction
+    command: ping
+    acknowledgeAfterMs: 120
+  - at: 1000
+    type: interaction
+    command: deferred
+    acknowledgeAfterMs: 2800
+    followUpAfterMs: 4200
+  - at: 7000
+    type: interaction
+    command: late
+    acknowledgeAfterMs: 3001
+  - at: 12000
+    type: gateway-disconnect
+    resumable: true
+  - at: 12500
+    type: gateway-resume
+  - at: 14000
+    type: permission-check
+    permission: MANAGE_MESSAGES
+    expected: denied
+  - at: 15000
+    type: rest-request
+    route: POST /channels/2000/messages
+    repeat: 6
+assertions:
+  - type: interaction-acknowledged
+    command: ping
+    withinMs: 3000
+  - type: interaction-acknowledged
+    command: deferred
+    withinMs: 3000
+  - type: risk-detected
+    ruleId: INTERACTION_ACK_LATE
+  - type: gateway-resumed
+  - type: no-secret-leak

@@ -1,0 +1,21 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+    authors:
+      - dependabot[bot]
+  categories:
+    - title: Breaking changes
+      labels: [breaking-change]
+    - title: Features
+      labels: [enhancement, feature]
+    - title: Fixes
+      labels: [bug, fix]
+    - title: Security
+      labels: [security]
+    - title: Adapters and compatibility
+      labels: [adapter, compatibility]
+    - title: Documentation and developer experience
+      labels: [documentation, ci]
+    - title: Other changes
+      labels: ['*']

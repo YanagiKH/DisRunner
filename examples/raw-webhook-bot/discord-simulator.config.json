@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "bot": {
+    "name": "DisRunner Example Bot",
+    "runtime": "node",
+    "startCommand": "node src/server.mjs",
+    "entryPoint": "src/server.mjs",
+    "workingDirectory": "."
+  },
+  "adapter": {
+    "type": "raw-interaction-webhook",
+    "interactionEndpoint": "http://127.0.0.1:${DISRUNNER_BOT_PORT}/interactions",
+    "restBaseUrl": "http://127.0.0.1:${DISRUNNER_REST_PORT}/api/v10",
+    "gatewayUrl": "ws://127.0.0.1:${DISRUNNER_GATEWAY_PORT}"
+  },
+  "environment": {
+    "DISRUNNER_OFFLINE": "1"
+  },
+  "profile": {
+    "mode": "strict",
+    "seed": 42042,
+    "intents": ["GUILDS", "GUILD_MESSAGES", "MESSAGE_CONTENT"],
+    "networkPolicy": "offline",
+    "hotReload": false
+  },
+  "fixtures": {
+    "guild": "fixtures/foundation-lab.discord-fixture.json",
+    "user": "fixtures/developer.discord-fixture.json"
+  }
+}

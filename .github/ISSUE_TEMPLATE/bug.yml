@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible DisRunner defect using redacted evidence.
+title: '[Bug]: '
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include real bot tokens, private messages, personal data, or unredacted diagnostics. Report security issues privately.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected and actual behavior
+      description: State the observable difference.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include a synthetic scenario/fixture or exact steps, seed, clock mode, and command.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: DisRunner version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS/architecture, Node/pnpm, bot runtime/framework/adapter, protocol profile.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: First failing span, exit code, risk/assertion ID, and safe trace/screenshot link. Describe redactions.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed credentials, PII, private content, and personal absolute paths.
+          required: true
+        - label: This is not a vulnerability report.
+          required: true
