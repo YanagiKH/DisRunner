@@ -71,6 +71,7 @@
     },
     "linux": {
       "icon": "../../docs/assets/disrunner-logo.png",
+      "executableName": "disrunner",
       "target": [
         "AppImage"
       ],
