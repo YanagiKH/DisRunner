@@ -15,18 +15,19 @@ Initial Preview. See [COMPATIBILITY.md](COMPATIBILITY.md) for the layer-by-layer
 - Deterministic core primitives for virtual Discord-shaped resources, seeded IDs/randomness, virtual time, snapshots/state hashes, and selected diffs.
 - Core interaction lifecycle, permission, intent, rate-limit, partial Gateway/REST, selected protocol-limit, trace, assertion, and risk behavior.
 - CLI commands for scenario validation/run/test, versioned recording/replay, and JSON/JUnit/HTML/SARIF output.
-- Signed raw-interaction-webhook example with replay/staleness/body-size checks.
-- Electron Preview that validates and starts a raw-webhook project, performs signed PING readiness, captures bounded process output, invokes the real local `/ping`, and renders its callback.
+- Mutually authenticated raw-interaction-webhook example with request-signature, response-HMAC, replay, staleness, and body-size checks.
+- Electron Preview that validates and starts a raw-webhook project, performs signed PING readiness with authenticated raw response bytes, captures bounded process output, invokes the real local `/ping`, and renders its verified callback.
 - Discord-like desktop visual fixtures and preview surfaces for guilds, channels, commands, scenarios, inspectors, risks, and settings.
 - CI, security, packaging, SBOM, checksum, and canonical release workflow definitions. A release is evidence only for jobs that completed successfully in that release run.
 - Installation, configuration, protocol, security, limitation, debugging, and release documentation with original DisRunner artwork.
 
 ### Security
 
-- Per-run synthetic credentials for the supported raw-webhook/runtime path, with production-shaped token rejection in project configuration.
+- Per-run synthetic credentials for the supported raw-webhook/runtime path, including a protected 32-byte response-authentication secret, with production-shaped token rejection in project configuration.
 - Loopback validation for supported simulator endpoints and Electron navigation/request restrictions.
 - Bounded/redacted bot output and sanitized supported CLI report/export values. Source scenario files are not rewritten or guaranteed secret-free.
-- Webhook verification for missing, invalid, stale, replayed, and oversized signed requests.
+- Webhook verification for missing, invalid, stale, replayed, and oversized signed requests; every accepted PING or command response is HMAC-bound to the per-run secret, timestamp, HTTP status, request bytes, and response bytes before parsing.
+- A same-user process that wins the dynamic webhook port race can still deny startup, but cannot impersonate a successful bot response without the protected per-run secret.
 - Commit-pinned release actions and workflow refusal to overwrite an existing canonical release. Repository rules, environment reviewers, signing, notarization, and immutable-release settings remain external release prerequisites.
 
 ### Known Preview boundaries

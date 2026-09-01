@@ -10,7 +10,7 @@ Record:
 2. The exact command, first error, and exit code.
 3. For CLI runs: scenario/recording path, seed, mode, first failed assertion, final state hash, and the explicitly generated redacted report.
 4. For Electron: selected configuration path, runtime phase/PID, endpoint presence (not credentials), bounded stdout/stderr, command result, trace/risk entries, and a screenshot.
-5. Whether the behavior came from the real signed `/ping` path or a seeded visual preview.
+5. Whether the behavior came from the real mutually authenticated `/ping` path or a seeded visual preview.
 
 Never paste a token, private key, raw private conversation, or full environment dump.
 
@@ -29,6 +29,7 @@ pnpm run test:integration
 pnpm run test:offline
 pnpm run test:security
 pnpm run test:desktop
+pnpm --filter @disrunner/desktop run test:runtime-manager
 pnpm run test:raw-webhook
 pnpm run test:secret-scanner
 pnpm run build
@@ -48,7 +49,7 @@ pnpm run build
 
 ### Blank or blocked window
 
-Check the main-process and renderer errors separately. `pnpm run dev:web` exercises only the browser renderer; it does not exercise Electron IPC, security settings, project loading, process control, or the signed webhook path. Do not disable CSP, context isolation, request filtering, or sandboxing to hide an error.
+Check the main-process and renderer errors separately. `pnpm run dev:web` exercises only the browser renderer; it does not exercise Electron IPC, security settings, project loading, process control, or the mutually authenticated webhook path. Do not disable CSP, context isolation, request filtering, or sandboxing to hide an error.
 
 ### Project remains `ready` or enters `error`
 
@@ -56,10 +57,11 @@ Check `discord-simulator.config.json` against the shipped schema and example. v0
 
 ### Process starts but readiness fails
 
-The raw-webhook endpoint must bind the injected loopback port, accept the runtime's connection probe, verify requests with the generated public key, and return a valid signed PING callback within the startup timeout. Review the example bot's bounded output and run its tests independently:
+The raw-webhook endpoint must bind the injected loopback port, accept the connection probe, verify the request with `DISRUNNER_PUBLIC_KEY`, and return PING bytes authenticated with `DISRUNNER_WEBHOOK_PEER_SECRET` within the startup timeout. The runtime verifies response authentication before JSON. Do not print either value; verify only that both 64-hex variables are present. A process that merely owns the port or returns `{ "type": 1 }` fails readiness without the correct `x-disrunner-webhook-response-auth` header. Review bounded output and run both transport suites:
 
 ```bash
 pnpm run test:raw-webhook
+pnpm --filter @disrunner/desktop run test:runtime-manager
 ```
 
 ### Stop leaves a PID or port
@@ -68,9 +70,9 @@ Capture the selected bot PID, runtime phase, output, and shutdown error. The run
 
 ## Signed command and the three-second boundary
 
-Electron currently sends one real signed application-command request and expects one HTTP callback. Validate the command name (`/` plus 1–32 lowercase letters, digits, `_`, or `-`), that the runtime is `running`, and that the bot response is valid JSON with a supported callback type.
+Electron currently sends one real signed application-command request and expects one mutually authenticated HTTP callback. Validate the command name (`/` plus 1–32 lowercase letters, digits, `_`, or `-`), that the runtime is `running`, and that the bot computes the response HMAC from the exact request timestamp/body, HTTP status, and exact serialized response bytes. Any reserialization after computing the MAC changes the digest.
 
-The request times out after 3,000 ms of host time and records `INTERACTION_TIMEOUT`. An invalid callback records `INVALID_INTERACTION_CALLBACK`. Core interaction scenarios separately test virtual-time immediate/deferred/follow-up transitions and the 900,000 ms token lifetime.
+The request times out after 3,000 ms of host time and records `INTERACTION_TIMEOUT`. Missing, malformed, wrong-key, status-changed, or body-changed authentication records `WEBHOOK_PEER_AUTHENTICATION_FAILED`; fix the transport/authentication contract before inspecting callback fields. Only an authenticated response that then has invalid JSON/data/type records `INVALID_INTERACTION_CALLBACK`. Core interaction scenarios separately test virtual-time immediate/deferred/follow-up transitions and the 900,000 ms token lifetime.
 
 Electron v0.1 does not observe a deferred callback's later REST edit/follow-up. A seeded `/slow` browser-preview message is not evidence that the imported bot completed that lifecycle.
 

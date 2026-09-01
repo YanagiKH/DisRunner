@@ -7,7 +7,7 @@ DisRunner v0.1 implements selected Discord-shaped contracts for deterministic lo
 | Layer            | What v0.1 evidence covers                                                          |
 | ---------------- | ---------------------------------------------------------------------------------- |
 | Core/CLI         | In-process state, timing, interactions, selected REST/Gateway behavior, assertions |
-| Electron runtime | Raw-webhook project lifecycle, signed readiness, and real local `/ping` callback   |
+| Electron runtime | Raw-webhook lifecycle, signed requests, HMAC-authenticated responses, and `/ping`  |
 | Desktop renderer | Mainly seeded visual fixtures; only explicitly labeled runtime values are evidence |
 
 A core unit test does not establish that the equivalent desktop/imported-bot path is connected.
@@ -23,7 +23,7 @@ A core unit test does not establish that the equivalent desktop/imported-bot pat
 ## Receive paths
 
 - **Core Gateway:** partial lifecycle and dispatch/intent primitives, plus a local WebSocket transport. Desktop fixtures are not bootstrapped or synchronized as a supported imported-bot environment.
-- **Raw interaction webhook:** signed local HTTP request with body, timestamp, replay, and callback validation. This is the supported Electron adapter in v0.1.
+- **Raw interaction webhook:** Ed25519-signed local HTTP request with body/timestamp/replay controls, followed by per-run HMAC verification of the response status and exact bytes before callback validation. Transport peer authentication and Discord-shaped callback validation are distinct failure stages. This is the supported Electron adapter in v0.1.
 - **Core REST:** partial local routes for gateway discovery, bot user, guild/channel/message resources, interaction callbacks, and follow-ups. Application-command registration and many Discord routes are absent.
 
 These paths have different authentication, retry, state, and failure semantics and must not be treated as interchangeable.

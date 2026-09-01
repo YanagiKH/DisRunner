@@ -13,7 +13,7 @@ The image above is a design concept. The image below is a renderer snapshot used
 - **Settings → Runtime paths → Browse** selects a folder containing `discord-simulator.config.json` and shows validated command/profile details.
 - **Start/Stop Bot** controls the selected raw-webhook process and local services.
 - **Runtime strip** shows phase, PID, resolved command, error/latest bounded stdout or stderr.
-- **Composer or Command Explorer `/ping`** invokes the running raw-webhook bot through a signed local request and displays its callback result.
+- **Composer or Command Explorer `/ping`** invokes the running raw-webhook bot through a signed request, verifies the per-run response HMAC, and displays only an authenticated callback result.
 - **Risk Center** can receive findings recorded by the current runtime path.
 
 The bundled `/ping` example is the v0.1 Electron acceptance path. Other command names work only if the selected raw-webhook process implements them; static command metadata is not registration discovery.

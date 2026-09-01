@@ -23,6 +23,8 @@ export interface BotProcessConfig {
   readonly restBaseUrl: string;
   readonly gatewayUrl: string;
   readonly interactionEndpoint?: string;
+  /** Supervisor-owned per-run secret used to authenticate raw-webhook responses. */
+  readonly interactionPeerSecret?: string;
   readonly fakeToken?: string;
 }
 
@@ -124,9 +126,15 @@ export class BotRunner {
     assertOfflineGatewayUrl(config.gatewayUrl);
     if (config.interactionEndpoint !== undefined) assertOfflineUrl(config.interactionEndpoint);
     const fakeToken = assertSyntheticToken(config.fakeToken ?? createOfflineSessionToken());
+    const interactionPeerSecret =
+      config.interactionPeerSecret === undefined
+        ? undefined
+        : requireInteractionPeerSecret(config.interactionPeerSecret);
+    assertInteractionAuthenticationPair(config.interactionEndpoint, interactionPeerSecret);
     const environment = sanitizeBotEnvironment(process.env, {
       ...config,
       fakeToken,
+      ...(interactionPeerSecret === undefined ? {} : { interactionPeerSecret }),
     });
     this.#status = 'starting';
     this.#output.length = 0;
@@ -138,7 +146,10 @@ export class BotRunner {
     this.#exitedAtMs = undefined;
     this.#exitCode = undefined;
     this.#signal = undefined;
-    this.#sensitiveValues = [fakeToken];
+    this.#sensitiveValues = [
+      fakeToken,
+      ...(interactionPeerSecret === undefined ? [] : [interactionPeerSecret]),
+    ];
 
     let child: ChildProcessWithoutNullStreams;
     try {
@@ -300,9 +311,20 @@ export function sanitizeBotEnvironment(
   base: Readonly<NodeJS.ProcessEnv>,
   config: Pick<
     BotProcessConfig,
-    'env' | 'inheritEnv' | 'fakeToken' | 'restBaseUrl' | 'gatewayUrl' | 'interactionEndpoint'
+    | 'env'
+    | 'inheritEnv'
+    | 'fakeToken'
+    | 'restBaseUrl'
+    | 'gatewayUrl'
+    | 'interactionEndpoint'
+    | 'interactionPeerSecret'
   >,
 ): NodeJS.ProcessEnv {
+  const interactionPeerSecret =
+    config.interactionPeerSecret === undefined
+      ? undefined
+      : requireInteractionPeerSecret(config.interactionPeerSecret);
+  assertInteractionAuthenticationPair(config.interactionEndpoint, interactionPeerSecret);
   const output: NodeJS.ProcessEnv = {};
   const requestedInheritance = boundedStringArray(
     config.inheritEnv ?? [],
@@ -332,6 +354,9 @@ export function sanitizeBotEnvironment(
   output['DISCORD_GATEWAY_URL'] = config.gatewayUrl;
   if (config.interactionEndpoint !== undefined)
     output['DISRUNNER_INTERACTION_ENDPOINT'] = config.interactionEndpoint;
+  if (interactionPeerSecret !== undefined) {
+    output['DISRUNNER_WEBHOOK_PEER_SECRET'] = interactionPeerSecret;
+  }
   return output;
 }
 
@@ -354,6 +379,22 @@ function isTokenEnvironmentKey(key: string): boolean {
   return /(?:^|_)(?:DISCORD_)?(?:BOT_)?(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY|API_KEY)(?:$|_)/i.test(
     key,
   );
+}
+
+function requireInteractionPeerSecret(value: string): string {
+  if (!/^[a-f\d]{64}$/iu.test(value)) {
+    throw new TypeError('interactionPeerSecret must be a 32-byte hexadecimal value.');
+  }
+  return value.toLowerCase();
+}
+
+function assertInteractionAuthenticationPair(
+  interactionEndpoint: string | undefined,
+  interactionPeerSecret: string | undefined,
+): void {
+  if ((interactionEndpoint === undefined) !== (interactionPeerSecret === undefined)) {
+    throw new TypeError('interactionEndpoint and interactionPeerSecret must be supplied together.');
+  }
 }
 
 function boundedLimit(value: number, name: string, maximum: number): number {

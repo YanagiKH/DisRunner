@@ -5,7 +5,7 @@ DisRunner executes an imported local process and renders workspace-derived value
 ## Current security objectives
 
 - Supported simulator services and renderer requests stay on explicitly allowed loopback/app resources.
-- The supported raw-webhook path uses synthetic credentials and does not require a live Discord token.
+- The supported raw-webhook path uses synthetic credentials, Ed25519-authenticated requests, and per-run HMAC-authenticated responses; it does not require a live Discord token.
 - The renderer has no generic Node, shell, filesystem, or IPC bridge.
 - Project commands/paths, local messages, and process output are validated and bounded at their implemented boundaries.
 - Supported process output and CLI exports apply common secret redaction.
@@ -17,7 +17,7 @@ DisRunner executes an imported local process and renders workspace-derived value
 - Preload exposes a narrow typed project/runtime bridge rather than generic `invoke` or filesystem access.
 - Navigation, new windows, permissions, downloads, and external protocols are restricted.
 - Project/config paths are canonicalized and constrained to the selected workspace.
-- Runtime services bind loopback addresses and use synthetic authorization/signature material.
+- Runtime services bind loopback addresses and use synthetic authorization/signature material. Raw response authentication is verified on bounded bytes before HTTP status or JSON/callback handling.
 - Supported IPC/request bodies have explicit shape and size checks where implemented.
 
 v0.1 does not claim that every local HTTP/WebSocket service validates Origin/Host/path, authenticates every possible client, or enforces an idle timeout. Treat the same-user host as a trust boundary.
@@ -26,12 +26,13 @@ v0.1 does not claim that every local HTTP/WebSocket service validates Origin/Hos
 
 - The reviewed `startCommand` is parsed into an executable/arguments rather than composed with untrusted payload text in a shell command.
 - Entry point, working directory, fixtures, and executable resolution are checked against the selected project.
-- Explicit environment values are allowlisted; protected simulator variables and production-shaped tokens fail closed.
+- Explicit project environment values are bounded; credential-like names cannot override supervisor values, protected values are written last, and production-shaped token values fail closed.
+- The per-run webhook peer secret is injected only through a dedicated supervisor-owned `BotRunner` field, is required whenever an interaction endpoint is configured, and is included in child-output and supported-export redaction.
 - stdout/stderr are bounded and redacted. They are not causally correlated with every core trace span.
 - Stop/app exit attempts to terminate the registered process tree and close simulator services.
 - Opening a project does not run dependency installation scripts.
 
-The imported process still inherits the current OS user's filesystem/network/process capabilities unless an external sandbox removes them. It can ignore DisRunner environment variables, load its own `.env`, spawn children, or open direct network connections. See [Offline mode](offline-mode.md).
+The imported process still inherits the current OS user's filesystem/network/process capabilities unless an external sandbox removes them. It can read its own peer secret, ignore DisRunner environment variables, load its own `.env`, spawn children, or open direct network connections. A blind same-user port claimant can cause denial of service but cannot authenticate a response; a process able to inspect another process's environment or memory remains inside the documented same-user trust boundary. See [Offline mode](offline-mode.md).
 
 ## Data and plugin status
 

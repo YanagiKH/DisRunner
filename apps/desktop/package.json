@@ -15,7 +15,8 @@
     "test:package-smoke": "node tests/e2e/package-smoke.mjs",
     "package-and-smoke": "pnpm run package --publish never && pnpm run test:package-smoke",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && pnpm run test:runtime-manager",
+    "test:runtime-manager": "node --no-warnings=ExperimentalWarning --experimental-loader ./tests/runtime/typescript-loader.mjs --test tests/runtime/interaction-peer-auth.test.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

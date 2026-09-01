@@ -1,6 +1,12 @@
-import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { createConnection, createServer } from 'node:net';
 
+import { createWebhookPeerSecret } from './interaction-peer-auth.cjs';
+import {
+  INTERACTION_TIMEOUT_MS,
+  sendSignedInteraction,
+  WebhookPeerAuthenticationError,
+} from './interaction-transport.cjs';
 import { loadProjectConfiguration, type ResolvedProjectConfiguration } from './project-config.cjs';
 import {
   emptyRuntimeState,
@@ -19,9 +25,6 @@ const MAX_RENDERER_OUTPUT_ENTRY_BYTES = 32_768;
 const MAX_RENDERER_TRACES = 100;
 const MAX_RENDERER_RISKS = 100;
 const MAX_INTERACTION_INPUT_BYTES = 2_000;
-const MAX_INTERACTION_REQUEST_BYTES = 256 * 1_024;
-const MAX_INTERACTION_RESPONSE_BYTES = 1_048_576;
-const INTERACTION_TIMEOUT_MS = 3_000;
 
 interface BotSnapshotLike {
   readonly status: string;
@@ -64,18 +67,6 @@ interface InteractionEngineLike {
   create(input?: Readonly<Record<string, unknown>>): unknown;
   get(id: string): unknown;
   respond(id: string, responseType: string, data?: Readonly<Record<string, unknown>>): unknown;
-}
-
-interface FetchResponseLike {
-  readonly ok: boolean;
-  readonly status: number;
-  readonly headers: { get(name: string): string | null };
-  readonly body: {
-    getReader(): {
-      read(): Promise<{ readonly done: boolean; readonly value?: Uint8Array }>;
-      cancel(): Promise<unknown>;
-    };
-  } | null;
 }
 
 interface CoreApi {
@@ -127,6 +118,7 @@ export class DesktopRuntimeManager {
   #trace: TraceCollectorLike | null = null;
   #risks: RiskCollectorLike | null = null;
   #interactionPrivateKey: KeyObject | null = null;
+  #interactionPeerSecret: string | null = null;
   #interactionEndpoint: string | null = null;
   #applicationId: string | null = null;
   #interactionContext: { readonly guildId?: string; readonly channelId?: string } | null = null;
@@ -209,15 +201,21 @@ export class DesktopRuntimeManager {
         );
       }
       const sessionToken = core.createOfflineSessionToken();
-      this.#sanitizeForExport = (value: unknown) =>
-        core.sanitizeForExport(value, {
-          sensitiveValues: [sessionToken],
-        });
       const interactionCredentials =
         configuration.adapter.type === 'raw-interaction-webhook'
           ? createInteractionCredentials()
           : null;
+      const interactionPeerSecret =
+        interactionCredentials === null ? null : createWebhookPeerSecret();
+      this.#sanitizeForExport = (value: unknown) =>
+        core.sanitizeForExport(value, {
+          sensitiveValues: [
+            sessionToken,
+            ...(interactionPeerSecret === null ? [] : [interactionPeerSecret]),
+          ],
+        });
       this.#interactionPrivateKey = interactionCredentials?.privateKey ?? null;
+      this.#interactionPeerSecret = interactionPeerSecret;
 
       const profile = core.createSimulationProfile({
         seed: configuration.profile.seed,
@@ -337,6 +335,7 @@ export class DesktopRuntimeManager {
         restBaseUrl: restAddress.apiBaseUrl,
         gatewayUrl,
         ...(interactionEndpoint === undefined ? {} : { interactionEndpoint }),
+        ...(interactionPeerSecret === null ? {} : { interactionPeerSecret }),
         fakeToken: sessionToken,
       });
       if (interactionEndpoint !== undefined) {
@@ -344,7 +343,13 @@ export class DesktopRuntimeManager {
         if (interactionCredentials !== null) {
           if (this.#interactionPrivateKey === null)
             throw new Error('Interaction signing key was not retained.');
-          await verifySignedPing(interactionEndpoint, this.#interactionPrivateKey);
+          if (this.#interactionPeerSecret === null)
+            throw new Error('Interaction peer secret was not retained.');
+          await verifySignedPing(
+            interactionEndpoint,
+            this.#interactionPrivateKey,
+            this.#interactionPeerSecret,
+          );
         }
       }
       this.#trace = trace;
@@ -467,6 +472,7 @@ export class DesktopRuntimeManager {
       this.#state.phase !== 'running' ||
       this.#interactionEndpoint === null ||
       this.#interactionPrivateKey === null ||
+      this.#interactionPeerSecret === null ||
       this.#applicationId === null ||
       this.#interactionContext === null ||
       this.#interactions === null ||
@@ -530,6 +536,7 @@ export class DesktopRuntimeManager {
       const callback = await sendSignedInteraction(
         this.#interactionEndpoint,
         this.#interactionPrivateKey,
+        this.#interactionPeerSecret,
         payload,
       );
       const normalizedCallback = normalizeInteractionCallback(callback);
@@ -547,16 +554,31 @@ export class DesktopRuntimeManager {
     } catch (error) {
       if (interactionId !== null) this.#interactions.get(interactionId);
       const timedOut = isTimeoutError(error);
+      const peerAuthenticationFailed = error instanceof WebhookPeerAuthenticationError;
       this.#risks?.add({
-        ruleId: timedOut ? 'INTERACTION_TIMEOUT' : 'INVALID_INTERACTION_CALLBACK',
+        ruleId: timedOut
+          ? 'INTERACTION_TIMEOUT'
+          : peerAuthenticationFailed
+            ? 'WEBHOOK_PEER_AUTHENTICATION_FAILED'
+            : 'INVALID_INTERACTION_CALLBACK',
         severity: timedOut ? 'critical' : 'high',
         confidence: 1,
-        title: timedOut ? 'Interaction callback timed out' : 'Invalid interaction callback',
+        title: timedOut
+          ? 'Interaction callback timed out'
+          : peerAuthenticationFailed
+            ? 'Webhook peer authentication failed'
+            : 'Invalid interaction callback',
         evidence: timedOut
           ? `/${commandName} did not return a callback within ${INTERACTION_TIMEOUT_MS} ms.`
-          : `/${commandName} returned a callback that could not be accepted.`,
-        impact: 'The local interaction cannot complete with Discord-compatible behavior.',
-        recommendation: 'Return one valid callback within the interaction deadline.',
+          : peerAuthenticationFailed
+            ? `/${commandName} returned bytes without valid per-run response authentication.`
+            : `/${commandName} returned a callback that could not be accepted.`,
+        impact: peerAuthenticationFailed
+          ? 'The listener cannot be trusted as the supervised bot, so no callback evidence is accepted.'
+          : 'The local interaction cannot complete with Discord-compatible behavior.',
+        recommendation: peerAuthenticationFailed
+          ? 'Use the protected per-run webhook peer secret and authenticate the exact response bytes.'
+          : 'Return one valid callback within the interaction deadline.',
         ...(interactionId === null ? {} : { eventId: interactionId }),
       });
       if (span !== undefined) {
@@ -667,6 +689,7 @@ export class DesktopRuntimeManager {
     this.#trace = null;
     this.#risks = null;
     this.#interactionPrivateKey = null;
+    this.#interactionPeerSecret = null;
     this.#interactionEndpoint = null;
     this.#applicationId = null;
     this.#interactionContext = null;
@@ -822,73 +845,15 @@ function deriveInteractionContext(resources: readonly Readonly<Record<string, un
   };
 }
 
-async function verifySignedPing(endpoint: string, privateKey: KeyObject): Promise<void> {
-  const payload = await sendSignedInteraction(endpoint, privateKey, { type: 1 });
+async function verifySignedPing(
+  endpoint: string,
+  privateKey: KeyObject,
+  peerSecretHex: string,
+): Promise<void> {
+  const payload = await sendSignedInteraction(endpoint, privateKey, peerSecretHex, { type: 1 });
   if (!isRecord(payload) || payload['type'] !== 1) {
     throw new Error('Signed interaction PING readiness returned an invalid response.');
   }
-}
-
-async function sendSignedInteraction(
-  endpoint: string,
-  privateKey: KeyObject,
-  payload: Readonly<Record<string, unknown>>,
-): Promise<unknown> {
-  const rawBody = Buffer.from(JSON.stringify(payload), 'utf8');
-  if (rawBody.byteLength > MAX_INTERACTION_REQUEST_BYTES) {
-    throw new Error('Interaction request exceeds the configured byte limit.');
-  }
-  const timestamp = Math.floor(Date.now() / 1_000).toString();
-  const signature = sign(
-    null,
-    Buffer.concat([Buffer.from(timestamp, 'utf8'), rawBody]),
-    privateKey,
-  ).toString('hex');
-  const response = (await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-length': String(rawBody.byteLength),
-      'content-type': 'application/json',
-      'x-signature-ed25519': signature,
-      'x-signature-timestamp': timestamp,
-    },
-    body: rawBody,
-    redirect: 'error',
-    signal: AbortSignal.timeout(INTERACTION_TIMEOUT_MS),
-  })) as unknown as FetchResponseLike;
-  if (!response.ok) throw new Error(`Bot interaction endpoint returned HTTP ${response.status}.`);
-  const responseBytes = await readBoundedResponse(response, MAX_INTERACTION_RESPONSE_BYTES);
-  try {
-    return JSON.parse(responseBytes.toString('utf8')) as unknown;
-  } catch {
-    throw new Error('Bot interaction endpoint returned invalid JSON.');
-  }
-}
-
-async function readBoundedResponse(response: FetchResponseLike, maxBytes: number): Promise<Buffer> {
-  const advertised = response.headers.get('content-length');
-  if (
-    advertised !== null &&
-    (/^\d+$/u.test(advertised) === false || Number(advertised) > maxBytes)
-  ) {
-    throw new Error('Bot interaction response exceeds the configured byte limit.');
-  }
-  if (response.body === null) return Buffer.alloc(0);
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value === undefined) continue;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw new Error('Bot interaction response exceeds the configured byte limit.');
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks, total);
 }
 
 function normalizeInteractionCallback(

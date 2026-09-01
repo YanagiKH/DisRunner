@@ -28,8 +28,8 @@ DisRunner is independent software and is not affiliated with, endorsed by, or sp
 
 - **Core library:** deterministic virtual state, Snowflake-like IDs, seeded randomness, virtual time, snapshots/state hashes, interaction lifecycle rules, permission calculation, intent filtering, rate-limit primitives, a partial Gateway/REST model, traces, assertions, and a small set of risk findings.
 - **CLI:** validate and run version 1 scenario files; record and verify deterministic replays; export JSON, JUnit, HTML, and SARIF reports.
-- **Raw webhook example:** a local Node.js process that verifies signed interaction requests and returns Discord-shaped callbacks.
-- **Electron vertical slice:** validate a project config, start/stop the raw webhook process, capture bounded stdout/stderr, perform signed readiness checks, send a real local `/ping`, and render its callback result.
+- **Raw webhook example:** a local Node.js process that verifies Ed25519 interaction requests and authenticates exact Discord-shaped response bytes with a protected per-run HMAC secret.
+- **Electron vertical slice:** validate a project config, start/stop the raw webhook process, capture bounded stdout/stderr, perform mutually authenticated readiness checks, send a real local `/ping`, and verify its response before rendering the callback.
 - **Desktop visual preview:** Discord-like multi-guild/channel fixtures and concept surfaces for the Guild Editor, Command Explorer, Scenario Lab, inspector, Risk Center, and Settings.
 
 The following are **not** v0.1 compatibility claims:
@@ -98,7 +98,7 @@ Read [Installation](docs/installation.md), [Getting started](docs/getting-starte
 
 ## Offline boundary
 
-DisRunner's own supported protocol path uses loopback endpoints, synthetic credentials, and no live Discord token. The compatibility-layer network helper rejects Discord destinations and supported logs/reports are redacted.
+DisRunner's own supported protocol path uses loopback endpoints, synthetic credentials, a per-run raw-webhook response key, and no live Discord token. Ed25519 authenticates requests to the bot; HMAC-SHA-256 authenticates the HTTP status and exact response bytes back to the supervisor before JSON parsing. The compatibility-layer network helper rejects Discord destinations and supported logs/reports are redacted.
 
 This is an application-level boundary, **not an operating-system sandbox for an imported bot**. A bot, dependency, install script, native module, or child process can open its own network connection. Run untrusted code only inside the documented [hard-isolation setup](docs/offline-mode.md#hard-isolation), and never provide a production token.
 
@@ -109,7 +109,7 @@ Scenario files ──> deterministic core ──> traces, assertions, reports
                          │
                          └──────────────> CLI record/replay
 
-Electron ──> validated raw-webhook project ──> signed local /ping callback
+Electron ──> validated raw-webhook project ──> signed request + HMAC-authenticated response
     │
     └──────> Discord-like visual preview (partly synthetic)
 ```

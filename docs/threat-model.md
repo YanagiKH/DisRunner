@@ -8,7 +8,7 @@ Plugins, a workspace database, archive import/export, automatic updates, telemet
 
 - Host files and credentials accessible to the current OS user.
 - Imported bot source, dependencies, configuration, fixtures, and process availability.
-- Synthetic runtime credentials and ephemeral interaction signing keys.
+- Synthetic runtime credentials, ephemeral interaction signing keys, and per-run webhook response peer secrets.
 - In-memory virtual state, process output, traces, findings, and explicit CLI reports/recordings.
 - Release artifacts, checksums, SBOM, provenance, and repository reputation.
 
@@ -24,16 +24,16 @@ Discord is not part of the supported local `/ping` data path. Imported code can 
 
 ## Current controls and residual risk
 
-| Threat                                | Implemented v0.1 controls                                                                                                                                               | Residual risk                                                                                                         |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Real token injection/leakage          | production-shaped tokens rejected on supported configuration/injection paths; synthetic tokens; bounded redaction; repository secret scan                               | unknown secret shapes, files loaded by the bot, or direct host access can bypass these paths                          |
-| Renderer code execution or navigation | no Node integration; context isolation; Chromium sandbox; CSP/build boundary; narrow preload; sender checks; navigation/window/permission/download/request restrictions | Electron/Chromium flaws or mistakes in an allowed local origin                                                        |
-| Local-service misuse                  | explicit loopback binding; REST synthetic authorization; Gateway synthetic session token; webhook Ed25519 verification; selected body/time/capacity limits              | same-user processes can reach loopback and may learn in-process/session material                                      |
-| Path or command escape                | canonical workspace paths including symlink resolution; bounded config/fixture JSON; parsed argument arrays; restricted runtime/executable rules; no shell composition  | imported code has normal OS authority after launch                                                                    |
-| Resource exhaustion                   | selected payload, connection, bounded redaction traversal, trace/risk count and serialized-byte budgets, output, scenario, bucket, and process-stop bounds              | serialized budgets approximate payload size; same-process Proxy traps and child code can still exhaust host resources |
-| External egress                       | core loopback URL/fetch policy; Electron renderer request allowlist; loopback adapter configuration                                                                     | child code is not intercepted or OS-sandboxed; no general blocked-egress finding exists                               |
-| Evidence leakage/tampering            | supported output sanitization, stable core hashes, bounded evidence, CI checks, checksums/SBOM/provenance workflows                                                     | redaction is heuristic; runner/dependency/maintainer compromise remains possible                                      |
-| Malicious release                     | immutable-action pins, test/security/package gates, checksum/SBOM/provenance jobs                                                                                       | repository rules, environments, code signing, notarization, and account security are external prerequisites           |
+| Threat                                | Implemented v0.1 controls                                                                                                                                                                                    | Residual risk                                                                                                                 |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| Real token injection/leakage          | production-shaped tokens rejected on supported configuration/injection paths; synthetic tokens; bounded redaction; repository secret scan                                                                    | unknown secret shapes, files loaded by the bot, or direct host access can bypass these paths                                  |
+| Renderer code execution or navigation | no Node integration; context isolation; Chromium sandbox; CSP/build boundary; narrow preload; sender checks; navigation/window/permission/download/request restrictions                                      | Electron/Chromium flaws or mistakes in an allowed local origin                                                                |
+| Local-service misuse                  | explicit loopback binding; REST synthetic authorization; Gateway synthetic session token; webhook Ed25519 request verification plus per-run HMAC response authentication; selected body/time/capacity limits | a blind same-user port claimant can deny availability; a process with same-user inspection rights may obtain session material |
+| Path or command escape                | canonical workspace paths including symlink resolution; bounded config/fixture JSON; parsed argument arrays; restricted runtime/executable rules; no shell composition                                       | imported code has normal OS authority after launch                                                                            |
+| Resource exhaustion                   | selected payload, connection, bounded redaction traversal, trace/risk count and serialized-byte budgets, output, scenario, bucket, and process-stop bounds                                                   | serialized budgets approximate payload size; same-process Proxy traps and child code can still exhaust host resources         |
+| External egress                       | core loopback URL/fetch policy; Electron renderer request allowlist; loopback adapter configuration                                                                                                          | child code is not intercepted or OS-sandboxed; no general blocked-egress finding exists                                       |
+| Evidence leakage/tampering            | supported output sanitization, stable core hashes, bounded evidence, CI checks, checksums/SBOM/provenance workflows                                                                                          | redaction is heuristic; runner/dependency/maintainer compromise remains possible                                              |
+| Malicious release                     | immutable-action pins, test/security/package gates, checksum/SBOM/provenance jobs                                                                                                                            | repository rules, environments, code signing, notarization, and account security are external prerequisites                   |
 
 ## Review and test cases
 
@@ -43,6 +43,7 @@ Security tests should continue covering:
 - real-looking credentials in arguments/environment and secret-like output split across chunks;
 - non-loopback and redirected URL targets;
 - malformed, oversized, unsigned, expired, future-dated, and replayed webhook requests;
+- missing/malformed peer secrets; port claimants returning valid-looking JSON without HMAC; wrong-key, status-changed, request-changed, response-changed, and replayed response authentication;
 - wrong REST authorization, route-token disclosure, hostile Host values, and oversized bodies;
 - Gateway authentication, idle/unidentified clients, invalid payloads, and bounded sessions;
 - malicious renderer navigation/request/permission/download attempts;
@@ -53,7 +54,7 @@ These are application-boundary cases. A child that directly opens a socket or re
 
 ## Assumptions
 
-The host OS, Node/Electron runtime, and maintainer account are not already compromised. Users run only trusted code unless they add an external sandbox. Loopback is considered reachable by other local processes. CI success is evidence for the tested revision, not a guarantee that all vulnerabilities are absent.
+The host OS, Node/Electron runtime, and maintainer account are not already compromised. Users run only trusted code unless they add an external sandbox. Loopback is reachable by other local processes and is not itself identity; application-level peer authentication assumes the per-run secret is not extracted from the supervised child or main process. CI success is evidence for the tested revision, not a guarantee that all vulnerabilities are absent.
 
 ## Review triggers
 

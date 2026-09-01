@@ -186,6 +186,17 @@ async function runFullPackagedSmoke(signal) {
     );
     assert.equal(context.response?.data.content, 'Pong from package smoke bot.');
 
+    const unauthenticated = await page.evaluate(() =>
+      window.disrunnerDesktop.invokeCommand('/unauthenticated'),
+    );
+    assert.equal(unauthenticated.ok, false);
+    assert.match(unauthenticated.error ?? '', /response authentication failed/iu);
+    const wrongAuthentication = await page.evaluate(() =>
+      window.disrunnerDesktop.invokeCommand('/wrong-auth'),
+    );
+    assert.equal(wrongAuthentication.ok, false);
+    assert.match(wrongAuthentication.error ?? '', /response authentication failed/iu);
+
     const invalid = await page.evaluate(() => window.disrunnerDesktop.invokeCommand('/invalid'));
     assert.equal(invalid.ok, false);
     assert.match(invalid.error ?? '', /unsupported interaction callback/iu);
@@ -208,6 +219,10 @@ async function runFullPackagedSmoke(signal) {
     assert.ok(
       evidence.risks.some((risk) => risk.ruleId === 'INTERACTION_TIMEOUT'),
       'timeout must produce risk evidence',
+    );
+    assert.ok(
+      evidence.risks.some((risk) => risk.ruleId === 'WEBHOOK_PEER_AUTHENTICATION_FAILED'),
+      'missing or forged response authentication must produce distinct risk evidence',
     );
 
     const negativeStopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());

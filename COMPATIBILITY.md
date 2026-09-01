@@ -19,15 +19,15 @@ A workflow or package target is not by itself proof that a host is supported. Ch
 
 ## Bot integration modes
 
-| Framework/mode                | v0.1 status     | Current contract                                                                            |
-| ----------------------------- | --------------- | ------------------------------------------------------------------------------------------- |
-| Raw interaction webhook       | Desktop preview | Bundled Node example, signed PING readiness, signed local command request, `/ping` callback |
-| Generic executable            | Planned adapter | A bounded process-runner primitive exists, but there is no generic health/stdio protocol    |
-| Generic Gateway bot           | Planned adapter | Core Gateway transport is not wired as a supported imported-bot desktop adapter             |
-| `discord.js`                  | Planned         | Project validation fails closed; no compatible SDK version is declared                      |
-| `discord.py`                  | Planned         | Project validation fails closed; no compatible SDK version is declared                      |
-| Simulator SDK                 | Planned         | No public TypeScript or Python SDK package                                                  |
-| User-account/self-bot clients | Out             | Prohibited project scope                                                                    |
+| Framework/mode                | v0.1 status     | Current contract                                                                              |
+| ----------------------------- | --------------- | --------------------------------------------------------------------------------------------- |
+| Raw interaction webhook       | Desktop preview | Bundled Node example, signed requests, per-run HMAC-authenticated responses, `/ping` callback |
+| Generic executable            | Planned adapter | A bounded process-runner primitive exists, but there is no generic health/stdio protocol      |
+| Generic Gateway bot           | Planned adapter | Core Gateway transport is not wired as a supported imported-bot desktop adapter               |
+| `discord.js`                  | Planned         | Project validation fails closed; no compatible SDK version is declared                        |
+| `discord.py`                  | Planned         | Project validation fails closed; no compatible SDK version is declared                        |
+| Simulator SDK                 | Planned         | No public TypeScript or Python SDK package                                                    |
+| User-account/self-bot clients | Out             | Prohibited project scope                                                                      |
 
 The `bot.runtime` label in a raw-webhook project describes how to launch that webhook process. It does not imply framework compatibility.
 
@@ -40,7 +40,7 @@ The `bot.runtime` label in a raw-webhook project describes how to launch that we
 | Recording and deterministic replay      | Core-tested     | Versioned CLI recording envelope and verification output                           |
 | JSON/JUnit/HTML/SARIF reports           | Core-tested     | Generated from CLI scenario results; findings do not fail a run unless asserted    |
 | Interaction lifecycle                   | Core-tested     | Immediate/deferred/follow-up state and 3,000/900,000 ms virtual-time contracts     |
-| Electron raw-webhook interaction        | Desktop preview | Real local `/ping` request/callback; no complete component/modal/autocomplete UI   |
+| Electron raw-webhook interaction        | Desktop preview | Real local `/ping`; response status/body authenticated before callback validation  |
 | Permission calculation                  | Core-tested     | `BigInt` roles, overwrites, administrator and implicit channel removals            |
 | Intent filtering                        | Core-tested     | In-process requested/allowed intent behavior; desktop config intents are not wired |
 | Rate-limit engine                       | Core-tested     | Configurable programmatic buckets; not a desktop project-profile feature           |

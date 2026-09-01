@@ -15,6 +15,7 @@ v0.1 does not implement a persistent baseline, suppression editor, owner/expiry 
 | Interaction lifecycle | `DOUBLE_INTERACTION_RESPONSE`, `FOLLOWUP_BEFORE_ACK`, `EXPIRED_INTERACTION_TOKEN`, `INTERACTION_TIMEOUT` |
 | Trace analysis        | `INTERACTION_ACK_LATE`, `BLOCKING_HANDLER`                                                               |
 | Scenario helper paths | `RATE_LIMIT_HOT_BUCKET`, `MISSING_BOT_PERMISSION`, `SCENARIO_EXPECTATION_MISMATCH`                       |
+| Electron raw webhook  | `WEBHOOK_PEER_AUTHENTICATION_FAILED`, `INVALID_INTERACTION_CALLBACK`, `INTERACTION_TIMEOUT`              |
 
 Rules listed elsewhere as design ideas—such as event-loop lag, memory growth, reconnect handling, unsafe mentions, unexpected outbound network, PII retention, or source-code injection findings—are not implemented merely because the underlying domain has a validator or exception.
 

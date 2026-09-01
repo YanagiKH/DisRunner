@@ -2,6 +2,12 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
+import {
+  requireWebhookPeerSecret,
+  signWebhookResponseAuthentication,
+  WEBHOOK_RESPONSE_AUTH_HEADER,
+} from './peer-auth.mjs';
+
 const DEFAULT_LIMITS = Object.freeze({
   maxBodyBytes: 1_048_576,
   requestTimeoutMs: 5_000,
@@ -20,11 +26,13 @@ export function loadServerOptionsFromEnvironment(environment = process.env) {
   }
 
   const publicKeyHex = requirePublicKey(environment.DISRUNNER_PUBLIC_KEY);
+  const peerSecretHex = requireWebhookPeerSecret(environment.DISRUNNER_WEBHOOK_PEER_SECRET);
   const host = requireLoopbackHost(environment.DISRUNNER_BOT_HOST ?? '127.0.0.1');
   return {
     host,
     port: readInteger(environment.DISRUNNER_BOT_PORT, 'DISRUNNER_BOT_PORT', 39_001, 0, 65_535),
     publicKeyHex,
+    peerSecretHex,
     maxBodyBytes: readInteger(
       environment.DISRUNNER_MAX_BODY_BYTES,
       'DISRUNNER_MAX_BODY_BYTES',
@@ -194,14 +202,21 @@ export function createWebhookServer(options) {
           return;
         }
 
+        const sendAuthenticated = (status, body) =>
+          sendJson(response, status, body, {
+            peerSecretHex: settings.peerSecretHex,
+            timestamp: signatureResult.timestamp,
+            requestBody: rawBody,
+          });
+
         let interaction;
         try {
           interaction = JSON.parse(rawBody.toString('utf8'));
         } catch {
-          sendJson(response, 400, { code: 50035, message: 'Invalid Form Body' });
+          sendAuthenticated(400, { code: 50035, message: 'Invalid Form Body' });
           return;
         }
-        handleInteraction(response, interaction);
+        handleInteraction(sendAuthenticated, interaction);
       });
     },
   );
@@ -224,6 +239,7 @@ function normalizeServerOptions(options) {
   }
   return {
     publicKeyHex: requirePublicKey(options.publicKeyHex),
+    peerSecretHex: requireWebhookPeerSecret(options.peerSecretHex),
     maxBodyBytes: requireInteger(options.maxBodyBytes, 'maxBodyBytes', 1),
     requestTimeoutMs: requireInteger(options.requestTimeoutMs, 'requestTimeoutMs', 1),
     maxSignatureAgeMs: requireInteger(options.maxSignatureAgeMs, 'maxSignatureAgeMs', 1),
@@ -292,7 +308,7 @@ function authenticateRequest(headers, rawBody, publicKey, settings, replayCache)
     replayCache.delete(oldest);
   }
   replayCache.set(replayKey, Math.max(nowMs, signedAtMs) + settings.maxSignatureAgeMs);
-  return { ok: true };
+  return { ok: true, timestamp };
 }
 
 function pruneReplayCache(replayCache, nowMs) {
@@ -301,30 +317,30 @@ function pruneReplayCache(replayCache, nowMs) {
   }
 }
 
-function handleInteraction(response, interaction) {
+function handleInteraction(send, interaction) {
   if (typeof interaction !== 'object' || interaction === null || Array.isArray(interaction)) {
-    sendJson(response, 400, { code: 50035, message: 'Invalid Form Body' });
+    send(400, { code: 50035, message: 'Invalid Form Body' });
     return;
   }
   if (interaction.type === 1) {
-    sendJson(response, 200, { type: 1 });
+    send(200, { type: 1 });
     return;
   }
   const name = interaction.data?.name;
   if (name === 'ping') {
-    sendJson(response, 200, {
+    send(200, {
       type: 4,
       data: { content: 'Pong! Offline and deterministic.' },
     });
   } else if (name === 'secret') {
-    sendJson(response, 200, {
+    send(200, {
       type: 4,
       data: { content: 'Only you can see this.', flags: 64 },
     });
   } else if (name === 'slow') {
-    sendJson(response, 200, { type: 5 });
+    send(200, { type: 5 });
   } else if (interaction.type === 3 && interaction.data?.custom_id === 'open-debug-modal') {
-    sendJson(response, 200, {
+    send(200, {
       type: 9,
       data: {
         custom_id: 'debug-modal',
@@ -346,22 +362,30 @@ function handleInteraction(response, interaction) {
       },
     });
   } else {
-    sendJson(response, 200, {
+    send(200, {
       type: 4,
       data: { content: `Unknown local command: ${String(name ?? 'interaction')}` },
     });
   }
 }
 
-function sendJson(response, status, body) {
+function sendJson(response, status, body, authentication) {
   if (response.writableEnded) return;
   const contents = Buffer.from(JSON.stringify(body), 'utf8');
-  response.writeHead(status, {
+  const headers = {
     'cache-control': 'no-store',
     'content-length': String(contents.length),
     'content-type': 'application/json; charset=utf-8',
     'x-content-type-options': 'nosniff',
-  });
+  };
+  if (authentication !== undefined) {
+    headers[WEBHOOK_RESPONSE_AUTH_HEADER] = signWebhookResponseAuthentication({
+      ...authentication,
+      status,
+      responseBody: contents,
+    });
+  }
+  response.writeHead(status, headers);
   response.end(contents);
 }
 

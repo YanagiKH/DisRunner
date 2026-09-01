@@ -1,13 +1,18 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
 import { after, before, test } from 'node:test';
 
+import {
+  signWebhookResponseAuthentication,
+  WEBHOOK_RESPONSE_AUTH_HEADER,
+} from '../src/peer-auth.mjs';
 import { createWebhookServer, loadServerOptionsFromEnvironment } from '../src/server.mjs';
 import { sendSignedInteraction, signDiscordRequest } from '../src/signed-client.mjs';
 
 const FIXED_NOW_MS = Date.parse('2026-09-01T00:00:00.000Z');
+const PEER_SECRET_HEX = '10'.repeat(32);
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const publicKeyHex = publicKey
   .export({ format: 'der', type: 'spki' })
@@ -36,8 +41,32 @@ after(async () => {
 
 test('startup fails closed when the public key is missing', () => {
   assert.throws(
-    () => loadServerOptionsFromEnvironment({ DISRUNNER_OFFLINE: '1' }),
+    () =>
+      loadServerOptionsFromEnvironment({
+        DISRUNNER_OFFLINE: '1',
+        DISRUNNER_WEBHOOK_PEER_SECRET: PEER_SECRET_HEX,
+      }),
     /DISRUNNER_PUBLIC_KEY/,
+  );
+});
+
+test('startup fails closed when the response peer secret is missing or malformed', () => {
+  assert.throws(
+    () =>
+      loadServerOptionsFromEnvironment({
+        DISRUNNER_OFFLINE: '1',
+        DISRUNNER_PUBLIC_KEY: publicKeyHex,
+      }),
+    /DISRUNNER_WEBHOOK_PEER_SECRET/,
+  );
+  assert.throws(
+    () =>
+      loadServerOptionsFromEnvironment({
+        DISRUNNER_OFFLINE: '1',
+        DISRUNNER_PUBLIC_KEY: publicKeyHex,
+        DISRUNNER_WEBHOOK_PEER_SECRET: 'not-a-secret',
+      }),
+    /DISRUNNER_WEBHOOK_PEER_SECRET/,
   );
 });
 
@@ -54,6 +83,7 @@ test('startup rejects a non-loopback bind host', () => {
       loadServerOptionsFromEnvironment({
         DISRUNNER_OFFLINE: '1',
         DISRUNNER_PUBLIC_KEY: publicKeyHex,
+        DISRUNNER_WEBHOOK_PEER_SECRET: PEER_SECRET_HEX,
         DISRUNNER_BOT_HOST: '0.0.0.0',
       }),
     /loopback address/,
@@ -84,6 +114,7 @@ test('accepts a genuine Ed25519-signed ping interaction', async () => {
   const response = await sendSignedInteraction({
     url: baseUrl,
     privateKey,
+    peerSecretHex: PEER_SECRET_HEX,
     timestamp: Math.floor(FIXED_NOW_MS / 1_000),
     interaction: { id: '1', type: 2, data: { name: 'ping' } },
   });
@@ -93,6 +124,26 @@ test('accepts a genuine Ed25519-signed ping interaction', async () => {
     data: { content: 'Pong! Offline and deterministic.' },
   });
   assert.equal(response.headers['cache-control'], 'no-store');
+  assert.match(response.headers[WEBHOOK_RESPONSE_AUTH_HEADER], /^[a-f\d]{64}$/u);
+});
+
+test('client rejects missing, wrong, and body-mismatched response authentication', async () => {
+  await assert.rejects(sendToForgedServer('missing'), /response authentication failed/iu);
+  await assert.rejects(sendToForgedServer('wrong'), /response authentication failed/iu);
+  await assert.rejects(sendToForgedServer('tampered'), /response authentication failed/iu);
+});
+
+test('matches the desktop canonical response-authentication vector', () => {
+  assert.equal(
+    signWebhookResponseAuthentication({
+      peerSecretHex: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+      timestamp: '1788230400',
+      status: 200,
+      requestBody: Buffer.from([1, 2, 3]),
+      responseBody: Buffer.from([4, 5, 6]),
+    }),
+    'b499b4ad675524b89aadecf1d2887531bd0fe8ebf725267f1b6228f72e401d61',
+  );
 });
 
 test('rejects an invalid signature', async () => {
@@ -137,6 +188,7 @@ test('rejects replayed valid signatures', async () => {
   const first = await post(rawBody, headers);
   const second = await post(rawBody, headers);
   assert.equal(first.status, 200);
+  assert.match(first.headers[WEBHOOK_RESPONSE_AUTH_HEADER], /^[a-f\d]{64}$/u);
   assert.equal(second.status, 409);
   assert.equal(second.body.message, 'Replayed request signature');
 });
@@ -178,6 +230,7 @@ test('applies connection and per-socket request limits', () => {
 function serverOptions(overrides = {}) {
   return {
     publicKeyHex,
+    peerSecretHex: PEER_SECRET_HEX,
     maxBodyBytes: 256,
     requestTimeoutMs: 1_000,
     maxSignatureAgeMs: 300_000,
@@ -190,6 +243,54 @@ function serverOptions(overrides = {}) {
     now: () => FIXED_NOW_MS,
     ...overrides,
   };
+}
+
+async function sendToForgedServer(mode) {
+  const forgedServer = createServer((inbound, response) => {
+    const requestChunks = [];
+    inbound.on('data', (chunk) => requestChunks.push(chunk));
+    inbound.on('end', () => {
+      const requestBody = Buffer.concat(requestChunks);
+      const timestamp = inbound.headers['x-signature-timestamp'];
+      const genuineBody = Buffer.from('{"type":1}', 'utf8');
+      const transmittedBody =
+        mode === 'tampered' ? Buffer.from('{"type":4,"data":{}}', 'utf8') : genuineBody;
+      const headers = {
+        'content-length': String(transmittedBody.byteLength),
+        'content-type': 'application/json',
+      };
+      if (mode === 'wrong') headers[WEBHOOK_RESPONSE_AUTH_HEADER] = '00'.repeat(32);
+      if (mode === 'tampered' && typeof timestamp === 'string') {
+        headers[WEBHOOK_RESPONSE_AUTH_HEADER] = signWebhookResponseAuthentication({
+          peerSecretHex: PEER_SECRET_HEX,
+          timestamp,
+          status: 200,
+          requestBody,
+          responseBody: genuineBody,
+        });
+      }
+      response.writeHead(200, headers);
+      response.end(transmittedBody);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    forgedServer.once('error', reject);
+    forgedServer.listen(0, '127.0.0.1', resolve);
+  });
+  try {
+    const address = forgedServer.address();
+    assert.notEqual(address, null);
+    assert.equal(typeof address, 'object');
+    return await sendSignedInteraction({
+      url: `http://127.0.0.1:${String(address.port)}`,
+      privateKey,
+      peerSecretHex: PEER_SECRET_HEX,
+      timestamp: Math.floor(FIXED_NOW_MS / 1_000),
+      interaction: { id: 'forged', type: 1 },
+    });
+  } finally {
+    await new Promise((resolve) => forgedServer.close(resolve));
+  }
 }
 
 function post(rawBody, extraHeaders = {}) {

@@ -1,6 +1,6 @@
 # Architecture
 
-DisRunner v0.1 is a Preview with three deliberately different surfaces. The deterministic core and CLI are the broadest tested surface. Electron connects a raw interaction-webhook project for one real signed command path. Most Discord-like desktop editors and panels use seeded display data.
+DisRunner v0.1 is a Preview with three deliberately different surfaces. The deterministic core and CLI are the broadest tested surface. Electron connects a raw interaction-webhook project for one real mutually authenticated command path. Most Discord-like desktop editors and panels use seeded display data.
 
 ## Shipped boundaries
 
@@ -19,7 +19,8 @@ Electron renderer ── narrow IPC ── desktop runtime manager
                                       │
                                       ├─ validated project + BotRunner
                                       ├─ loopback REST/Gateway services
-                                      └─ signed HTTP /ping ──► raw webhook bot
+                                      └─ Ed25519 request ───► raw webhook bot
+                                         ◄── response HMAC ──┘
 ```
 
 The core classes can be composed in tests or the CLI. Their existence does not make every combination a supported imported-bot adapter.
@@ -30,13 +31,13 @@ The core provides deterministic primitives and partial Discord-shaped protocol b
 
 ### Electron runtime
 
-The desktop runtime validates a selected version 1 project, starts its declared process, and creates loopback REST and Gateway services with a per-run synthetic token. For the only supported adapter, `raw-interaction-webhook`, it also creates an ephemeral Ed25519 key pair, verifies signed PING readiness, and sends a real signed application-command request. The bot's initial callback is validated through the core interaction lifecycle and returned to the renderer.
+The desktop runtime validates a selected version 1 project, starts its declared process, and creates loopback REST and Gateway services with a per-run synthetic token. For the only supported adapter, `raw-interaction-webhook`, it also creates an ephemeral Ed25519 key pair and an independent 32-byte peer secret. The child verifies signed requests. Every accepted response HMAC-binds the request timestamp, HTTP status, request digest, and exact response digest; Electron verifies that HMAC on bounded raw bytes before checking status, parsing JSON, or validating the callback through the core interaction lifecycle.
 
 Electron does not currently provide a supported generic Gateway, `discord.js`, `discord.py`, or stdio adapter. The local REST/Gateway services are real core services, but desktop fixture-to-event synchronization, permission enforcement on REST routes, REST-mutation Gateway dispatch, and deferred follow-up observation are not wired in v0.1.
 
 ### Renderer
 
-The renderer has a narrow preload bridge for project selection, runtime start/stop, command invocation, and window controls. Runtime status, bounded process output, the real signed command result, and associated runtime trace/risk entries come from Electron.
+The renderer has a narrow preload bridge for project selection, runtime start/stop, command invocation, and window controls. Runtime status, bounded process output, the real mutually authenticated command result, and associated runtime trace/risk entries come from Electron.
 
 Guilds, channels, members, command/scenario editors, most inspector values, the virtual-clock control, and much of Risk Center are seeded visual previews. Their edits are not persisted and do not drive the CLI/core scenario runner.
 
@@ -57,12 +58,13 @@ v0.1 has no workspace database, migration system, automatic fixture persistence,
 3. Supported resource mutations, interaction transitions, rate-limit decisions, or Gateway helper events are recorded.
 4. Assertions are evaluated and the final state hash, spans, findings, and events become report data.
 
-### Electron signed command
+### Electron mutually authenticated command
 
 1. The user invokes a validated `/name` command while a raw-webhook project is running.
 2. Electron creates a core interaction and signs the Discord-shaped HTTP body with the per-run private key.
-3. The imported loopback endpoint verifies the request and returns one callback.
-4. Electron validates that callback through `InteractionEngine`, records bounded evidence, and renders the result.
+3. The imported loopback endpoint verifies the request, serializes one bounded response, and authenticates its exact status/body with the protected per-run peer secret.
+4. Electron reads a bounded response, timing-safely verifies its HMAC, then checks HTTP status and parses JSON.
+5. Electron validates the authenticated callback through `InteractionEngine`, records bounded evidence, and renders the result.
 
 This path does not currently wait for a deferred edit/follow-up, mutate the displayed seeded guild state, or generate a complete end-to-end Gateway/REST waterfall.
 
@@ -70,7 +72,7 @@ This path does not currently wait for a deferred edit/follow-up, mutate the disp
 
 - **Renderer:** Node integration is disabled; context isolation and Chromium sandboxing are enabled. Navigation, permissions, downloads, and requests are restricted to app resources and active loopback origins.
 - **IPC:** only the typed preload methods are exposed, and main-process handlers verify the sender.
-- **Local services:** current REST/Gateway/webhook endpoints bind explicit loopback addresses and use synthetic authentication or request signatures at their implemented boundaries.
+- **Local services:** current REST/Gateway/webhook endpoints bind explicit loopback addresses and use synthetic credentials. Raw-webhook requests use Ed25519 and accepted responses use a separate per-run HMAC. A same-user process can still race the released dynamic port and deny availability, but a listener without the peer secret cannot pass readiness or command-response authentication.
 - **Imported process:** it runs with the current OS user's authority. DisRunner validates configuration, paths, and injected environment values, but it is not an OS sandbox.
 - **Plugins:** no public plugin SDK or plugin sandbox ships in v0.1.
 - **Release:** workflows can produce checksums, an SBOM, and GitHub provenance; repository rules, signing, and notarization remain release-time prerequisites.

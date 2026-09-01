@@ -39,7 +39,7 @@ DisRunner v0.1 is a Preview testing foundation, not Discord and not proof that p
 
 - Offline controls cover supported DisRunner paths and the Electron renderer; they do not sandbox arbitrary bot/plugin/dependency/child-process code.
 - A selected bot can independently access the filesystem, network, native modules, subprocesses, and credentials available to the current OS user.
-- A same-user local compromise can observe or interfere with loopback traffic and process state.
+- A blind same-user process can race the released bot-owned dynamic port and deny startup, but cannot produce an accepted PING/command response without the per-run peer secret. A same-user compromise able to inspect process environment/memory, inject code, or control the child can still observe or interfere with loopback traffic and process state.
 - Signing/checksums/provenance establish specific artifact facts; they do not prove absence of vulnerabilities.
 
 Use a disposable VM/container or OS firewall/sandbox for untrusted code. Never provide a production bot token.

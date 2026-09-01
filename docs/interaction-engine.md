@@ -35,7 +35,7 @@ Core/CLI scenarios evaluate this using virtual time. Electron's raw-webhook invo
 
 ## Raw webhook path
 
-The bundled example receives a signed local HTTP request and verifies the raw body, Ed25519 signature, timestamp freshness, replay, and body size. Electron performs a signed PING readiness request and can send a real local command payload. The v0.1 acceptance behavior is `/ping`.
+The bundled example receives a signed local HTTP request and verifies the raw body, Ed25519 signature, timestamp freshness, replay, and body size. A separate protected 32-byte secret authenticates each accepted HTTP response back to Electron. The HMAC covers a versioned domain, the request timestamp, HTTP status, request digest, and exact response digest; Electron verifies it on bounded bytes before status checks, JSON parsing, or callback validation. Electron uses this mutually authenticated transport for PING readiness and real local command payloads. The v0.1 acceptance behavior is `/ping`.
 
 This does not imply that Gateway-delivered interactions and REST callbacks are connected end to end in the desktop, or that user/message commands, autocomplete, components, and modal submissions can be composed from the UI.
 

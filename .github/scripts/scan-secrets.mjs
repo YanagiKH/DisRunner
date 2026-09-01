@@ -17,10 +17,11 @@ const patterns = [
   [
     'Discord token',
     /\b(?:mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{20,30}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{20,})\b/gu,
+    isProductionShapedDiscordToken,
   ],
   [
     'secret assignment',
-    /\b(?:DISCORD_TOKEN|BOT_TOKEN|API_KEY|CLIENT_SECRET|PRIVATE_KEY|PASSWORD)\s*=\s*["']?[A-Za-z0-9._~+/=-]{8,}/giu,
+    /\b(?:DISCORD_TOKEN|BOT_TOKEN|API_KEY|CLIENT_SECRET|PRIVATE_KEY|PASSWORD)\s*=\s*["']?[A-Za-z0-9._~+/=-]{8,}/gu,
   ],
   ['private key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----/gu],
   ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{36,}\b/gu],
@@ -130,11 +131,43 @@ async function scanFile(file) {
   let tail = '';
   for await (const chunk of createReadStream(file, { highWaterMark: 1024 * 1024 })) {
     const text = tail + chunk.toString('latin1');
-    for (const [label, pattern] of patterns) {
+    for (const [label, pattern, validateCandidate] of patterns) {
       pattern.lastIndex = 0;
-      if (pattern.test(text)) labels.add(label);
+      for (const match of text.matchAll(pattern)) {
+        if (!validateCandidate || validateCandidate(match[0])) {
+          labels.add(label);
+          break;
+        }
+      }
     }
     tail = text.slice(-OVERLAP_CHARACTERS);
   }
   return [...labels].sort();
+}
+
+function isProductionShapedDiscordToken(candidate) {
+  if (candidate.startsWith('mfa.')) return true;
+
+  const [snowflakeSegment, timestampSegment, signatureSegment, ...unexpected] =
+    candidate.split('.');
+  if (
+    unexpected.length > 0 ||
+    !snowflakeSegment ||
+    !timestampSegment ||
+    !signatureSegment ||
+    signatureSegment.length < 20
+  ) {
+    return false;
+  }
+
+  const snowflakeBytes = Buffer.from(snowflakeSegment, 'base64url');
+  const timestampBytes = Buffer.from(timestampSegment, 'base64url');
+  const snowflake = snowflakeBytes.toString('ascii');
+
+  return (
+    /^[0-9]{17,20}$/u.test(snowflake) &&
+    snowflakeBytes.toString('base64url') === snowflakeSegment &&
+    timestampBytes.byteLength === 4 &&
+    timestampBytes.toString('base64url') === timestampSegment
+  );
 }

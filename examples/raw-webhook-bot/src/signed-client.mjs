@@ -1,6 +1,12 @@
 import { sign } from 'node:crypto';
 import { request } from 'node:http';
 
+import {
+  requireWebhookPeerSecret,
+  verifyWebhookResponseAuthentication,
+  WEBHOOK_RESPONSE_AUTH_HEADER,
+} from './peer-auth.mjs';
+
 export function signDiscordRequest(privateKey, body, timestamp = currentUnixSeconds()) {
   const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body, 'utf8');
   const normalizedTimestamp = String(timestamp);
@@ -18,11 +24,13 @@ export function signDiscordRequest(privateKey, body, timestamp = currentUnixSeco
 export async function sendSignedInteraction({
   url,
   privateKey,
+  peerSecretHex,
   interaction,
   timestamp = currentUnixSeconds(),
 }) {
   const rawBody = Buffer.from(JSON.stringify(interaction), 'utf8');
   const signed = signDiscordRequest(privateKey, rawBody, timestamp);
+  const normalizedPeerSecret = requireWebhookPeerSecret(peerSecretHex);
   const target = new URL('/interactions', url);
 
   return new Promise((resolve, reject) => {
@@ -41,7 +49,24 @@ export async function sendSignedInteraction({
         const chunks = [];
         response.on('data', (chunk) => chunks.push(chunk));
         response.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
+          const rawResponse = Buffer.concat(chunks);
+          const responseAuthentication = response.headers[WEBHOOK_RESPONSE_AUTH_HEADER];
+          if (
+            !verifyWebhookResponseAuthentication(
+              typeof responseAuthentication === 'string' ? responseAuthentication : undefined,
+              {
+                peerSecretHex: normalizedPeerSecret,
+                timestamp: signed.timestamp,
+                status: response.statusCode ?? 0,
+                requestBody: signed.rawBody,
+                responseBody: rawResponse,
+              },
+            )
+          ) {
+            reject(new Error('Webhook response authentication failed.'));
+            return;
+          }
+          const text = rawResponse.toString('utf8');
           let body;
           try {
             body = JSON.parse(text);

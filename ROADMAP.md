@@ -10,7 +10,7 @@ Implemented scope:
 - core interaction lifecycle plus selected permission, intent, rate-limit, Gateway, REST, protocol-limit, trace, assertion, and risk behavior;
 - CLI validate/run/test, versioned record/replay, and JSON/JUnit/HTML/SARIF output;
 - signed raw-interaction-webhook example;
-- Electron project validation/process lifecycle and a real signed local `/ping` path;
+- Electron project validation/process lifecycle and a real mutually authenticated local `/ping` path;
 - Discord-like desktop visual fixtures and preview feature surfaces.
 
 Known exit gaps for a broader usable preview:

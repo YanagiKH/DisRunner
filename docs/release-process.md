@@ -32,7 +32,7 @@ The mirror remains a distribution convenience. Canonical issues, source tag, wor
 7. Required signing/notarization credentials and repository environment protections are configured before claiming signed official packages.
 8. Release artifacts are bounded, secret-scanned, and contain no private test data.
 
-The macOS/Linux package smoke executes the packaged renderer, preload bridge, local bot runtime, signed interactions, failure evidence, and close cleanup. The Windows package smoke validates launch, packaged Electron identity, ASAR presence, stability, and process-tree cleanup; it does not execute the packaged renderer/runtime because Electron's Windows CDP path can deadlock. A green Windows package job must therefore be read together with the separate Windows renderer E2E, runtime-manager, raw-webhook, and security jobs.
+The macOS/Linux package smoke executes the packaged renderer, preload bridge, local bot runtime, Ed25519-signed requests, HMAC-authenticated responses, forged-response rejection, callback failure evidence, and close cleanup. The Windows package smoke validates launch, packaged Electron identity, ASAR presence, stability, and process-tree cleanup; it does not execute the packaged renderer/runtime because Electron's Windows CDP path can deadlock. A green Windows package job must therefore be read together with the separate cross-platform renderer E2E, runtime-manager signed-transport/forged-listener, raw-webhook loopback, and security jobs.
 
 Branch rules, tag rules, environment reviewers, GitHub immutable-release settings, and signing credentials live in repository settings. Naming an environment in YAML does not prove those protections exist; maintainers must verify them separately.
 

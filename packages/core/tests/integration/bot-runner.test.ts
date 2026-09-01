@@ -10,18 +10,21 @@ describe('BotRunner', () => {
   it('starts without a real token, captures redacted output, and observes exit', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'disrunner-core-test-'));
     const runner = new BotRunner();
+    const interactionPeerSecret = 'cd'.repeat(32);
     try {
       await runner.start({
         executable: process.execPath,
         args: [
           '-e',
-          'console.log(`Authorization: Bot real-looking-secret-123456789`); console.log(process.env.DISRUNNER_OFFLINE)',
+          'console.log(`Authorization: Bot real-looking-secret-123456789`); console.log(process.env.DISRUNNER_OFFLINE); console.log(`peer=${process.env.DISRUNNER_WEBHOOK_PEER_SECRET}`)',
         ],
         cwd: directory,
         workspaceRoot: directory,
         env: { BOT_TOKEN: 'must-not-leak', UNRELATED: 'kept' },
         restBaseUrl: 'http://127.0.0.1:1/api/v10',
         gatewayUrl: 'ws://127.0.0.1:2/gateway',
+        interactionEndpoint: 'http://127.0.0.1:3/interactions',
+        interactionPeerSecret,
       });
       await waitUntil(
         () => runner.snapshot().status !== 'running' && runner.snapshot().status !== 'starting',
@@ -32,6 +35,8 @@ describe('BotRunner', () => {
       expect(output).toContain('Bot [REDACTED]');
       expect(output).not.toContain('real-looking-secret');
       expect(output).toContain('1');
+      expect(output).toContain('peer=[REDACTED]');
+      expect(output).not.toContain(interactionPeerSecret);
     } finally {
       await runner.stop(100);
       await rm(directory, { recursive: true, force: true });

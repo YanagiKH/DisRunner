@@ -18,8 +18,10 @@ These URL/fetch helpers protect only callers that use them. They do not intercep
 
 - The packaged renderer loads only app files and exact active loopback origins; navigation, new windows, permissions, downloads, and other renderer requests are denied.
 - Project configuration accepts only explicit loopback adapter URL templates and `profile.networkPolicy: "offline"`.
-- The desktop runtime injects synthetic REST/Gateway credentials and an ephemeral Ed25519 public key, not a Discord bot token.
-- The bundled raw-webhook example binds loopback, fails closed without offline mode/key material, verifies `timestamp + raw body` signatures, and limits request size, age, replay, connections, and socket reuse.
+- The desktop runtime injects synthetic REST/Gateway credentials, an ephemeral Ed25519 public key, and a separate protected per-run webhook peer secret—not a Discord bot token.
+- The bundled raw-webhook example binds loopback, fails closed without offline mode/key material, verifies `timestamp + raw body` request signatures, and HMAC-authenticates every accepted PING/command response.
+- Electron reads the bounded raw response, verifies HMAC-SHA-256 over the versioned domain, timestamp, HTTP status, request digest, and response digest with `timingSafeEqual`, and only then checks status or parses JSON.
+- Request body, age, replay, connection, socket-reuse, header, and response-body limits remain enforced independently of peer authentication.
 
 The current application does not turn denied renderer requests into the general risk finding promised by the product roadmap. The Settings “Audit blocked requests” control is a visual preview, not a shipped audit log.
 
@@ -33,13 +35,14 @@ The child still runs with the current OS user's filesystem, network, and process
 
 ## Test evidence
 
-Current automated coverage checks core URL policy, redirect revalidation, synthetic-token handling, local-service constraints, redaction boundaries, the raw webhook's signed-request controls, and packaged Electron renderer request blocking on macOS/Linux. The Windows package smoke is intentionally narrower: because Electron's Windows CDP connection can deadlock, it validates the real executable, packaged identity, ASAR presence, stability, and process-tree cleanup; it does not execute the packaged renderer or runtime. Separate Windows renderer E2E, runtime-manager, webhook, and security suites cover those layers before packaging. No target runs a cross-platform OS-level egress canary for the imported process.
+Current automated coverage checks core URL policy, redirect revalidation, synthetic-token handling, local-service constraints, redaction boundaries, raw-webhook request/response authentication, fixed cross-implementation HMAC vectors, forged/missing/tampered responses, and packaged Electron renderer request blocking on macOS/Linux. The cross-platform desktop runtime-manager suite drives the real signed transport against local valid and forged listeners; the raw-webhook suite exercises the server and independent client over loopback; macOS/Linux package smoke exercises authenticated PING and command callbacks plus forged-response rejection. The Windows package smoke is intentionally narrower: because Electron's Windows CDP connection can deadlock, it validates the real executable, packaged identity, ASAR presence, stability, and process-tree cleanup without executing the packaged renderer/runtime. Windows renderer E2E, runtime-manager, raw-webhook, and security suites cover those layers before packaging. No target runs a cross-platform OS-level egress canary for the imported process.
 
 Run the applicable suites:
 
 ```bash
 pnpm run test:offline
 pnpm run test:security
+pnpm --filter @disrunner/desktop run test:runtime-manager
 pnpm run test:raw-webhook
 pnpm run test:e2e
 ```

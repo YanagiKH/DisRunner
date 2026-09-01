@@ -54,6 +54,44 @@ test('fails closed when a symlink resolves outside its canonical scan root', asy
   assert.doesNotMatch(result.stdout, /Credential scan passed/u);
 });
 
+test('rejects production-shaped Discord tokens and uppercase secret assignments', async (context) => {
+  const workspace = await createWorkspace(context);
+  const scanRoot = path.join(workspace, 'scan-root');
+  await mkdir(scanRoot, { recursive: true });
+
+  const snowflakeSegment = Buffer.from('123456789012345678', 'ascii').toString('base64url');
+  const timestampSegment = Buffer.from([0, 0, 0, 1]).toString('base64url');
+  const syntheticToken = `${snowflakeSegment}.${timestampSegment}.${'x'.repeat(24)}`;
+  const syntheticAssignment = `PASSWORD=${'y'.repeat(24)}`;
+  await writeFile(
+    path.join(scanRoot, 'credentials.txt'),
+    `${syntheticToken}\n${syntheticAssignment}\n`,
+    'utf8',
+  );
+
+  const result = runScanner(scanRoot);
+  assert.notEqual(result.status, 0, diagnostic(result));
+  assert.match(result.stderr, /\[Discord token, secret assignment\]/u);
+  assert.equal(result.stderr.includes(syntheticToken), false);
+  assert.equal(result.stderr.includes(syntheticAssignment), false);
+});
+
+test('accepts non-semantic token-shaped binary runs and lowercase property assignments', async (context) => {
+  const workspace = await createWorkspace(context);
+  const scanRoot = path.join(workspace, 'scan-root');
+  await mkdir(scanRoot, { recursive: true });
+
+  const randomBinaryRun = `${'a'.repeat(21)}.${'b'.repeat(6)}.${'c'.repeat(23)}`;
+  await writeFile(
+    path.join(scanRoot, 'native-binary-fixture.bin'),
+    Buffer.from(`\0${randomBinaryRun}\0password=ordinaryIdentifier\0`, 'latin1'),
+  );
+
+  const result = runScanner(scanRoot);
+  assert.equal(result.status, 0, diagnostic(result));
+  assert.match(result.stdout, /Credential scan passed:/u);
+});
+
 function runScanner(root) {
   return spawnSync(process.execPath, [scanner, root], {
     cwd: path.dirname(scanner),

@@ -74,5 +74,41 @@ describe('offline network policy', () => {
         },
       ),
     ).toThrow(/Discord credential/);
+
+    const peerSecret = 'ab'.repeat(32);
+    const protectedEnvironment = sanitizeBotEnvironment(
+      {},
+      {
+        env: { DISRUNNER_WEBHOOK_PEER_SECRET: 'project-controlled-value' },
+        restBaseUrl: 'http://127.0.0.1:1/api/v10',
+        gatewayUrl: 'ws://127.0.0.1:2',
+        interactionEndpoint: 'http://127.0.0.1:3/interactions',
+        interactionPeerSecret: peerSecret,
+      },
+    );
+    expect(protectedEnvironment['DISRUNNER_WEBHOOK_PEER_SECRET']).toBe(peerSecret);
+    expect(JSON.stringify(protectedEnvironment)).not.toContain('project-controlled-value');
+
+    expect(() =>
+      sanitizeBotEnvironment(
+        {},
+        {
+          restBaseUrl: 'http://127.0.0.1:1/api/v10',
+          gatewayUrl: 'ws://127.0.0.1:2',
+          interactionEndpoint: 'http://127.0.0.1:3/interactions',
+        },
+      ),
+    ).toThrow(/must be supplied together/u);
+    expect(() =>
+      sanitizeBotEnvironment(
+        {},
+        {
+          restBaseUrl: 'http://127.0.0.1:1/api/v10',
+          gatewayUrl: 'ws://127.0.0.1:2',
+          interactionEndpoint: 'http://127.0.0.1:3/interactions',
+          interactionPeerSecret: 'not-hex',
+        },
+      ),
+    ).toThrow(/32-byte hexadecimal/u);
   });
 });

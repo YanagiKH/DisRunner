@@ -130,6 +130,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - name: Runtime-manager peer authentication tests
+        run: pnpm --filter @disrunner/desktop run test:runtime-manager
       - name: Install Linux browser dependencies
         if: runner.os == 'Linux'
         run: pnpm --filter @disrunner/desktop exec playwright install-deps chromium

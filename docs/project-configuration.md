@@ -48,7 +48,7 @@ Use the schema shipped with a release when possible. The `main` URL can change. 
 - `bot.workingDirectory`: project-relative directory constrained to the selected workspace.
 - `adapter.type`: v0.1 accepts only `raw-interaction-webhook`; other adapter names fail closed.
 - `adapter.interactionEndpoint`: loopback HTTP template for the bot-owned endpoint. `${DISRUNNER_BOT_PORT}` is the supported dynamic port placeholder.
-- `environment`: explicit non-secret string values. Protected names and production-shaped tokens are rejected; the UI displays names, not a value preview.
+- `environment`: explicit non-secret string values. Credential-like names cannot override supervisor-owned values: they are dropped by the process boundary and protected values are written afterward. Production-shaped token values are rejected; the UI displays names, not a value preview.
 - `profile.mode`: passed to the current core/REST profile. It is not a promise that every parser has universal strict/lenient behavior.
 - `profile.seed`: deterministic input for runtime core IDs/randomness.
 - `profile.networkPolicy`: must be `offline`.
@@ -66,13 +66,15 @@ Omit these fields unless you are testing schema compatibility itself.
 
 ## Environment injection
 
-For each run, Electron creates a synthetic `disrunner.offline.*` credential and injects local runtime variables including the chosen REST/Gateway URLs and raw interaction values. Configuration cannot override protected variables. Bot stdout/stderr and supported exports are bounded/redacted, but arbitrary child code can still read files or open its own network connections.
+For each run, Electron creates a synthetic `disrunner.offline.*` credential, an ephemeral Ed25519 interaction key pair, and an independent random 32-byte webhook peer secret. It injects local REST/Gateway URLs, `DISRUNNER_PUBLIC_KEY`, and the protected `DISRUNNER_WEBHOOK_PEER_SECRET` into the supervised child. The peer secret is not a project-config field, cannot be overridden through `environment`, is added to output/export redaction, and is replaced on every start. A conforming raw-webhook process uses it only to HMAC-authenticate response status and exact bytes back to Electron.
+
+Bot stdout/stderr and supported exports are bounded/redacted, but arbitrary child code can still read its own environment, inspect files, or open network connections. A process with sufficient same-user inspection rights may also read another process's memory or environment; that remains outside the application-level isolation boundary.
 
 The project `.env` file is not imported by DisRunner. A bot's own launcher may still load it, so remove live secrets or use an isolated project copy.
 
 ## Port behavior
 
-Electron binds its REST and Gateway services to loopback dynamic ports. It probes a loopback port for the bot-owned interaction server before process launch and substitutes `${DISRUNNER_BOT_PORT}`. Because the bot binds that port after the probe is released, another process can win the race; startup/readiness then fails visibly.
+Electron binds its REST and Gateway services to loopback dynamic ports. It probes a loopback port for the bot-owned interaction server before process launch and substitutes `${DISRUNNER_BOT_PORT}`. Because the bot binds after the probe is released, another same-user process can still win the port race and deny startup. Mere port ownership is not accepted as bot identity: readiness sends an Ed25519-signed PING and verifies the returned HMAC before parsing JSON. A listener without the per-run peer secret fails readiness or command invocation and cannot fabricate successful callback evidence.
 
 Hard-coded ports reduce parallel reliability. Do not use hostnames other than explicit loopback addresses.
 

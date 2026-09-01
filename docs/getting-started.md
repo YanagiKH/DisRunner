@@ -54,9 +54,9 @@ Remove real credentials from the selected project, parent shell, IDE launcher, a
 
 ## 5. Start and invoke the bundled bot
 
-Press **Start Bot**. Electron validates the config, binds local simulator services, launches the process, and uses a signed PING request to verify the raw interaction endpoint. The runtime strip shows the phase, PID, resolved command, and latest bounded stdout/stderr entry.
+Press **Start Bot**. Electron validates the config, creates fresh request-signing and response-authentication credentials, binds local simulator services, launches the process, and sends a signed PING. Startup reaches `running` only after the bot verifies the request and Electron verifies the returned per-run HMAC on the exact response bytes. The runtime strip shows the phase, PID, resolved command, and latest bounded stdout/stderr entry; secret values are never shown.
 
-Type `/ping` in the composer, or choose `/ping` in Command Explorer. In Electron this sends a real signed local interaction request to the running bundled bot and renders its callback content and measured host duration. The invocation is aborted after the desktop's 3-second host-time timeout.
+Type `/ping` in the composer, or choose `/ping` in Command Explorer. Electron sends a real signed local interaction request, reads the bounded response, verifies its HMAC before JSON parsing/callback validation, and then renders callback content and measured host duration. The invocation is aborted after the desktop's 3-second host-time timeout. A listener that only captures the dynamic port cannot fabricate success without the protected per-run peer secret.
 
 The selected visual guild, channel, user, command metadata, and most inspector fields remain seeded UI fixtures. They are not proof that the same resources were delivered over Gateway or mutated through REST.
 
