@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "guild": {
+    "id": "9101",
+    "name": "Forged Peer Smoke Guild",
+    "roles": [],
+    "channels": [
+      {
+        "id": "9102",
+        "name": "forged-peer-smoke",
+        "type": 0
+      }
+    ]
+  }
+}

@@ -133,6 +133,14 @@ test('client rejects missing, wrong, and body-mismatched response authentication
   await assert.rejects(sendToForgedServer('tampered'), /response authentication failed/iu);
 });
 
+test('client bounds response bytes and elapsed time', async () => {
+  await assert.rejects(
+    sendToForgedServer('oversized', { maxResponseBytes: 32 }),
+    /exceeds the 32-byte limit/iu,
+  );
+  await assert.rejects(sendToForgedServer('timeout', { timeoutMs: 20 }), /timed out after 20 ms/iu);
+});
+
 test('matches the desktop canonical response-authentication vector', () => {
   assert.equal(
     signWebhookResponseAuthentication({
@@ -186,7 +194,10 @@ test('rejects replayed valid signatures', async () => {
     'x-signature-timestamp': timestamp,
   };
   const first = await post(rawBody, headers);
-  const second = await post(rawBody, headers);
+  const second = await post(rawBody, {
+    ...headers,
+    'x-signature-ed25519': signed.signature.toUpperCase(),
+  });
   assert.equal(first.status, 200);
   assert.match(first.headers[WEBHOOK_RESPONSE_AUTH_HEADER], /^[a-f\d]{64}$/u);
   assert.equal(second.status, 409);
@@ -245,7 +256,7 @@ function serverOptions(overrides = {}) {
   };
 }
 
-async function sendToForgedServer(mode) {
+async function sendToForgedServer(mode, clientOptions = {}) {
   const forgedServer = createServer((inbound, response) => {
     const requestChunks = [];
     inbound.on('data', (chunk) => requestChunks.push(chunk));
@@ -254,7 +265,11 @@ async function sendToForgedServer(mode) {
       const timestamp = inbound.headers['x-signature-timestamp'];
       const genuineBody = Buffer.from('{"type":1}', 'utf8');
       const transmittedBody =
-        mode === 'tampered' ? Buffer.from('{"type":4,"data":{}}', 'utf8') : genuineBody;
+        mode === 'tampered'
+          ? Buffer.from('{"type":4,"data":{}}', 'utf8')
+          : mode === 'oversized'
+            ? Buffer.alloc(64, 0x61)
+            : genuineBody;
       const headers = {
         'content-length': String(transmittedBody.byteLength),
         'content-type': 'application/json',
@@ -269,8 +284,12 @@ async function sendToForgedServer(mode) {
           responseBody: genuineBody,
         });
       }
-      response.writeHead(200, headers);
-      response.end(transmittedBody);
+      const send = () => {
+        response.writeHead(200, headers);
+        response.end(transmittedBody);
+      };
+      if (mode === 'timeout') setTimeout(send, 50);
+      else send();
     });
   });
   await new Promise((resolve, reject) => {
@@ -287,6 +306,7 @@ async function sendToForgedServer(mode) {
       peerSecretHex: PEER_SECRET_HEX,
       timestamp: Math.floor(FIXED_NOW_MS / 1_000),
       interaction: { id: 'forged', type: 1 },
+      ...clientOptions,
     });
   } finally {
     await new Promise((resolve) => forgedServer.close(resolve));

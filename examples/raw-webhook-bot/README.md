@@ -13,7 +13,7 @@ $env:DISRUNNER_WEBHOOK_PEER_SECRET = '<64-hex-character-random-peer-secret>'
 pnpm --filter @disrunner/example-raw-webhook-bot start
 ```
 
-The default endpoint is `http://127.0.0.1:39001/interactions`; only IPv4/IPv6 loopback binding is accepted. `GET /health` is intentionally unsigned and reports diagnostics only—it is not proof that the listener is the supervised bot. `src/signed-client.mjs` exports `sendSignedInteraction` for test clients that own the matching private key and peer secret; it verifies response authentication before parsing JSON. The project configuration uses self-contained fixtures under `fixtures/`, so strict project-root validation does not need a repository escape.
+The default endpoint is `http://127.0.0.1:39001/interactions`; only IPv4/IPv6 loopback binding is accepted. `GET /health` is intentionally unsigned and reports diagnostics only—it is not proof that the listener is the supervised bot. `src/signed-client.mjs` exports `sendSignedInteraction` for test clients that own the matching private key and peer secret; it verifies response authentication before parsing JSON and defaults to a 3-second timeout plus a 1 MiB response cap. The project configuration uses self-contained fixtures under `fixtures/`, so strict project-root validation does not need a repository escape.
 
 ## Security and resource limits
 
@@ -36,4 +36,4 @@ The limits can be reduced with `DISRUNNER_MAX_BODY_BYTES`, `DISRUNNER_REQUEST_TI
 pnpm --filter @disrunner/example-raw-webhook-bot test
 ```
 
-The suite opens real loopback servers and covers a mutually authenticated interaction; missing/malformed peer secrets; missing, wrong, or body-mismatched response authentication; invalid/missing/expired/replayed request signatures; oversized or lengthless bodies; incomplete-body timeout; and connection limits. The desktop runtime suite uses the same fixed canonical vector, while the packaged smoke bot also proves that unauthenticated and wrong-key command responses are rejected before callback validation.
+The suite opens real loopback servers and covers a mutually authenticated interaction; missing/malformed peer secrets; missing, wrong, or body-mismatched response authentication; bounded/timeout client responses; invalid/missing/expired/replayed request signatures, including hex-case replay variants; oversized or lengthless bodies; incomplete-body timeout; and connection limits. The desktop runtime suite uses the same fixed canonical vector, while the packaged macOS/Linux smoke uses a fixed forged listener to prove rejection during authenticated readiness.

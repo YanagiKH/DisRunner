@@ -62,11 +62,13 @@ const server = createServer((request, response) => {
         'content-length': String(encoded.byteLength),
         'content-type': 'application/json',
       };
-      if (valid && commandName !== 'unauthenticated') {
-        headers['x-disrunner-webhook-response-auth'] =
-          commandName === 'wrong-auth'
-            ? '00'.repeat(32)
-            : signResponseAuthentication(timestamp, status, body, encoded);
+      if (valid) {
+        headers['x-disrunner-webhook-response-auth'] = signResponseAuthentication(
+          timestamp,
+          status,
+          body,
+          encoded,
+        );
       }
       response.writeHead(status, headers);
       response.end(encoded);

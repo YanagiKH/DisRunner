@@ -262,6 +262,7 @@ function authenticateRequest(headers, rawBody, publicKey, settings, replayCache)
   if (!/^[a-f\d]{128}$/i.test(signature) || !/^\d{1,16}$/.test(timestamp)) {
     return { ok: false, status: 401, message: 'Invalid request signature' };
   }
+  const normalizedSignature = signature.toLowerCase();
 
   const timestampSeconds = Number(timestamp);
   if (!Number.isSafeInteger(timestampSeconds)) {
@@ -283,7 +284,7 @@ function authenticateRequest(headers, rawBody, publicKey, settings, replayCache)
   const replayKey = createHash('sha256')
     .update(timestamp)
     .update('\0')
-    .update(signature)
+    .update(normalizedSignature)
     .digest('hex');
   if (replayCache.has(replayKey)) {
     return { ok: false, status: 409, message: 'Replayed request signature' };
@@ -295,7 +296,7 @@ function authenticateRequest(headers, rawBody, publicKey, settings, replayCache)
       null,
       Buffer.concat([Buffer.from(timestamp, 'utf8'), rawBody]),
       publicKey,
-      Buffer.from(signature, 'hex'),
+      Buffer.from(normalizedSignature, 'hex'),
     );
   } catch {
     valid = false;

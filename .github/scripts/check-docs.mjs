@@ -1,4 +1,12 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+} from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 
 const root = process.cwd();
@@ -100,12 +108,43 @@ for (const [imagePath, expectedSignature] of [
   ['docs/assets/screenshots/simulator.jpg', 'jpeg'],
 ]) {
   const absolute = resolve(root, imagePath);
-  if (!existsSync(absolute)) continue;
-  if (statSync(absolute).size < 100) {
-    failures.push(`Image appears to be a placeholder: ${imagePath}`);
+  let descriptor;
+  try {
+    descriptor = openSync(absolute, 'r');
+  } catch (error) {
+    failures.push(
+      `Unable to inspect image ${imagePath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
     continue;
   }
-  const signature = readFileSync(absolute).subarray(0, 8).toString('hex');
+  let signature;
+  try {
+    const imageStat = fstatSync(descriptor);
+    if (!imageStat.isFile()) {
+      failures.push(`Image appears to be a placeholder: ${imagePath}`);
+      continue;
+    }
+    const probe = Buffer.alloc(100);
+    let probeBytes = 0;
+    while (probeBytes < probe.byteLength) {
+      const bytesRead = readSync(
+        descriptor,
+        probe,
+        probeBytes,
+        probe.byteLength - probeBytes,
+        probeBytes,
+      );
+      if (bytesRead === 0) break;
+      probeBytes += bytesRead;
+    }
+    if (probeBytes < probe.byteLength) {
+      failures.push(`Image appears to be a placeholder: ${imagePath}`);
+      continue;
+    }
+    signature = probe.subarray(0, 8).toString('hex');
+  } finally {
+    closeSync(descriptor);
+  }
   if (expectedSignature === 'png' && signature !== '89504e470d0a1a0a') {
     failures.push(`Invalid PNG signature: ${imagePath}`);
   }

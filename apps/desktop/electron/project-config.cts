@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { open, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { ProjectSummary } from './runtime-contract.cjs';
@@ -336,10 +336,25 @@ function tokenizeCommand(command: string): readonly string[] {
 }
 
 async function readBoundedJson(filePath: string, limit: number, label: string): Promise<unknown> {
-  const fileStat = await stat(filePath);
-  if (!fileStat.isFile()) throw new TypeError(`${label} must be a regular file.`);
-  if (fileStat.size > limit) throw new TypeError(`${label} exceeds the ${limit}-byte limit.`);
-  const source = await readFile(filePath, 'utf8');
+  const file = await open(filePath, 'r');
+  let source: string;
+  try {
+    const fileStat = await file.stat();
+    if (!fileStat.isFile()) throw new TypeError(`${label} must be a regular file.`);
+    if (fileStat.size > limit) throw new TypeError(`${label} exceeds the ${limit}-byte limit.`);
+
+    const buffer = Buffer.allocUnsafe(limit + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.byteLength) {
+      const result = await file.read(buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
+    if (bytesRead > limit) throw new TypeError(`${label} exceeds the ${limit}-byte limit.`);
+    source = buffer.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    await file.close();
+  }
   try {
     return JSON.parse(source) as unknown;
   } catch (error) {

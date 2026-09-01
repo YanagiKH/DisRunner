@@ -88,6 +88,12 @@ async function runFullPackagedSmoke(signal) {
   const userDataDirectory = await mkdtemp(path.join(tmpdir(), 'disrunner-package-smoke-'));
   const exampleProjectRoot = path.resolve(desktopRoot, '..', '..', 'examples', 'raw-webhook-bot');
   const negativeProjectRoot = path.join(desktopRoot, 'tests', 'fixtures', 'package-smoke-project');
+  const forgedPeerProjectRoot = path.join(
+    desktopRoot,
+    'tests',
+    'fixtures',
+    'package-smoke-forged-peer-project',
+  );
   let electronApplication;
   const onAbort = () => void electronApplication?.close().catch(() => undefined);
   signal.addEventListener('abort', onAbort, { once: true });
@@ -186,17 +192,6 @@ async function runFullPackagedSmoke(signal) {
     );
     assert.equal(context.response?.data.content, 'Pong from package smoke bot.');
 
-    const unauthenticated = await page.evaluate(() =>
-      window.disrunnerDesktop.invokeCommand('/unauthenticated'),
-    );
-    assert.equal(unauthenticated.ok, false);
-    assert.match(unauthenticated.error ?? '', /response authentication failed/iu);
-    const wrongAuthentication = await page.evaluate(() =>
-      window.disrunnerDesktop.invokeCommand('/wrong-auth'),
-    );
-    assert.equal(wrongAuthentication.ok, false);
-    assert.match(wrongAuthentication.error ?? '', /response authentication failed/iu);
-
     const invalid = await page.evaluate(() => window.disrunnerDesktop.invokeCommand('/invalid'));
     assert.equal(invalid.ok, false);
     assert.match(invalid.error ?? '', /unsupported interaction callback/iu);
@@ -220,16 +215,44 @@ async function runFullPackagedSmoke(signal) {
       evidence.risks.some((risk) => risk.ruleId === 'INTERACTION_TIMEOUT'),
       'timeout must produce risk evidence',
     );
-    assert.ok(
-      evidence.risks.some((risk) => risk.ruleId === 'WEBHOOK_PEER_AUTHENTICATION_FAILED'),
-      'missing or forged response authentication must produce distinct risk evidence',
-    );
-
     const negativeStopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());
     assert.equal(
       negativeStopped.phase,
       'ready',
       negativeStopped.error ?? 'negative runtime should stop',
+    );
+
+    await electronApplication.evaluate(async ({ dialog }, selectedProject) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selectedProject] });
+    }, forgedPeerProjectRoot);
+    const forgedPeerSelected = await page.evaluate(() => window.disrunnerDesktop.selectProject());
+    assert.equal(
+      forgedPeerSelected?.phase,
+      'ready',
+      forgedPeerSelected?.error ?? 'forged-peer project should validate',
+    );
+    const forgedPeerStarted = await page.evaluate(() => window.disrunnerDesktop.startRuntime());
+    assert.equal(
+      forgedPeerStarted.phase,
+      'error',
+      'a fixed forged listener must fail authenticated readiness',
+    );
+    assert.match(
+      forgedPeerStarted.error ?? '',
+      /response authentication failed/iu,
+      'forged readiness response must report peer-authentication failure',
+    );
+    assert.equal(forgedPeerStarted.pid, null);
+    assert.equal(forgedPeerStarted.endpoints, null);
+
+    await electronApplication.evaluate(async ({ dialog }, selectedProject) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selectedProject] });
+    }, negativeProjectRoot);
+    const closeProjectSelected = await page.evaluate(() => window.disrunnerDesktop.selectProject());
+    assert.equal(
+      closeProjectSelected?.phase,
+      'ready',
+      closeProjectSelected?.error ?? 'close-cleanup project should validate',
     );
     const closeStarted = await page.evaluate(() => window.disrunnerDesktop.startRuntime());
     assert.equal(
