@@ -22,7 +22,6 @@ const modes = new Set([
   'body-stall',
   'invalid-auth',
   'foreign-listener',
-  'exit-after-response',
   'exit-after-observed-response',
 ]);
 if (!modes.has(mode)) throw Error('Unsupported fixture mode.');
@@ -141,10 +140,6 @@ const server = createServer(
           ...(ping || mode === 'wrong' ? {} : { content }),
           authenticatedResponse: mode !== 'invalid-auth' && mode !== 'foreign-listener',
         });
-        if (!ping && mode === 'exit-after-response') {
-          trace('exit', { code: 0 });
-          process.exit(0);
-        }
         if (!ping && mode === 'exit-after-observed-response') {
           const gate = process.env.DISRUNNER_TEST_EXIT_GATE;
           if (!gate) throw Error('Observed-response fixture requires a test-owned exit gate.');
