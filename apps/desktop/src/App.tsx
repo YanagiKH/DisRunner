@@ -186,6 +186,7 @@ export default function App() {
         setRuntimeNotice(null);
       }
       latestRuntime.current = next;
+      if (next.phase === 'error') setRuntimeNotice(null);
       setRuntimeState(next);
     },
     [observeStartupIdentity],
@@ -386,6 +387,7 @@ export default function App() {
       return;
     operation.current = 'select';
     setOperationPending('select');
+    setRuntimeNotice(null);
     try {
       const selected = await desktopBridge.selectProject();
       if (selected !== null) applyRuntimeState(selected);
@@ -545,6 +547,21 @@ export default function App() {
       <CheckCircle2 size={16} />
     );
 
+  const showStartupHistory =
+    startupHistory !== null &&
+    startupHistory.sessionId === runtimeState.sessionId &&
+    startupHistory.runId === runtimeState.runId &&
+    (actionError === null || shutdownError !== null);
+  const hasRecoveryError =
+    shutdownError !== null || actionError !== null || runtimeState.phase === 'error';
+  const showRecovery =
+    hasRecoveryError ||
+    resyncing ||
+    syncFailed ||
+    runtimeState.disposed ||
+    runtimeNotice !== null ||
+    showStartupHistory;
+
   return (
     <div className="app-shell">
       <TopBar
@@ -554,69 +571,87 @@ export default function App() {
         onStop={stopBot}
         controls={desktop ? controls : undefined}
       />
-      <RuntimeStrip desktop={desktop} runtime={runtimeState} />
-      {desktop && (
-        <section aria-label="Runtime recovery" id="runtime-recovery">
-          {(shutdownError !== null || actionError !== null || runtimeState.phase === 'error') && (
-            <div role="alert">
-              <strong>
-                {shutdownError !== null
-                  ? 'Runtime cleanup incomplete.'
-                  : 'Runtime recovery required.'}
-              </strong>{' '}
-              Restart is blocked until cleanup is confirmed. Another cleanup attempt may not resolve
-              this.
-              <span>{shutdownError ?? actionError ?? runtimeState.error}</span>
-            </div>
-          )}
-          {resyncing && (
-            <p role="status">Runtime status is unconfirmed. Start and invocation remain blocked.</p>
-          )}
-          {syncFailed && (
-            <button onClick={refreshRuntime} type="button">
-              Refresh runtime status
-            </button>
-          )}
-          {runtimeState.disposed && (
-            <p>This session is closed and cannot restart. Cleanup may still be retried.</p>
-          )}
-          {runtimeNotice && <p role="status">{runtimeNotice}</p>}
-          {startupHistory !== null &&
-            startupHistory.sessionId === runtimeState.sessionId &&
-            startupHistory.runId === runtimeState.runId &&
-            (actionError === null || shutdownError !== null) && (
+      <section className="runtime-panel" aria-label="Runtime status and controls">
+        <RuntimeStrip desktop={desktop} runtime={runtimeState} />
+        {desktop && (
+          <section
+            className="runtime-recovery"
+            aria-label="Runtime recovery"
+            id="runtime-recovery"
+            hidden={!showRecovery}
+          >
+            {hasRecoveryError && (
+              <div className="runtime-recovery-alert" role="alert">
+                <strong>
+                  {shutdownError !== null
+                    ? 'Runtime cleanup incomplete.'
+                    : 'Runtime recovery required.'}
+                </strong>
+                <p>
+                  Restart is blocked until cleanup is confirmed. Another cleanup attempt may not
+                  resolve this.
+                </p>
+                <p className="runtime-diagnostic">
+                  {shutdownError ?? actionError ?? runtimeState.error}
+                </p>
+              </div>
+            )}
+            {resyncing && (
+              <p role="status">
+                Runtime status is unconfirmed. Start and invocation remain blocked.
+              </p>
+            )}
+            {syncFailed && (
+              <button onClick={refreshRuntime} type="button">
+                Refresh runtime status
+              </button>
+            )}
+            {runtimeState.disposed && (
+              <p>This session is closed and cannot restart. Cleanup may still be retried.</p>
+            )}
+            {runtimeNotice && <p role="status">{runtimeNotice}</p>}
+            {showStartupHistory && startupHistory !== null && (
               <p role="status" aria-label="Startup outcome">
                 Startup did not complete: {startupHistory.message}
               </p>
             )}
-        </section>
-      )}
-      {desktop && (
-        <section aria-label="Runtime invocation context">
-          <span>Real project runtime · preview panels are sample data</span>
-          <label>
-            Actor{' '}
-            <select
-              aria-label="Invocation actor"
-              value={runtimeContext?.actorId ?? ''}
-              onChange={(event) => setActorId(event.target.value)}
-            >
-              {[
-                ...new Set(
-                  runtimeState.contexts
-                    .filter((context) => context.channelId === runtimeContext?.channelId)
-                    .map((context) => context.actorId),
-                ),
-              ].map((id) => (
-                <option key={id} value={id}>
-                  {id}
-                </option>
-              ))}
-            </select>
-          </label>
-          {invocationError && <span role="alert">{invocationError}</span>}
-        </section>
-      )}
+          </section>
+        )}
+        {desktop && (
+          <section className="runtime-context" aria-label="Runtime invocation context">
+            <p className="runtime-context-note">
+              Real project runtime · preview panels are sample data
+            </p>
+            <label className="runtime-actor">
+              <span>Actor</span>
+              <select
+                aria-label="Invocation actor"
+                disabled={runtimeContext === undefined}
+                value={runtimeContext?.actorId ?? ''}
+                onChange={(event) => setActorId(event.target.value)}
+              >
+                {runtimeContext === undefined && <option value="">No validated actor</option>}
+                {[
+                  ...new Set(
+                    runtimeState.contexts
+                      .filter((context) => context.channelId === runtimeContext?.channelId)
+                      .map((context) => context.actorId),
+                  ),
+                ].map((id) => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {invocationError && (
+              <p className="runtime-invocation-error" role="alert">
+                {invocationError}
+              </p>
+            )}
+          </section>
+        )}
+      </section>
       <div className={`app-main ${detailMode ? 'detail-mode' : ''}`}>
         <WorkspaceRail
           active={state.surface}

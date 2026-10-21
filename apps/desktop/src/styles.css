@@ -103,7 +103,8 @@ select {
   background:
     radial-gradient(circle at 72% 14%, rgba(102, 119, 244, 0.035), transparent 30%), var(--bg);
   display: grid;
-  grid-template-rows: 56px 38px minmax(0, 1fr);
+  --runtime-strip-height: 38px;
+  grid-template-rows: 56px auto minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   min-width: 0;
@@ -372,7 +373,133 @@ select {
   overflow: hidden;
 }
 
+.runtime-panel {
+  min-width: 0;
+  max-height: min(45vh, 360px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: #171a20;
+}
+
+.runtime-recovery {
+  display: grid;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  color: #c1c8d5;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.runtime-recovery[hidden] {
+  display: none;
+}
+
+.runtime-recovery p,
+.runtime-context p {
+  margin: 0;
+}
+
+.runtime-recovery-alert {
+  display: grid;
+  gap: 4px;
+  padding: 9px 12px;
+  border: 1px solid #74424c;
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  background: #2b2028;
+}
+
+.runtime-recovery-alert strong {
+  color: #ffd1d7;
+}
+
+.runtime-diagnostic {
+  color: #f3b1b7;
+}
+
+.runtime-recovery > [role='status'] {
+  padding-left: 10px;
+  border-left: 2px solid #6879bd;
+}
+
+.runtime-recovery button {
+  justify-self: start;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid #596baa;
+  border-radius: 5px;
+  background: #29344f;
+  color: #eef1ff;
+  font: inherit;
+}
+
+.runtime-context {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  min-width: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  color: #abb5c7;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.runtime-context-note {
+  flex: 1 1 260px;
+}
+
+.runtime-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  color: #d4dbea;
+}
+
+.runtime-actor select {
+  min-width: 72px;
+  max-width: min(240px, 60vw);
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid #4d5870;
+  border-radius: 5px;
+  background: #202630;
+  color: #e4e9f2;
+  font: inherit;
+}
+
+.runtime-actor select:disabled {
+  color: #a2acbd;
+  cursor: not-allowed;
+}
+
+.runtime-actor select:focus-visible,
+.runtime-recovery button:focus-visible {
+  outline: 2px solid #a6b2ff;
+  outline-offset: 2px;
+}
+
+.runtime-invocation-error {
+  flex-basis: 100%;
+  color: #f3b1b7;
+}
+
+#invocation-unavailable {
+  margin: 0 0 8px;
+  color: #aeb8c9;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .runtime-strip {
+  min-height: var(--runtime-strip-height);
   align-items: center;
   background: #171a20;
   border-bottom: 1px solid var(--line);
@@ -3450,7 +3577,8 @@ select {
 
 @media (max-width: 850px) {
   .app-shell {
-    grid-template-rows: 50px 32px minmax(0, 1fr);
+    --runtime-strip-height: 32px;
+    grid-template-rows: 50px auto minmax(0, 1fr);
   }
   .top-bar {
     gap: 5px;

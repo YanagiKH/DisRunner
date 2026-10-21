@@ -800,3 +800,122 @@ describe('runtime cleanup recovery', () => {
     expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();
   });
 });
+
+describe('runtime panel presentation regressions', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'disrunnerDesktop');
+  });
+
+  it('groups strip and context before main and hides empty recovery instead of assigning it a grid row', async () => {
+    installBridge(vi.fn());
+    const { container } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Message #2000' });
+    const panel = screen.getByRole('region', { name: 'Runtime status and controls' });
+    expect(panel).toContainElement(
+      screen.getByRole('region', { name: 'Local bot runtime status' }),
+    );
+    expect(panel).toContainElement(
+      screen.getByRole('region', { name: 'Runtime invocation context' }),
+    );
+    const recovery = container.querySelector('#runtime-recovery');
+    expect(recovery).toHaveAttribute('hidden');
+    expect(recovery).not.toBeVisible();
+    expect(panel.nextElementSibling).toHaveClass('app-main');
+    expect(
+      [...container.querySelector('.app-shell')!.children].map((element) => element.className),
+    ).toEqual(['top-bar', 'runtime-panel', 'app-main ']);
+    const actor = screen.getByRole('combobox', { name: 'Invocation actor' });
+    expect(actor.closest('label')).toHaveClass('runtime-actor');
+    expect(actor).toBeEnabled();
+  });
+
+  it('retains the three-region browser-preview layout without desktop context', () => {
+    const { container } = render(<App />);
+    const panel = screen.getByRole('region', { name: 'Runtime status and controls' });
+    expect(panel.children).toHaveLength(1);
+    expect(container.querySelector('#runtime-recovery')).not.toBeInTheDocument();
+    expect(panel.nextElementSibling).toHaveClass('app-main');
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();
+  });
+
+  it('clears prior cleanup success as soon as new selection starts and keeps the new error readable', async () => {
+    let rejectSelection!: (reason: Error) => void;
+    installBridge(vi.fn(), {
+      getRuntimeState: () => Promise.resolve({ ...snapshot, project }),
+      stopRuntime: () =>
+        Promise.resolve({
+          ok: true,
+          errors: [],
+          snapshot: { ...snapshot, project, phase: 'ready', revision: 2 },
+        }),
+      selectProject: () =>
+        new Promise((_resolve, reject) => {
+          rejectSelection = reject;
+        }),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Stop bot' }));
+    expect(screen.getByText('Runtime cleanup completed.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Runtime paths' }));
+    await user.click(screen.getByRole('button', { name: 'Browse' }));
+    expect(screen.queryByText('Runtime cleanup completed.')).not.toBeInTheDocument();
+    await act(async () => {
+      rejectSelection(new Error('Missing executable'));
+      await Promise.resolve();
+    });
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveClass('runtime-recovery-alert');
+    expect(alert.querySelector('strong')).toHaveTextContent('Runtime recovery required.');
+    expect(alert.querySelector('.runtime-diagnostic')).toHaveTextContent(
+      'Project selection failed.',
+    );
+    expect(alert.querySelectorAll('p')).toHaveLength(2);
+    expect(screen.queryByText('Runtime cleanup completed.')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Retry cleanup' })).toBeEnabled();
+  });
+
+  it('removes old cleanup success on a later error snapshot without changing recovery controls', async () => {
+    let listener!: (event: DisRunnerSessionEvent) => void;
+    installBridge(vi.fn(), {
+      getRuntimeState: () => Promise.resolve({ ...snapshot, project }),
+      stopRuntime: () =>
+        Promise.resolve({
+          ok: true,
+          errors: [],
+          snapshot: { ...snapshot, project, phase: 'ready', revision: 2 },
+        }),
+      onRuntimeState: (value) => {
+        listener = value;
+        return () => {};
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Stop bot' }));
+    expect(screen.getByText('Runtime cleanup completed.')).toBeInTheDocument();
+    await act(async () => {
+      listener({
+        schemaVersion: 1,
+        sessionId: snapshot.sessionId,
+        runId: snapshot.runId,
+        sequence: 3,
+        kind: 'snapshot',
+        snapshot: {
+          ...snapshot,
+          project,
+          phase: 'error',
+          revision: 3,
+          error: 'New runtime failure.',
+        },
+      });
+      await Promise.resolve();
+    });
+    expect(screen.queryByText('Runtime cleanup completed.')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('New runtime failure.');
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Retry cleanup' })).toBeEnabled();
+  });
+});
