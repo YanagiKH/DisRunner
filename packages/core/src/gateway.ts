@@ -120,7 +120,7 @@ export class GatewayEmulator {
   readonly #heartbeatIntervalMs: number;
   readonly #sessionTtlMs: number;
   readonly #replayLimit: number;
-  readonly #resumeGatewayUrl: string;
+  #resumeGatewayUrl: string;
   readonly #maxIdentifiesPerWindow: number;
   readonly #identifyWindowMs: number;
   readonly #maxSessions: number;
@@ -185,6 +185,17 @@ export class GatewayEmulator {
     return this.#fakeToken;
   }
 
+  /** Bind the actual local transport before creating sessions that advertise it. */
+  public bindTransportEndpoint(url: string): void {
+    const endpoint = assertOfflineGatewayUrl(url).href;
+    if (endpoint === this.#resumeGatewayUrl) return;
+    this.#sweepSessions();
+    if (this.#sessions.size > 0) {
+      throw new Error('Cannot change the Gateway endpoint while live or resumable sessions exist.');
+    }
+    this.#resumeGatewayUrl = endpoint;
+  }
+
   public hello(): GatewayPacket<{ readonly heartbeat_interval: number }> {
     return { op: GatewayOpcodes.HELLO, d: { heartbeat_interval: this.#heartbeatIntervalMs } };
   }
@@ -230,7 +241,9 @@ export class GatewayEmulator {
     eventName: string,
     data: unknown,
   ): GatewayDispatch | undefined {
-    const session = this.#requireReadySession(sessionId);
+    // Expired and invalid sessions are swept; disconnected sessions retain the same
+    // filtering, sequence, and bounded history rules as connected sessions.
+    const session = this.#requireSession(sessionId);
     const sequence = session.sequence + 1;
     if (!Number.isSafeInteger(sequence)) {
       throw new GatewayProtocolError(4002, 'Gateway sequence exceeds the safe integer range.');

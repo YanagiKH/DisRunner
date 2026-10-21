@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "guild": {
+    "id": "1000",
+    "name": "Foundation Lab",
+    "owner_id": "3000",
+    "roles": [
+      {
+        "id": "1000",
+        "name": "@everyone",
+        "permissions": "68608",
+        "position": 0
+      },
+      {
+        "id": "1100",
+        "name": "Bot",
+        "permissions": "274878221376",
+        "position": 2
+      },
+      {
+        "id": "1200",
+        "name": "Moderator",
+        "permissions": "1099780064262",
+        "position": 3
+      }
+    ],
+    "channels": [
+      {
+        "id": "2000",
+        "guild_id": "1000",
+        "type": 0,
+        "name": "first-channel",
+        "position": 0
+      },
+      {
+        "id": "2001",
+        "guild_id": "1000",
+        "type": 0,
+        "name": "parity-channel",
+        "position": 1
+      }
+    ]
+  }
+}

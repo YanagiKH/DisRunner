@@ -31,7 +31,12 @@ export function RuntimeStrip({ runtime, desktop }: RuntimeStripProps) {
         className={`runtime-tail ${lastOutput?.stream ?? ''}`}
         title={runtime.error ?? lastOutput?.text ?? ''}
       >
-        {runtime.error !== null && <AlertTriangle size={12} />}
+        {runtime.error !== null && (
+          <>
+            <AlertTriangle size={12} />
+            <span>Runtime error: </span>
+          </>
+        )}
         {runtime.error ??
           lastOutput?.text.trim() ??
           (desktop ? 'Runtime output will appear here' : 'Visual simulator only')}

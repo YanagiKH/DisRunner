@@ -65,3 +65,15 @@ These tests are not Gate G1 acceptance or SDK certification. Linux direct-child 
 The Linux CLI oracle uses the real shared session and authenticated canonical callback. A test-only disposal observer releases the existing child exit gate, proves the original PID/starttime has reached a terminal state or disappeared, then invokes real disposal. The oracle independently requires the process proof, actual `child-exited` shutdown issue, CLI `runner-error`/exit 1, preserved exact successful callback assertion, and closed/reusable resources. Observer errors or timeouts cannot count as the expected runner failure. Cleanup always runs. The separate gated Session-level oracle remains in place.
 
 This replaces the earlier unsupported race-only premise that local response completion plus a pre-`process.exit` trace line necessarily meant OS exit preceded expected-stop intent. The earlier race-only failure is not evidence of a pass; the causal oracle instead requires independent process-identity evidence. The contract requires unexpected exit before expected-stop intent to fail, not an arbitrary post-response quiescence delay. The identity-aware CLI oracle is Linux-only; other platform qualification remains pending.
+
+## Current executable and Desktop parity status
+
+The current implementation exports the bot-case helpers and wires the executable
+`bot-test` command, help, validation and signal handling. The new
+[parity harness](g1-acceptance.md) runs that built executable as a subprocess
+against a frozen two-channel/singular-user corpus. Its separate actor-B project
+uses the canonical config filename; it does not expand the loader.
+
+CLI-only results must not be reported as G1: actual packaged Electron UI, preload,
+IPC and real Session execution remain necessary. The harness adds no SDK support, performs no dependency installation and includes
+no live-host network probe.

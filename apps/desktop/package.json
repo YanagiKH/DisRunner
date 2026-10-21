@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "test": "vitest run && pnpm run test:runtime-manager",
     "test:runtime-manager": "pnpm --filter @disrunner/runtime... run build && pnpm --filter @disrunner/runtime test",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:g1-parity": "node tests/e2e/g1-parity.mjs"
   },
   "dependencies": {
     "@disrunner/core": "workspace:*",

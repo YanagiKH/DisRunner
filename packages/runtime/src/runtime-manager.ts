@@ -22,6 +22,13 @@ import {
   type RuntimeRiskEntry,
   type RuntimeTraceEntry,
 } from './contracts.js';
+import {
+  freezeResourceDependencies,
+  type BotRunnerLike,
+  type GatewayServerLike,
+  type RestServerLike,
+  type RuntimeResourceDependencies,
+} from './resource-lifecycle.js';
 
 const CORE_SPECIFIER: string = '@disrunner/core';
 const MAX_RENDERER_OUTPUT = 200;
@@ -30,31 +37,8 @@ const MAX_RENDERER_OUTPUT_ENTRY_BYTES = 32_768;
 const MAX_RENDERER_TRACES = 100;
 const MAX_RENDERER_RISKS = 100;
 const MAX_INTERACTION_INPUT_BYTES = 2_000;
-
-interface BotSnapshotLike {
-  readonly status: string;
-  readonly pid?: number;
-  readonly startedAtMs?: number;
-  readonly exitedAtMs?: number;
-}
-
-interface BotRunnerLike {
-  start(config: Readonly<Record<string, unknown>>): Promise<BotSnapshotLike>;
-  stop(graceMs?: number): Promise<BotSnapshotLike>;
-  snapshot(): BotSnapshotLike;
-  observeExit?(): 'alive' | 'exited' | 'unknown';
-}
-
-interface RestServerLike {
-  start(port?: number): Promise<unknown>;
-  stop(): Promise<void>;
-}
-
-interface GatewayServerLike {
-  readonly address?: unknown;
-  start(port?: number): Promise<unknown>;
-  stop(): Promise<void>;
-}
+const CLEANUP_PENDING_SELECT =
+  'Previous run cleanup is not confirmed. Stop again to retry cleanup before selecting a project.';
 
 interface TraceCollectorLike {
   start(kind: string, name: string, metadata?: Readonly<Record<string, unknown>>): unknown;
@@ -118,6 +102,7 @@ type EndpointListener = (endpoints: RuntimeEndpoints | null) => void;
 export class DesktopRuntimeManager {
   readonly #onState: StateListener;
   readonly #onEndpoints: EndpointListener;
+  readonly #dependencies: Required<RuntimeResourceDependencies>;
   #state: DesktopRuntimeState = emptyRuntimeState();
   #configuration: ResolvedProjectConfiguration | null = null;
   #runAbort: AbortController | null = null;
@@ -222,9 +207,14 @@ export class DesktopRuntimeManager {
   #stopPromise: Promise<DesktopRuntimeState> | null = null;
   #cleanupPromise: Promise<void> | null = null;
 
-  public constructor(onState: StateListener, onEndpoints: EndpointListener) {
+  public constructor(
+    onState: StateListener,
+    onEndpoints: EndpointListener,
+    dependencies: RuntimeResourceDependencies = {},
+  ) {
     this.#onState = onState;
     this.#onEndpoints = onEndpoints;
+    this.#dependencies = freezeResourceDependencies(dependencies);
   }
 
   public snapshot(): DesktopRuntimeState {
@@ -235,6 +225,9 @@ export class DesktopRuntimeManager {
     if (['starting', 'running', 'stopping'].includes(this.#state.phase)) {
       return this.#setError('Stop the active bot before selecting another project.');
     }
+    // Retained resources still belong to the current configuration. Reject before reading or
+    // replacing it, and leave ownership, state and recorded failures untouched.
+    if (this.hasResources) throw new SessionError('invalid', CLEANUP_PENDING_SELECT);
     try {
       const project = await loadProjectConfiguration(directory);
       this.#configuration = structuredClone(project);
@@ -372,7 +365,9 @@ export class DesktopRuntimeManager {
         fakeToken: sessionToken,
         resumeGatewayUrl: expectedGatewayUrl,
       });
-      const gatewayServer = new GatewayServer({ gateway, trace });
+      // Own the real resource before wrapping it: if wrapping throws, cleanup still reaches it.
+      this.#gatewayServer = new GatewayServer({ gateway, trace });
+      const gatewayServer = this.#dependencies.wrapGateway(this.#gatewayServer);
       this.#gatewayServer = gatewayServer;
       const gatewayStartResult = await gatewayServer.start(gatewayPort);
       signal.throwIfAborted();
@@ -402,7 +397,8 @@ export class DesktopRuntimeManager {
         trace,
       });
       this.#rest = rest;
-      const restAddress = requireRestAddress(await rest.start(0));
+      this.#rest = this.#dependencies.wrapRest(rest);
+      const restAddress = requireRestAddress(await this.#rest.start(0));
       signal.throwIfAborted();
       const interactionEndpoint = await resolveInteractionEndpoint(
         configuration.adapter.interactionEndpoint,
@@ -440,11 +436,13 @@ export class DesktopRuntimeManager {
         },
       });
       this.#bot = bot;
+      const ownedBot = this.#dependencies.wrapBot(bot);
+      this.#bot = ownedBot;
       const activeGatewayPort = new URL(gatewayUrl).port;
       const restPort = new URL(restAddress.baseUrl).port;
       const interactionPort =
         interactionEndpoint === undefined ? '' : new URL(interactionEndpoint).port;
-      const processSnapshot = await bot.start({
+      const processSnapshot = await ownedBot.start({
         executable: configuration.summary.executable,
         args: configuration.summary.args,
         cwd: configuration.summary.cwd,
@@ -838,10 +836,15 @@ export class DesktopRuntimeManager {
         void this.stop()
           .then(() => {
             if (this.#unexpectedExit) {
+              // Keep an unconfirmed-cleanup message visible next to the exit.
+              const cleanupError = this.hasResources ? this.#state.error : null;
               this.#publish({
                 ...this.#state,
                 phase: 'error',
-                error: 'Bot process exited unexpectedly.',
+                error:
+                  cleanupError === null
+                    ? 'Bot process exited unexpectedly.'
+                    : `Bot process exited unexpectedly. ${cleanupError}`,
                 pid: null,
                 endpoints: null,
               });
@@ -917,7 +920,7 @@ export class DesktopRuntimeManager {
       code: 'cleanup',
       message: redactText(message),
     }));
-    if (errors.length > 0) throw new Error('Runtime resource cleanup failed.');
+    if (errors.length > 0) throw new Error(`Runtime resource cleanup failed: ${errors.join(' ')}`);
     this.#sanitizeForExport = null;
   }
 

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "execution": "bot",
+  "name": "G1 parity B",
+  "context": {
+    "actorId": "3001",
+    "guildId": "1000",
+    "channelId": "2001"
+  },
+  "steps": [
+    {
+      "requestId": "ping-1",
+      "input": "/ping",
+      "expect": {
+        "responseType": "message",
+        "content": "G1 parity reply."
+      }
+    }
+  ]
+}

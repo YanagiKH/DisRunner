@@ -230,3 +230,573 @@ describe('captured project runtime context', () => {
     expect(requests[1]?.requestId).toMatch(/^[A-Za-z0-9_-]{1,64}$/u);
   });
 });
+
+const project: DisRunnerProjectSummary = {
+  root: '/project',
+  configPath: '/project/config.json',
+  botName: 'TestBot',
+  executable: 'node',
+  args: [],
+  cwd: '/project',
+  adapter: 'raw',
+  mode: 'strict',
+  seed: 1,
+  environmentNames: [],
+};
+
+describe('runtime cleanup recovery', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'disrunnerDesktop');
+  });
+
+  function recoveryBridge(initial: DisRunnerRuntimeState = { ...snapshot, project }) {
+    let current = initial;
+    let listener!: (event: DisRunnerSessionEvent) => void;
+    const start = vi.fn(() => Promise.resolve(current));
+    const stop = vi.fn<DisRunnerDesktopBridge['stopRuntime']>();
+    installBridge(vi.fn(), {
+      getRuntimeState: () => Promise.resolve(current),
+      startRuntime: start,
+      stopRuntime: stop,
+      onRuntimeState: (value) => {
+        listener = value;
+        return () => {};
+      },
+    });
+    return {
+      start,
+      stop,
+      emit: async (next: DisRunnerRuntimeState) => {
+        current = next;
+        await act(async () => {
+          await Promise.resolve();
+          listener({
+            schemaVersion: 1,
+            sessionId: next.sessionId,
+            runId: next.runId,
+            sequence: next.revision,
+            kind: 'snapshot',
+            snapshot: next,
+          });
+        });
+      },
+    };
+  }
+
+  it('never announces stopped on failure, blocks duplicate stop/keyboard start, and permits verified recovery', async () => {
+    const bridge = recoveryBridge();
+    let finish!: (result: Awaited<ReturnType<DisRunnerDesktopBridge['stopRuntime']>>) => void;
+    bridge.stop.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Stop bot' }));
+    await bridge.emit({ ...snapshot, project, revision: 2, phase: 'stopping' });
+    await user.keyboard('{Control>}b{/Control}');
+    expect(bridge.start).not.toHaveBeenCalled();
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('TestBot stopped')).not.toBeInTheDocument();
+    const failed = {
+      ...snapshot,
+      project,
+      revision: 3,
+      phase: 'error' as const,
+      pid: null,
+      error: 'Runtime shutdown failed.',
+    };
+    await bridge.emit(failed);
+    await act(async () => {
+      await Promise.resolve();
+      finish({
+        ok: false,
+        errors: [{ code: 'cleanup', message: 'REST closure could not be confirmed.' }],
+        snapshot: failed,
+      });
+    });
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Retry cleanup' })).toBeEnabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('REST closure could not be confirmed.');
+    expect(screen.queryByText('TestBot stopped')).not.toBeInTheDocument();
+    bridge.stop.mockResolvedValueOnce({ ok: false, errors: [], snapshot: failed });
+    await user.click(screen.getByRole('button', { name: 'Retry cleanup' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Session cleanup did not confirm success.');
+    bridge.stop.mockResolvedValueOnce({
+      ok: true,
+      errors: [],
+      snapshot: { ...failed, revision: 4, phase: 'ready', error: null },
+    });
+    await user.click(screen.getByRole('button', { name: 'Retry cleanup' }));
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText('Runtime cleanup completed.')).toBeInTheDocument();
+  });
+
+  it('preserves uncertainty after IPC rejection and labels loaded configuration separately', async () => {
+    const bridge = recoveryBridge();
+    bridge.stop.mockRejectedValueOnce(new Error('private transport detail'));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Stop bot' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Runtime shutdown could not be confirmed.');
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Retry cleanup' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getByText('Project configuration loaded')).toBeInTheDocument();
+    expect(screen.queryByText('Configuration error')).not.toBeInTheDocument();
+  });
+
+  it('does not apply an old stop result to a replaced run', async () => {
+    const bridge = recoveryBridge();
+    let finish!: (result: Awaited<ReturnType<DisRunnerDesktopBridge['stopRuntime']>>) => void;
+    bridge.stop.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Stop bot' }));
+    await bridge.emit({
+      ...snapshot,
+      project,
+      runId: 'new-run',
+      revision: 5,
+      phase: 'error',
+      error: 'New run failed.',
+    });
+    await act(async () => {
+      await Promise.resolve();
+      finish({
+        ok: true,
+        errors: [],
+        snapshot: { ...snapshot, project, phase: 'ready', revision: 4 },
+      });
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('New run failed.');
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+    expect(screen.queryByText('Runtime cleanup completed.')).not.toBeInTheDocument();
+  });
+
+  it('keeps disposed sessions disabled after child-exited-only cleanup', async () => {
+    const bridge = recoveryBridge({ ...snapshot, project, disposed: true, phase: 'error' });
+    bridge.stop.mockResolvedValueOnce({
+      ok: false,
+      errors: [{ code: 'child-exited', message: 'Bot process exited unexpectedly.' }],
+      snapshot: { ...snapshot, project, disposed: true, phase: 'ready', revision: 2 },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Retry cleanup' }));
+    expect(
+      screen.getByText('Runtime cleanup completed. The bot had exited unexpectedly.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+    await user.keyboard('{Control>}b{/Control}');
+    expect(bridge.start).not.toHaveBeenCalled();
+  });
+  it('blocks Send, Enter, explorer and Browse while cleanup is unconfirmed', async () => {
+    const invoke = vi.fn();
+    installBridge(invoke, {
+      getRuntimeState: () => Promise.resolve({ ...snapshot, project }),
+      stopRuntime: () => Promise.reject(new Error('IPC failure')),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Stop bot' }));
+    await user.type(screen.getByRole('textbox', { name: 'Message #2000' }), '/ping{Enter}');
+    expect(invoke).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: 'Message #2000' })).toHaveValue('/ping');
+    expect(screen.getByRole('button', { name: 'Send local event' })).toBeDisabled();
+    expect(
+      screen.getByText('Complete runtime recovery before invoking commands.'),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Command Explorer' }));
+    expect(screen.getByRole('button', { name: 'Invoke selected name' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Runtime paths' }));
+    expect(screen.getByRole('button', { name: 'Browse' })).toBeDisabled();
+  });
+
+  it('offers explicit refresh after failed resync and then permits safe startup cancellation', async () => {
+    let listener!: (event: DisRunnerSessionEvent) => void;
+    let rejectStart!: (reason: Error) => void;
+    const starting = {
+      ...snapshot,
+      project,
+      runId: 'new-run',
+      revision: 2,
+      phase: 'starting' as const,
+    };
+    const getState = vi
+      .fn()
+      .mockResolvedValueOnce({ ...snapshot, project, runId: null, phase: 'ready' })
+      .mockRejectedValueOnce(new Error('Refresh failed'))
+      .mockResolvedValueOnce(starting);
+    const stop = vi.fn<DisRunnerDesktopBridge['stopRuntime']>().mockResolvedValueOnce({
+      ok: true,
+      errors: [],
+      snapshot: { ...starting, revision: 4, phase: 'ready' },
+    });
+    const start = vi.fn(
+      () =>
+        new Promise<DisRunnerRuntimeState>((_resolve, reject) => {
+          rejectStart = reject;
+        }),
+    );
+    installBridge(vi.fn(), {
+      getRuntimeState: getState,
+      startRuntime: start,
+      stopRuntime: stop,
+      onRuntimeState: (value) => {
+        listener = value;
+        return () => {};
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Start bot' }));
+    await act(async () => {
+      await Promise.resolve();
+      listener({
+        schemaVersion: 1,
+        sessionId: starting.sessionId,
+        runId: starting.runId,
+        sequence: 2,
+        kind: 'snapshot',
+        snapshot: starting,
+      });
+    });
+    expect(await screen.findByRole('button', { name: 'Refresh runtime status' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+    expect(stop).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Refresh runtime status' }));
+    expect(screen.getByRole('button', { name: 'Retry cleanup' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Retry cleanup' }));
+    await act(async () => {
+      await Promise.resolve();
+      rejectStart(new Error('Startup cancelled'));
+    });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();
+  });
+
+  it('does not strand initial status failure behind an unknown session identity', async () => {
+    const getState = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Unavailable'))
+      .mockResolvedValueOnce({ ...snapshot, project, phase: 'ready' });
+    installBridge(vi.fn(), { getRuntimeState: getState });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Refresh runtime status' }));
+    expect(getState).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();
+  });
+  it.each(['before', 'after'] as const)(
+    'retains primary startup failure %s overlapping cleanup succeeds without blocking restart',
+    async (order) => {
+      let listener!: (event: DisRunnerSessionEvent) => void;
+      let rejectStart!: (reason: Error) => void;
+      let finishStop!: (value: Awaited<ReturnType<DisRunnerDesktopBridge['stopRuntime']>>) => void;
+      const ready = { ...snapshot, project, runId: null, phase: 'ready' as const };
+      const starting = {
+        ...snapshot,
+        project,
+        runId: 'failing-run',
+        revision: 2,
+        phase: 'starting' as const,
+      };
+      let current: DisRunnerRuntimeState = ready;
+      installBridge(vi.fn(), {
+        getRuntimeState: () => Promise.resolve(current),
+        startRuntime: () =>
+          new Promise((_resolve, reject) => {
+            rejectStart = reject;
+          }),
+        stopRuntime: () =>
+          new Promise((resolve) => {
+            finishStop = resolve;
+          }),
+        onRuntimeState: (value) => {
+          listener = value;
+          return () => {};
+        },
+      });
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(await screen.findByRole('button', { name: 'Start bot' }));
+      await act(async () => {
+        current = starting;
+        listener({
+          schemaVersion: 1,
+          sessionId: starting.sessionId,
+          runId: starting.runId,
+          sequence: 2,
+          kind: 'snapshot',
+          snapshot: starting,
+        });
+        await Promise.resolve();
+      });
+      await user.click(screen.getByRole('button', { name: 'Stop bot' }));
+      if (order === 'before')
+        await act(async () => {
+          rejectStart(new Error('Primary startup transport failure.'));
+          await Promise.resolve();
+        });
+      await act(async () => {
+        finishStop({
+          ok: true,
+          errors: [],
+          snapshot: { ...starting, revision: 4, phase: 'ready' },
+        });
+        await Promise.resolve();
+      });
+      if (order === 'after')
+        await act(async () => {
+          rejectStart(new Error('Primary startup transport failure.'));
+          await Promise.resolve();
+        });
+      expect(screen.getByRole('status', { name: 'Startup outcome' })).toHaveTextContent(
+        'Primary startup transport failure.',
+      );
+      expect(screen.getByText('Runtime cleanup completed.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    },
+  );
+
+  it('never attributes a superseded startup failure to a replacement run', async () => {
+    let listener!: (event: DisRunnerSessionEvent) => void;
+    let rejectStart!: (reason: Error) => void;
+    const starting = {
+      ...snapshot,
+      project,
+      runId: 'old-start',
+      revision: 2,
+      phase: 'starting' as const,
+    };
+    let current: DisRunnerRuntimeState = { ...snapshot, project, runId: null, phase: 'ready' };
+    installBridge(vi.fn(), {
+      getRuntimeState: () => Promise.resolve(current),
+      startRuntime: () =>
+        new Promise((_resolve, reject) => {
+          rejectStart = reject;
+        }),
+      stopRuntime: () =>
+        Promise.resolve({
+          ok: true,
+          errors: [],
+          snapshot: { ...starting, phase: 'ready', revision: 3 },
+        }),
+      onRuntimeState: (value) => {
+        listener = value;
+        return () => {};
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Start bot' }));
+    await act(async () => {
+      current = starting;
+      listener({
+        schemaVersion: 1,
+        sessionId: current.sessionId,
+        runId: current.runId,
+        sequence: current.revision,
+        kind: 'snapshot',
+        snapshot: current,
+      });
+      await Promise.resolve();
+    });
+    await user.click(screen.getByRole('button', { name: 'Stop bot' }));
+    await act(async () => {
+      current = { ...starting, runId: 'replacement', phase: 'running', revision: 5 };
+      listener({
+        schemaVersion: 1,
+        sessionId: current.sessionId,
+        runId: current.runId,
+        sequence: current.revision,
+        kind: 'snapshot',
+        snapshot: current,
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rejectStart(new Error('Old primary startup failure.'));
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('status', { name: 'Startup outcome' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Old primary startup failure/u)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop bot' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+  });
+  it('preserves an already observed startup failure after later cleanup succeeds', async () => {
+    const ready = { ...snapshot, project, phase: 'ready' as const };
+    installBridge(vi.fn(), {
+      getRuntimeState: () => Promise.resolve(ready),
+      startRuntime: () => Promise.reject(new Error('Observed primary startup failure.')),
+      stopRuntime: () =>
+        Promise.resolve({ ok: true, errors: [], snapshot: { ...ready, revision: 2 } }),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Start bot' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Observed primary startup failure.');
+    await user.click(screen.getByRole('button', { name: 'Retry cleanup' }));
+    expect(screen.getByRole('status', { name: 'Startup outcome' })).toHaveTextContent(
+      'Observed primary startup failure.',
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();
+  });
+  it.each([
+    ['run', false],
+    ['run', true],
+    ['session', false],
+    ['session', true],
+  ] as const)(
+    'rejects old startup history when replacement %s arrives before rejection (stop=%s)',
+    async (replacement, stopAfterReplacement) => {
+      let listener!: (event: DisRunnerSessionEvent) => void;
+      let rejectStart!: (reason: Error) => void;
+      const starting = {
+        ...snapshot,
+        project,
+        runId: 'original-start',
+        revision: 2,
+        phase: 'starting' as const,
+      };
+      let current: DisRunnerRuntimeState = { ...snapshot, project, runId: null, phase: 'ready' };
+      installBridge(vi.fn(), {
+        getRuntimeState: () => Promise.resolve(current),
+        startRuntime: () =>
+          new Promise((_resolve, reject) => {
+            rejectStart = reject;
+          }),
+        stopRuntime: () =>
+          Promise.resolve({
+            ok: true,
+            errors: [],
+            snapshot: { ...current, phase: 'ready', revision: current.revision + 1 },
+          }),
+        onRuntimeState: (value) => {
+          listener = value;
+          return () => {};
+        },
+      });
+      const emit = async (next: DisRunnerRuntimeState) => {
+        current = next;
+        await act(async () => {
+          listener({
+            schemaVersion: 1,
+            sessionId: next.sessionId,
+            runId: next.runId,
+            sequence: next.revision,
+            kind: 'snapshot',
+            snapshot: next,
+          });
+          await Promise.resolve();
+        });
+      };
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(await screen.findByRole('button', { name: 'Start bot' }));
+      await emit(starting);
+      await emit({
+        ...starting,
+        sessionId: replacement === 'session' ? 'replacement-session' : starting.sessionId,
+        runId: 'replacement-run',
+        revision: 5,
+        phase: 'running',
+      });
+      if (stopAfterReplacement) await user.click(screen.getByRole('button', { name: 'Stop bot' }));
+      await act(async () => {
+        rejectStart(new Error('Failure from original start.'));
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole('status', { name: 'Startup outcome' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.queryByText(/Failure from original start/u)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Start bot' }))[
+        stopAfterReplacement ? 'toBeEnabled' : 'toBeDisabled'
+      ]();
+    },
+  );
+  it('retains primary failure while its observed startup snapshot is still resynchronizing', async () => {
+    let listener!: (event: DisRunnerSessionEvent) => void;
+    let rejectStart!: (reason: Error) => void;
+    let finishRefresh!: (value: DisRunnerRuntimeState) => void;
+    const starting = {
+      ...snapshot,
+      project,
+      runId: 'fast-failure',
+      revision: 2,
+      phase: 'starting' as const,
+    };
+    const getState = vi
+      .fn()
+      .mockResolvedValueOnce({ ...snapshot, project, runId: null, phase: 'ready' })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRefresh = resolve;
+          }),
+      );
+    installBridge(vi.fn(), {
+      getRuntimeState: getState,
+      startRuntime: () =>
+        new Promise((_resolve, reject) => {
+          rejectStart = reject;
+        }),
+      stopRuntime: () =>
+        Promise.resolve({
+          ok: true,
+          errors: [],
+          snapshot: { ...starting, phase: 'ready', revision: 4 },
+        }),
+      onRuntimeState: (value) => {
+        listener = value;
+        return () => {};
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Start bot' }));
+    await act(async () => {
+      listener({
+        schemaVersion: 1,
+        sessionId: starting.sessionId,
+        runId: starting.runId,
+        sequence: 2,
+        kind: 'snapshot',
+        snapshot: starting,
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rejectStart(new Error('Fast primary startup failure.'));
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
+    await act(async () => {
+      finishRefresh({
+        ...starting,
+        phase: 'error',
+        revision: 3,
+        error: 'Startup and cleanup failed.',
+      });
+      await Promise.resolve();
+    });
+    await user.click(screen.getByRole('button', { name: 'Retry cleanup' }));
+    expect(screen.getByRole('status', { name: 'Startup outcome' })).toHaveTextContent(
+      'Fast primary startup failure.',
+    );
+    expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();
+  });
+});

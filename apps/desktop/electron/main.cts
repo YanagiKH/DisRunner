@@ -3,6 +3,8 @@ import type { IpcMainInvokeEvent, Session } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { cleanupConfirmed, cleanupMessage } from './shutdown-policy.js';
+
 import type { InvocationRequest, RuntimeEndpoints, WindowAction } from './runtime-contract.cjs';
 
 const applicationRoot = path.resolve(__dirname, '..');
@@ -231,12 +233,9 @@ app.on('before-quit', (event) => {
   void runtime
     .then((instance) => instance.dispose())
     .then((result) => {
-      if (result.errors.some((issue) => issue.code !== 'child-exited')) {
+      if (!cleanupConfirmed(result)) {
         cleanupInProgress = false;
-        dialog.showErrorBox(
-          'Runtime cleanup incomplete',
-          result.errors.map((issue) => issue.message).join('\n'),
-        );
+        dialog.showErrorBox('Runtime cleanup incomplete', cleanupMessage(result));
         return;
       }
       if (!result.ok) console.error('Runtime exited unexpectedly before cleanup.');
@@ -247,7 +246,7 @@ app.on('before-quit', (event) => {
       cleanupInProgress = false;
       dialog.showErrorBox(
         'Runtime cleanup incomplete',
-        'The local runtime could not be disposed. Try quitting again to retry cleanup.',
+        'Runtime cleanup could not be confirmed. DisRunner has not completed shutdown. Another cleanup attempt may not resolve this; inspect the runtime diagnostics before restarting.',
       );
     });
 });

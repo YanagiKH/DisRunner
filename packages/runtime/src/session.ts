@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { RuntimeResourceDependencies } from './resource-lifecycle.js';
 import { DesktopRuntimeManager } from './runtime-manager.js';
 import {
   SessionError,
@@ -16,7 +17,18 @@ import {
 export function createSession(
   options: { onEndpoints?: (endpoints: RuntimeEndpoints | null) => void } = {},
 ): Session {
-  return new RuntimeSession(options);
+  return new RuntimeSession(options, {});
+}
+
+/**
+ * Internal factory for the same Session implementation with instance-scoped resource wrappers.
+ * Not exported from the package entry point; production uses createSession (identity defaults).
+ */
+export function createSessionWithDependencies(
+  options: { onEndpoints?: (endpoints: RuntimeEndpoints | null) => void },
+  dependencies: RuntimeResourceDependencies,
+): Session {
+  return new RuntimeSession(options, dependencies);
 }
 
 class RuntimeSession implements Session {
@@ -36,10 +48,14 @@ class RuntimeSession implements Session {
   #pendingSelection: Promise<unknown> | null = null;
   #stopping: Promise<ShutdownResult> | null = null;
 
-  public constructor(options: { onEndpoints?: (endpoints: RuntimeEndpoints | null) => void }) {
+  public constructor(
+    options: { onEndpoints?: (endpoints: RuntimeEndpoints | null) => void },
+    dependencies: RuntimeResourceDependencies,
+  ) {
     this.#manager = new DesktopRuntimeManager(
       () => this.#publish(),
       (endpoints) => options.onEndpoints?.(endpoints),
+      dependencies,
     );
   }
   public snapshot(): SessionSnapshot {
@@ -64,8 +80,18 @@ class RuntimeSession implements Session {
   }
   public async selectProject(directory: string): Promise<SessionSnapshot> {
     this.#assertUsable();
-    if (this.#selecting || this.#starting || this.#stopping !== null || this.#manager.hasResources)
+    if (
+      this.#selecting ||
+      this.#starting ||
+      this.#stopping !== null ||
+      (this.#manager.hasResources && !this.#cleanupPending())
+    )
       throw new SessionError('invalid', 'Stop the active runtime before selecting a project.');
+    if (this.#manager.hasResources)
+      throw new SessionError(
+        'invalid',
+        'Previous run cleanup is not confirmed. Stop again to retry cleanup before selecting a project.',
+      );
     this.#selecting = true;
     try {
       const selection = this.#manager.selectProject(directory);
@@ -96,19 +122,32 @@ class RuntimeSession implements Session {
       this.#selecting ||
       this.#starting ||
       this.#stopping !== null ||
-      this.#manager.hasResources ||
-      this.snapshot().project === null
+      (this.#manager.hasResources && !this.#cleanupPending())
     )
       throw new SessionError('invalid', 'Select a project and finish cleanup before starting.');
+    if (this.#manager.hasResources)
+      throw new SessionError(
+        'invalid',
+        'Previous run cleanup is not confirmed. Stop again to retry cleanup before starting.',
+      );
+    if (this.snapshot().project === null)
+      throw new SessionError('invalid', 'Select a project before starting.');
     this.#starting = true;
     this.#runId = randomUUID();
     this.#requests.clear();
     try {
       const result = await this.#manager.start(options);
-      if (this.#disposed || this.#stopping !== null || options.signal?.aborted)
-        throw new SessionError('cancelled', 'Runtime startup cancelled.');
+      const cancelled = this.#disposed || this.#stopping !== null || options.signal?.aborted;
+      // A startup failure classified before shutdown began stays the primary error; a stop
+      // requested meanwhile does not relabel it as a cancellation.
       if (result.phase !== 'running')
-        throw this.#manager.failure ?? new SessionError('start-failed', 'Bot startup failed.');
+        throw (
+          this.#manager.failure ??
+          (cancelled
+            ? new SessionError('cancelled', 'Runtime startup cancelled.')
+            : new SessionError('start-failed', 'Bot startup failed.'))
+        );
+      if (cancelled) throw new SessionError('cancelled', 'Runtime startup cancelled.');
       this.#manager.assertLive();
       return this.snapshot();
     } finally {
@@ -189,6 +228,10 @@ class RuntimeSession implements Session {
     await stopping;
     const errors = this.#manager.shutdownIssues;
     return { ok: errors.length === 0, errors, snapshot: this.snapshot() };
+  }
+  /** Resources remain after a failed cleanup (not an active or in-progress run). */
+  #cleanupPending(): boolean {
+    return this.#manager.hasResources && this.#manager.snapshot().phase === 'error';
   }
   #assertUsable(): void {
     if (this.#disposed) throw new SessionError('invalid', 'Session has been disposed.');
