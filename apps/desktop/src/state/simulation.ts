@@ -25,6 +25,11 @@ export type SimulatorAction =
       readonly input: string;
       readonly result: DisRunnerInvocationResult;
     }
+  | {
+      readonly type: 'runtime-failed';
+      readonly request: DisRunnerInvocationRequest;
+      readonly error: string;
+    }
   | { readonly type: 'complete-deferred'; readonly executionId: number; readonly channelId: string }
   | { readonly type: 'dismiss-toast' };
 
@@ -42,14 +47,14 @@ function cloneSeedMessages(): Readonly<Record<string, readonly ChatMessage[]>> {
   );
 }
 
-export function createInitialState(): SimulatorState {
+export function createInitialState(preview = true): SimulatorState {
   return {
     surface: 'simulator',
     guildId: 'foundation',
     channelId: 'bot-testing',
     botStatus: 'stopped',
     inspectorTab: 'Trace',
-    messages: cloneSeedMessages(),
+    messages: preview ? cloneSeedMessages() : {},
     interaction: INITIAL_TRACE,
     executionCount: 0,
     toast: null,
@@ -332,11 +337,11 @@ function executeRuntime(
   const input = rawInput.trim();
   if (!input) return state;
   const executionId = state.executionCount + 1;
-  const existing = state.messages[state.channelId] ?? [];
+  const existing = state.messages[result.context.channelId] ?? [];
   const command = `/${result.command}`;
   const commandMessage: ChatMessage = {
     id: `runtime-cmd-${executionId}`,
-    author: 'DevUser',
+    author: result.context.actorId,
     authorRole: 'developer',
     content: input,
     command,
@@ -375,10 +380,14 @@ function executeRuntime(
     time: timeFor(executionId),
     parentId: commandMessage.id,
   };
-  const baseTrace = traceFor(command, executionId, state.channelId);
+
   const interaction: InteractionTrace = {
-    ...baseTrace,
-    id: result.interactionId ?? baseTrace.id,
+    command,
+    user: result.context.actorId,
+    channel: result.context.channelId,
+    createdAt: new Date().toISOString(),
+    steps: [],
+    id: result.requestId,
     interactionId: result.interactionId ?? 'not-dispatched',
     outcome: result.ok
       ? responseState === 'deferred'
@@ -389,7 +398,14 @@ function executeRuntime(
         : 'Denied',
     severity: result.ok ? 'none' : responseState === 'timeout' ? 'high' : 'medium',
     durationMs: result.durationMs,
-    payload: { command, callbackType: responseType ?? null, signed: true },
+    payload: {
+      command,
+      callbackType: responseType ?? null,
+      signed: result.ok,
+      runId: result.runId,
+      requestId: result.requestId,
+      ...result.context,
+    },
     details: content,
     recommendation: result.ok
       ? 'Response came from the active local bot process.'
@@ -397,7 +413,10 @@ function executeRuntime(
   };
   return {
     ...state,
-    messages: { ...state.messages, [state.channelId]: [...existing, commandMessage, replyMessage] },
+    messages: {
+      ...state.messages,
+      [result.context.channelId]: [...existing, commandMessage, replyMessage],
+    },
     interaction,
     inspectorTab: ephemeral ? 'Payload' : 'Trace',
     executionCount: executionId,
@@ -468,6 +487,16 @@ export function simulationReducer(state: SimulatorState, action: SimulatorAction
       return execute(state, action.input);
     case 'execute-runtime':
       return executeRuntime(state, action.input, action.result);
+    case 'runtime-failed':
+      return executeRuntime(state, action.request.input, {
+        ...action.request,
+        ok: false,
+        command: action.request.input.trim().split(/\s+/u)[0]?.replace(/^\//u, '') ?? '',
+        interactionId: null,
+        durationMs: 0,
+        response: null,
+        error: action.error,
+      });
     case 'complete-deferred':
       return completeDeferred(state, action.executionId, action.channelId);
     case 'dismiss-toast':

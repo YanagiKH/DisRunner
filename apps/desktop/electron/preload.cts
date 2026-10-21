@@ -1,28 +1,28 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import type {
-  DesktopRuntimeState,
+  SessionSnapshot,
   RuntimeInfo,
-  RuntimeInvocationResult,
+  InvocationRequest,
+  SessionEvent,
+  ShutdownResult,
+  SessionInvocationResult,
   WindowAction,
 } from './runtime-contract.cjs';
 
-type RuntimeListener = (state: DesktopRuntimeState) => void;
+type RuntimeListener = (state: SessionEvent) => void;
 
 const desktopBridge = Object.freeze({
   getRuntimeInfo: (): Promise<RuntimeInfo> => ipcRenderer.invoke('runtime:get-info'),
-  getRuntimeState: (): Promise<DesktopRuntimeState> => ipcRenderer.invoke('runtime:get-state'),
-  selectProject: (): Promise<DesktopRuntimeState | null> => ipcRenderer.invoke('project:select'),
-  startRuntime: (): Promise<DesktopRuntimeState> => ipcRenderer.invoke('runtime:start'),
-  stopRuntime: (): Promise<DesktopRuntimeState> => ipcRenderer.invoke('runtime:stop'),
-  invokeCommand: (input: string): Promise<RuntimeInvocationResult> => {
-    if (typeof input !== 'string')
-      return Promise.reject(new TypeError('Interaction input must be a string.'));
-    return ipcRenderer.invoke('runtime:invoke', input);
-  },
+  getRuntimeState: (): Promise<SessionSnapshot> => ipcRenderer.invoke('runtime:get-state'),
+  selectProject: (): Promise<SessionSnapshot | null> => ipcRenderer.invoke('project:select'),
+  startRuntime: (): Promise<SessionSnapshot> => ipcRenderer.invoke('runtime:start'),
+  stopRuntime: (): Promise<ShutdownResult> => ipcRenderer.invoke('runtime:stop'),
+  invokeCommand: (request: InvocationRequest): Promise<SessionInvocationResult> =>
+    ipcRenderer.invoke('runtime:invoke', request),
   onRuntimeState: (listener: RuntimeListener): (() => void) => {
     if (typeof listener !== 'function') throw new TypeError('Runtime listener must be a function.');
-    const handler = (_event: Electron.IpcRendererEvent, state: DesktopRuntimeState): void => {
+    const handler = (_event: Electron.IpcRendererEvent, state: SessionEvent): void => {
       listener(structuredClone(state));
     };
     ipcRenderer.on('runtime:state', handler);

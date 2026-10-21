@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "guild": {
+    "id": "1000",
+    "name": "Lifecycle Lab",
+    "owner_id": "3000",
+    "roles": [
+      {
+        "id": "1000",
+        "name": "@everyone",
+        "permissions": "68608",
+        "position": 0
+      }
+    ],
+    "channels": [
+      {
+        "id": "2000",
+        "guild_id": "1000",
+        "type": 0,
+        "name": "lifecycle",
+        "position": 0
+      }
+    ]
+  }
+}

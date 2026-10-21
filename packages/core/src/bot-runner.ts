@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
+import { platform } from 'node:os';
 import { isAbsolute, relative, resolve } from 'node:path';
 
 import { assertOfflineGatewayUrl, assertOfflineUrl } from './network-policy.js';
@@ -68,6 +70,15 @@ export class BotRunner {
   #outputCallbackEnabled = true;
   #sensitiveValues: readonly string[] = [];
   #child: ChildProcessWithoutNullStreams | undefined;
+  /**
+   * Process group started by the current run (non-Windows). Retained after the direct child
+   * exits until the group is confirmed empty. Captured starttime detects observed leader reuse,
+   * but identity checks and signalling are not atomic. Unknown observations retain ownership.
+   */
+  #ownedGroup: OwnedProcessGroup | undefined;
+  // A failed Windows cleanup can outlive its leader. Never retry against a departed PID.
+  #windowsCleanupFailure: Error | undefined;
+  #generation = 0;
   #stopPromise: Promise<BotProcessSnapshot> | undefined;
   #status: BotProcessStatus = 'stopped';
   #startedAtMs: number | undefined;
@@ -99,7 +110,20 @@ export class BotRunner {
   }
 
   public async start(config: BotProcessConfig): Promise<BotProcessSnapshot> {
-    if (this.#child !== undefined || this.#status === 'starting' || this.#status === 'running') {
+    if (
+      this.#child === undefined &&
+      this.#ownedGroup !== undefined &&
+      this.#stopPromise === undefined
+    )
+      this.#releaseGroupIfEmpty();
+    if (
+      this.#child !== undefined ||
+      this.#windowsCleanupFailure !== undefined ||
+      (platform() === 'win32' && this.#stopPromise !== undefined) ||
+      this.#ownedGroup !== undefined ||
+      this.#status === 'starting' ||
+      this.#status === 'running'
+    ) {
       throw new Error('Bot process is already running.');
     }
     if (
@@ -151,6 +175,7 @@ export class BotRunner {
       ...(interactionPeerSecret === undefined ? [] : [interactionPeerSecret]),
     ];
 
+    const generation = ++this.#generation;
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(config.executable, args, {
@@ -158,7 +183,7 @@ export class BotRunner {
         env: environment,
         shell: false,
         windowsHide: true,
-        detached: process.platform !== 'win32',
+        detached: platform() !== 'win32',
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {
@@ -167,22 +192,46 @@ export class BotRunner {
       throw error;
     }
     this.#child = child;
+    if (platform() !== 'win32' && child.pid !== undefined) {
+      // detached:true makes the child the leader of a new process group whose PGID is its PID.
+      this.#ownedGroup = { pgid: child.pid, leaderStartTime: procStartTime(child.pid) };
+    }
+    // Late events from an older child must never mutate a newer run's state.
+    const current = (): boolean => this.#generation === generation;
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => this.#consumeOutput('stdout', chunk));
-    child.stderr.on('data', (chunk: string) => this.#consumeOutput('stderr', chunk));
-    child.stdout.on('end', () => this.#flushOutput('stdout'));
-    child.stderr.on('end', () => this.#flushOutput('stderr'));
-    child.once('spawn', () => {
-      if (this.#child === child) this.#status = 'running';
+    child.stdout.on('data', (chunk: string) => {
+      if (current()) this.#consumeOutput('stdout', chunk);
     });
-    child.once('error', (error) => {
+    child.stderr.on('data', (chunk: string) => {
+      if (current()) this.#consumeOutput('stderr', chunk);
+    });
+    child.stdout.on('end', () => {
+      if (current()) this.#flushOutput('stdout');
+    });
+    child.stderr.on('end', () => {
+      if (current()) this.#flushOutput('stderr');
+    });
+    const onSpawn = (): void => {
+      if (current() && this.#child === child) this.#status = 'running';
+    };
+    const onError = (error: Error): void => {
+      child.off('spawn', onSpawn);
+      if (!current()) return;
       this.#recordOutput('stderr', error.stack ?? error.message);
-      this.#status = 'crashed';
-      this.#exitedAtMs = this.#now();
-      if (this.#child === child) this.#child = undefined;
-    });
+      if (this.#child === child) {
+        this.#status = 'crashed';
+        this.#exitedAtMs = this.#now();
+        // A child-level error is not proof of termination; ownership is retained when a PID exists.
+        if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null)
+          this.#child = undefined;
+      }
+    };
+    child.once('spawn', onSpawn);
+    // Stays attached for the child's lifetime so a late 'error' can never become uncaught.
+    child.on('error', onError);
     child.once('exit', (code, signal) => {
+      if (!current()) return;
       this.#flushOutput('stdout');
       this.#flushOutput('stderr');
       this.#exitCode = code;
@@ -191,8 +240,18 @@ export class BotRunner {
       if (this.#status !== 'stopping') this.#status = code === 0 ? 'stopped' : 'crashed';
       else this.#status = 'stopped';
       if (this.#child === child) this.#child = undefined;
+      // Forget the group as soon as it is confirmed empty; keep it while descendants survive.
+      if (this.#stopPromise === undefined) this.#releaseGroupIfEmpty();
     });
     await waitForSpawn(child);
+    const spawnedPid = child.pid;
+    const group = this.#ownedGroup;
+    if (
+      spawnedPid !== undefined &&
+      group?.pgid === spawnedPid &&
+      group.leaderStartTime === undefined
+    )
+      this.#ownedGroup = { pgid: spawnedPid, leaderStartTime: procStartTime(spawnedPid) };
     return this.snapshot();
   }
 
@@ -204,11 +263,24 @@ export class BotRunner {
     }
     if (this.#stopPromise !== undefined) return this.#stopPromise;
     const child = this.#child;
-    if (child === undefined) return this.snapshot();
-    const operation = this.#stopChild(child, graceMs);
+    if (
+      this.#windowsCleanupFailure !== undefined &&
+      (child === undefined || this.#windowsCleanupFailure instanceof WindowsTaskkillTimeoutError)
+    )
+      throw this.#windowsCleanupFailure;
+    if (child === undefined && this.#ownedGroup === undefined) return this.snapshot();
+    const operation = this.#stopOwned(child, graceMs);
     this.#stopPromise = operation;
     try {
-      return await operation;
+      const snapshot = await operation;
+      this.#windowsCleanupFailure = undefined;
+      return snapshot;
+    } catch (error) {
+      if (platform() === 'win32') {
+        this.#windowsCleanupFailure =
+          error instanceof Error ? error : new Error('Windows bot cleanup could not be confirmed.');
+      }
+      throw error;
     } finally {
       if (this.#stopPromise === operation) this.#stopPromise = undefined;
     }
@@ -231,18 +303,87 @@ export class BotRunner {
     };
   }
 
-  async #stopChild(
-    child: ChildProcessWithoutNullStreams,
+  /** Non-mutating supervision observation; snapshot stays event-driven until Node reaps the child. */
+  public observeExit(): 'alive' | 'exited' | 'unknown' {
+    const child = this.#child;
+    if (child === undefined) return this.#exitedAtMs === undefined ? 'unknown' : 'exited';
+    if (child.exitCode !== null || child.signalCode !== null) return 'exited';
+    if (process.platform !== 'linux' || child.pid === undefined) return 'unknown';
+    return directChildExitObservation(child.pid, this.#ownedGroup?.leaderStartTime);
+  }
+
+  /**
+   * Resolves only after the owned child and its owned process group are confirmed terminated.
+   * Otherwise rejects and retains ownership so a later stop() can retry; start() stays blocked.
+   */
+  async #stopOwned(
+    child: ChildProcessWithoutNullStreams | undefined,
     graceMs: number,
   ): Promise<BotProcessSnapshot> {
-    this.#status = 'stopping';
-    terminateOwnedProcess(child, false);
-    const exited = await waitForExit(child, graceMs);
-    if (!exited) {
-      terminateOwnedProcess(child, true);
-      await waitForExit(child, Math.min(2_000, graceMs || 2_000));
+    const generation = this.#generation;
+    if (child !== undefined) this.#status = 'stopping';
+    await this.#signalOwned(child, false, Math.min(2_000, graceMs || 2_000));
+    if (!(await this.#waitForOwnedTermination(child, graceMs))) {
+      await this.#signalOwned(child, true, Math.min(2_000, graceMs || 2_000));
+      if (!(await this.#waitForOwnedTermination(child, Math.min(2_000, graceMs || 2_000)))) {
+        throw new Error(
+          'Bot process termination could not be confirmed; ownership is retained for retry.',
+        );
+      }
+    }
+    if (this.#generation === generation) {
+      this.#ownedGroup = undefined;
+      if (this.#child === child) this.#child = undefined;
     }
     return this.snapshot();
+  }
+
+  async #signalOwned(
+    child: ChildProcessWithoutNullStreams | undefined,
+    force: boolean,
+    commandTimeoutMs: number,
+  ): Promise<void> {
+    if (platform() === 'win32') {
+      if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null)
+        await runTaskkill(child.pid, force, commandTimeoutMs);
+      return;
+    }
+    const group = this.#ownedGroup;
+    if (group === undefined) return;
+    const state = ownedGroupState(group);
+    if (state === 'empty') return;
+    if (state === 'unknown')
+      throw new Error(
+        'Bot process group identity or liveness is uncertain; ownership is retained.',
+      );
+    try {
+      process.kill(-group.pgid, force ? 'SIGKILL' : 'SIGTERM');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+  }
+
+  async #waitForOwnedTermination(
+    child: ChildProcessWithoutNullStreams | undefined,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    if (child !== undefined && !(await waitForExit(child, timeoutMs))) return false;
+    const group = this.#ownedGroup;
+    // Windows: a successful taskkill /T and direct-child exit are required. These observations
+    // are not independent proof of descendant termination; real Windows qualification is pending.
+    if (platform() === 'win32' || group === undefined) return true;
+    for (;;) {
+      if (ownedGroupState(group) === 'empty') return true;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(25, remaining)));
+    }
+  }
+
+  #releaseGroupIfEmpty(): void {
+    const group = this.#ownedGroup;
+    if (group !== undefined && ownedGroupState(group) === 'empty') this.#ownedGroup = undefined;
   }
 
   #consumeOutput(stream: BotProcessOutput['stream'], raw: string): void {
@@ -511,36 +652,209 @@ function truncateUtf8(value: string, maxBytes: number): string {
 
 function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolvePromise, reject) => {
-    child.once('spawn', resolvePromise);
-    child.once('error', reject);
+    // Whichever event wins detaches the other, so no loser listener outlives the wait.
+    const onSpawn = (): void => {
+      child.off('error', onError);
+      resolvePromise();
+    };
+    const onError = (error: Error): void => {
+      child.off('spawn', onSpawn);
+      reject(error);
+    };
+    child.once('spawn', onSpawn);
+    child.once('error', onError);
   });
 }
 
 function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
   return new Promise((resolvePromise) => {
-    const timer = setTimeout(() => resolvePromise(false), timeoutMs);
-    child.once('exit', () => {
+    const onExit = (): void => {
       clearTimeout(timer);
       resolvePromise(true);
-    });
+    };
+    // When the timer wins, the exit listener is detached immediately rather than left behind.
+    const timer = setTimeout(() => {
+      child.off('exit', onExit);
+      resolvePromise(false);
+    }, timeoutMs);
+    child.once('exit', onExit);
   });
 }
 
-function terminateOwnedProcess(child: ChildProcessWithoutNullStreams, force: boolean): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  if (process.platform === 'win32') {
-    spawn('taskkill', ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])], {
-      shell: false,
-      windowsHide: true,
-      stdio: 'ignore',
-    }).unref();
-    return;
+interface OwnedProcessGroup {
+  readonly pgid: number;
+  /** /proc starttime of the leader, used to detect PGID reuse after the leader is gone. */
+  readonly leaderStartTime: string | undefined;
+}
+
+/**
+ * 'empty' when no live (non-zombie) member of the owned group remains. A PGID cannot be reused
+ * while any member exists, so a live process whose PID equals the PGID but whose starttime differs
+ * from the recorded leader proves the owned group is already gone.
+ */
+function ownedGroupState(group: OwnedProcessGroup): 'alive' | 'empty' | 'unknown' {
+  if (process.platform === 'linux') {
+    const leader = readProcStat(group.pgid);
+    if (leader.kind === 'unknown') return 'unknown';
+    if (leader.kind === 'present') {
+      if (group.leaderStartTime === undefined) return 'unknown';
+      if (leader.stat.startTime !== group.leaderStartTime) return 'empty';
+    }
   }
   try {
-    process.kill(-pid, force ? 'SIGKILL' : 'SIGTERM');
+    process.kill(-group.pgid, 0);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'empty' : 'unknown';
   }
+  if (process.platform !== 'linux') return 'alive';
+  // A group can outlive a reused leader too. Without the original identity, only ESRCH
+  // above proves it is safe to release; a successful existence probe cannot authorize a kill.
+  if (group.leaderStartTime === undefined) return 'unknown';
+  // kill(-pgid, 0) also succeeds for zombies awaiting reaping; only live members count.
+  let entries: string[];
+  try {
+    entries = readdirSync('/proc');
+  } catch {
+    return 'unknown';
+  }
+  let uncertain = false;
+  let observedMember = false;
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    const member = readProcStat(Number(entry));
+    if (member.kind === 'unknown') uncertain = true;
+    if (member.kind === 'present' && member.stat.pgid === group.pgid) {
+      observedMember = true;
+      if (member.stat.state !== 'Z' && member.stat.state !== 'X') return 'alive';
+    }
+  }
+  return uncertain || !observedMember ? 'unknown' : 'empty';
+}
+
+type ProcStatResult =
+  | {
+      readonly kind: 'present';
+      readonly stat: { readonly state: string; readonly pgid: number; readonly startTime: string };
+    }
+  | { readonly kind: 'missing' }
+  | { readonly kind: 'unknown' };
+
+function procStartTime(pid: number): string | undefined {
+  const result = readProcStat(pid);
+  return result.kind === 'present' ? result.stat.startTime : undefined;
+}
+
+function directChildExitObservation(
+  pid: number,
+  startTime: string | undefined,
+): 'alive' | 'exited' | 'unknown' {
+  const result = readProcStat(pid);
+  if (result.kind === 'unknown') return 'unknown';
+  if (result.kind === 'missing') return 'exited';
+  if (
+    result.stat.state === 'Z' ||
+    result.stat.state === 'X' ||
+    (startTime !== undefined && result.stat.startTime !== startTime)
+  )
+    return 'exited';
+  return startTime === undefined ? 'unknown' : 'alive';
+}
+
+function readProcStat(pid: number): ProcStatResult {
+  if (process.platform !== 'linux') return { kind: 'unknown' };
+  let raw: string;
+  try {
+    raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return { kind: 'unknown' };
+    // A missing procfs mount is not evidence that this child exited. Check a known-own record
+    // before interpreting per-PID ENOENT; unreadable or malformed procfs remains uncertain.
+    try {
+      const self = parseProcStat(process.pid, readFileSync('/proc/self/stat', 'utf8'));
+      if (self.kind !== 'present') return { kind: 'unknown' };
+      // A readable self record alone does not rule out hidepid visibility restrictions.
+      // Only ESRCH from a non-destructive PID probe confirms this target is missing.
+      try {
+        process.kill(pid, 0);
+        return { kind: 'unknown' };
+      } catch (probeError) {
+        return {
+          kind: (probeError as NodeJS.ErrnoException).code === 'ESRCH' ? 'missing' : 'unknown',
+        };
+      }
+    } catch {
+      return { kind: 'unknown' };
+    }
+  }
+  return parseProcStat(pid, raw);
+}
+
+function parseProcStat(pid: number, raw: string): ProcStatResult {
+  const closingParen = raw.lastIndexOf(')');
+  if (!raw.startsWith(`${pid} (`) || closingParen < 0) return { kind: 'unknown' };
+  const fields = raw
+    .slice(closingParen + 2)
+    .trim()
+    .split(/\s+/u);
+  const state = fields[0];
+  const pgid = Number(fields[2]);
+  const startTime = fields[19];
+  if (
+    state === undefined ||
+    !/^[RSDZTtXxKWPI]$/u.test(state) ||
+    !Number.isSafeInteger(pgid) ||
+    pgid < 0 ||
+    startTime === undefined ||
+    !/^\d+$/u.test(startTime)
+  )
+    return { kind: 'unknown' };
+  return { kind: 'present', stat: { state, pgid, startTime } };
+}
+
+// A timed-out mutating helper may still be alive, even after kill() returns true. Never clear
+// that uncertainty by launching another helper or a new bot run.
+class WindowsTaskkillTimeoutError extends Error {}
+
+/** Windows: observes taskkill failure; success still requires awaiting the owned child. */
+function runTaskkill(pid: number, force: boolean, timeoutMs: number): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const failure = (): Error =>
+      new Error(
+        'Windows taskkill failed or timed out; process-tree termination is uncertain and ownership is retained.',
+      );
+    let killer: ReturnType<typeof spawn>;
+    try {
+      killer = spawn('taskkill', ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])], {
+        shell: false,
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+    } catch {
+      reject(failure());
+      return;
+    }
+    let settled = false;
+    const finish = (success: boolean, timedOut = false): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      killer.off('exit', onExit);
+      if (success) resolvePromise();
+      else reject(timedOut ? new WindowsTaskkillTimeoutError(failure().message) : failure());
+    };
+    const onExit = (code: number | null): void => finish(code === 0);
+    const timer = setTimeout(() => {
+      finish(false, true);
+      // Terminate only our taskkill helper, never an exited bot's potentially reused PID.
+      try {
+        killer.kill();
+      } catch {
+        /* Cleanup remains uncertain even if helper termination fails. */
+      }
+    }, timeoutMs);
+    // A late helper error must remain handled after the bounded wait has settled.
+    killer.on('error', () => finish(false));
+    killer.once('exit', onExit);
+  });
 }

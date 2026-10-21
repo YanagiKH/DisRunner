@@ -3,8 +3,7 @@ import type { IpcMainInvokeEvent, Session } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { DesktopRuntimeManager } from './runtime-manager.cjs';
-import type { RuntimeEndpoints, WindowAction } from './runtime-contract.cjs';
+import type { InvocationRequest, RuntimeEndpoints, WindowAction } from './runtime-contract.cjs';
 
 const applicationRoot = path.resolve(__dirname, '..');
 const rendererRoot = path.join(applicationRoot, 'dist');
@@ -20,11 +19,16 @@ let sessionConfigured = false;
 let quitAfterCleanup = false;
 let cleanupInProgress = false;
 
-const runtime = new DesktopRuntimeManager((state) => {
-  if (mainWindow !== null && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('runtime:state', state);
-  }
-}, setRuntimeEndpoints);
+// Cache the ESM runtime once; Electron-specific IPC and origin policy stay here.
+const runtime = import('@disrunner/runtime').then(({ createSession }) => {
+  const instance = createSession({ onEndpoints: setRuntimeEndpoints });
+  instance.subscribe((event) => {
+    if (mainWindow !== null && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('runtime:state', event);
+    }
+  });
+  return instance;
+});
 
 function isTrustedSender(event: IpcMainInvokeEvent): boolean {
   if (event.senderFrame === null || event.senderFrame !== event.sender.mainFrame) return false;
@@ -114,22 +118,22 @@ function registerIpc(): void {
       offline: true,
     });
   });
-  ipcMain.handle('runtime:get-state', (event) => {
+  ipcMain.handle('runtime:get-state', async (event) => {
     requireTrustedSender(event);
-    return runtime.snapshot();
+    return (await runtime).snapshot();
   });
   ipcMain.handle('runtime:start', async (event) => {
     requireTrustedSender(event);
-    return runtime.start();
+    return (await runtime).start();
   });
   ipcMain.handle('runtime:stop', async (event) => {
     requireTrustedSender(event);
-    return runtime.stop();
+    return (await runtime).stop();
   });
-  ipcMain.handle('runtime:invoke', async (event, input: unknown) => {
+  ipcMain.handle('runtime:invoke', async (event, request: InvocationRequest) => {
     requireTrustedSender(event);
-    if (typeof input !== 'string') throw new TypeError('Interaction input must be a string.');
-    return runtime.invoke(input);
+    // The shared session validates and copies the complete untrusted IPC request.
+    return (await runtime).invoke(request);
   });
   ipcMain.handle('project:select', async (event) => {
     requireTrustedSender(event);
@@ -138,7 +142,7 @@ function registerIpc(): void {
       ? await dialog.showOpenDialog(owner, { properties: ['openDirectory'] })
       : await dialog.showOpenDialog({ properties: ['openDirectory'] });
     if (result.canceled || result.filePaths[0] === undefined) return null;
-    return runtime.selectProject(result.filePaths[0]);
+    return (await runtime).selectProject(result.filePaths[0]);
   });
   ipcMain.handle('window:control', (event, action: unknown) => {
     requireTrustedSender(event);
@@ -208,7 +212,7 @@ function createWindow(): BrowserWindow {
   window.once('ready-to-show', () => window.show());
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
-    void runtime.stop();
+    void runtime.then((manager) => manager.stop());
   });
 
   if (!app.isPackaged && developmentUrl === allowedDevelopmentOrigin) {
@@ -224,18 +228,35 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (cleanupInProgress) return;
   cleanupInProgress = true;
-  void runtime.stop().finally(() => {
-    quitAfterCleanup = true;
-    app.quit();
-  });
+  void runtime
+    .then((instance) => instance.dispose())
+    .then((result) => {
+      if (result.errors.some((issue) => issue.code !== 'child-exited')) {
+        cleanupInProgress = false;
+        dialog.showErrorBox(
+          'Runtime cleanup incomplete',
+          result.errors.map((issue) => issue.message).join('\n'),
+        );
+        return;
+      }
+      if (!result.ok) console.error('Runtime exited unexpectedly before cleanup.');
+      quitAfterCleanup = true;
+      app.quit();
+    })
+    .catch(() => {
+      cleanupInProgress = false;
+      dialog.showErrorBox(
+        'Runtime cleanup incomplete',
+        'The local runtime could not be disposed. Try quitting again to retry cleanup.',
+      );
+    });
 });
 
 if (!app.requestSingleInstanceLock()) {
   quitAfterCleanup = true;
   app.quit();
 } else {
-  app
-    .whenReady()
+  Promise.all([app.whenReady(), runtime])
     .then(() => {
       Menu.setApplicationMenu(null);
       configureSession(session.defaultSession);

@@ -1,7 +1,7 @@
 import { open, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { ProjectSummary } from './runtime-contract.cjs';
+import type { ProjectSummary } from './contracts.js';
 
 const CONFIG_NAME = 'discord-simulator.config.json';
 const MAX_CONFIG_BYTES = 1_048_576;

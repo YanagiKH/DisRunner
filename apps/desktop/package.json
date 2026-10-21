@@ -7,23 +7,24 @@
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
-    "dev": "pnpm --filter @disrunner/core run build && pnpm run electron:compile && concurrently -k -s first \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "dev": "pnpm --filter @disrunner/runtime... run build && pnpm run electron:compile && concurrently -k -s first \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "dev:web": "vite --host 127.0.0.1 --port 4173 --strictPort",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "build": "pnpm run typecheck && vite build && pnpm run electron:compile",
-    "package": "pnpm --filter @disrunner/core run build && pnpm run build && electron-builder",
+    "package": "pnpm --filter @disrunner/runtime... run build && pnpm run build && electron-builder",
     "test:package-smoke": "node tests/e2e/package-smoke.mjs",
     "package-and-smoke": "pnpm run package --publish never && pnpm run test:package-smoke",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "test": "vitest run && pnpm run test:runtime-manager",
-    "test:runtime-manager": "node --no-warnings=ExperimentalWarning --experimental-loader ./tests/runtime/typescript-loader.mjs --test tests/runtime/interaction-peer-auth.test.mjs",
+    "test:runtime-manager": "pnpm --filter @disrunner/runtime... run build && pnpm --filter @disrunner/runtime test",
     "test:e2e": "playwright test"
   },
   "dependencies": {
     "@disrunner/core": "workspace:*",
     "lucide-react": "^0.468.0",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "@disrunner/runtime": "workspace:*"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",

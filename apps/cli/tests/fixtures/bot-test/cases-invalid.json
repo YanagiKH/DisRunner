@@ -1,0 +1,128 @@
+[
+  {
+    "name": "null root",
+    "value": null
+  },
+  {
+    "name": "model case",
+    "value": {
+      "version": 1,
+      "execution": "model",
+      "name": "model",
+      "context": {
+        "actorId": "3000",
+        "guildId": "1000",
+        "channelId": "2000"
+      },
+      "steps": [
+        {
+          "requestId": "ping-1",
+          "input": "/ping",
+          "expect": {
+            "responseType": "message",
+            "content": "Pong! Offline and deterministic."
+          }
+        },
+        {
+          "requestId": "ping-2",
+          "input": "/ping",
+          "expect": {
+            "responseType": "message",
+            "content": "Pong! Offline and deterministic."
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "missing assertion",
+    "value": {
+      "version": 1,
+      "execution": "bot",
+      "name": "first mismatch stops subsequent steps",
+      "context": {
+        "actorId": "3000",
+        "guildId": "1000",
+        "channelId": "2000"
+      },
+      "steps": [
+        {
+          "requestId": "ping-1",
+          "input": "/ping"
+        }
+      ]
+    }
+  },
+  {
+    "name": "empty steps",
+    "value": {
+      "version": 1,
+      "execution": "bot",
+      "name": "first mismatch stops subsequent steps",
+      "context": {
+        "actorId": "3000",
+        "guildId": "1000",
+        "channelId": "2000"
+      },
+      "steps": []
+    }
+  },
+  {
+    "name": "bad command",
+    "value": {
+      "version": 1,
+      "execution": "bot",
+      "name": "first mismatch stops subsequent steps",
+      "context": {
+        "actorId": "3000",
+        "guildId": "1000",
+        "channelId": "2000"
+      },
+      "steps": [
+        {
+          "requestId": "ping-1",
+          "input": "/UPPER",
+          "expect": {
+            "responseType": "message",
+            "content": "Pong! Offline and deterministic."
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown context",
+    "value": {
+      "version": 1,
+      "execution": "bot",
+      "name": "first mismatch stops subsequent steps",
+      "context": {
+        "actorId": "3000",
+        "guildId": "1000",
+        "channelId": "missing"
+      },
+      "steps": [
+        {
+          "requestId": "ping-1",
+          "input": "/ping",
+          "expect": {
+            "responseType": "message",
+            "content": "Pong! Offline and deterministic."
+          }
+        },
+        {
+          "requestId": "ping-2",
+          "input": "/ping",
+          "expect": {
+            "responseType": "message",
+            "content": "Pong! Offline and deterministic."
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "malformed JSON",
+    "raw": "{\"version\":1, bad json"
+  }
+]

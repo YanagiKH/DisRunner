@@ -9,11 +9,11 @@ import {
   verifyWebhookResponseAuthentication,
   WEBHOOK_PEER_SECRET_ENV,
   WEBHOOK_RESPONSE_AUTH_HEADER,
-} from '../../electron/interaction-peer-auth.cts';
+} from '../dist/interaction-peer-auth.js';
 import {
   sendSignedInteraction,
   WebhookPeerAuthenticationError,
-} from '../../electron/interaction-transport.cts';
+} from '../dist/interaction-transport.js';
 
 const VECTOR = Object.freeze({
   peerSecretHex: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',

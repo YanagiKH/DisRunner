@@ -3,6 +3,7 @@ import { open, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseScenario, runScenario, sanitizeScenarioRunResult } from '@disrunner/core';
+import { runBotTest } from './bot-test.js';
 import { demoScenario } from './demo.js';
 import { sanitizeOutputText, stringifyForExport } from './output.js';
 import { createRecording, parseRecording, replayRecording } from './recording.js';
@@ -11,12 +12,15 @@ import { renderReport, type ReportFormat } from './reporters.js';
 const MAX_INPUT_BYTES = 16 * 1_024 * 1_024;
 
 interface CliOptions {
-  readonly command: 'demo' | 'run' | 'test' | 'validate' | 'report' | 'record' | 'replay' | 'help';
+  readonly command:
+    'bot-test' | 'demo' | 'run' | 'test' | 'validate' | 'report' | 'record' | 'replay' | 'help';
   readonly file?: string;
   readonly format: ReportFormat;
   readonly formatSpecified: boolean;
   readonly output?: string;
   readonly seed?: number;
+  readonly projectDirectory?: string;
+  readonly timeoutMs?: number;
 }
 
 const formats = new Set<ReportFormat>(['json', 'html', 'junit', 'sarif']);
@@ -25,6 +29,7 @@ function usage(): string {
   return `DisRunner — deterministic offline Discord bot simulator
 
 Usage:
+  disrunner bot-test <case.json> --project <directory> [--out <result.json>] [--timeout-ms <integer>]
   disrunner demo [--format json|html|junit|sarif] [--out path]
   disrunner run <scenario.yml> [--seed number] [--format json|html|junit|sarif] [--out path]
   disrunner test [scenario.yml] [--seed number]
@@ -41,6 +46,7 @@ invalid arguments, files, scenarios, or recording formats exit with code 2.
 export function parseArgs(argv: readonly string[]): CliOptions {
   const normalizedArgv = argv[0] === '--' ? argv.slice(1) : argv;
   const [rawCommand = 'help', ...rest] = normalizedArgv;
+  if (rawCommand === 'bot-test') return parseBotTestArgs(rest);
   const allowed = new Set([
     'demo',
     'run',
@@ -103,6 +109,81 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   return options;
 }
 
+function parseBotTestArgs(argv: readonly string[]): CliOptions {
+  const [file, ...rest] = argv;
+  if (!file || file.startsWith('-')) throw new Error('bot-test requires a case file');
+  const flags = new Map<string, string>();
+  for (let index = 0; index < rest.length; index += 2) {
+    const flag = rest[index];
+    if (flag !== '--project' && flag !== '--out' && flag !== '--timeout-ms') {
+      throw new Error(`Unexpected bot-test argument: ${flag ?? ''}`);
+    }
+    if (flags.has(flag)) throw new Error(`Duplicate option: ${flag}`);
+    const value = rest[index + 1];
+    if (!value || value.startsWith('-')) throw new Error(`${flag} requires a value`);
+    flags.set(flag, value);
+  }
+  const projectDirectory = flags.get('--project');
+  if (projectDirectory === undefined) throw new Error('bot-test requires --project');
+  const output = flags.get('--out');
+  const rawTimeout = flags.get('--timeout-ms');
+  const timeoutMs = rawTimeout === undefined ? undefined : Number(rawTimeout);
+  if (
+    rawTimeout !== undefined &&
+    (!/^[0-9]+$/u.test(rawTimeout) ||
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs === undefined ||
+      timeoutMs < 1 ||
+      timeoutMs > 300_000)
+  ) {
+    throw new Error('--timeout-ms requires an integer from 1 to 300000');
+  }
+  if (output !== undefined) assertDistinctPaths(file, output);
+  return {
+    command: 'bot-test',
+    file,
+    projectDirectory,
+    format: 'json',
+    formatSpecified: false,
+    ...(output === undefined ? {} : { output }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+  };
+}
+
+async function runBotTestCommand(options: CliOptions): Promise<number> {
+  const controller = new AbortController();
+  let cancellationExitCode: 130 | 143 = 130;
+  const cancel = (code: 130 | 143): void => {
+    if (controller.signal.aborted) return;
+    cancellationExitCode = code;
+    controller.abort();
+  };
+  const interrupt = (): void => cancel(130);
+  const terminate = (): void => cancel(143);
+  process.on('SIGINT', interrupt);
+  process.on('SIGTERM', terminate);
+  try {
+    const result = await runBotTest({
+      casePath: requireFile(options),
+      projectDirectory: options.projectDirectory ?? '',
+      ...(options.output === undefined ? {} : { outPath: options.output }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      signal: controller.signal,
+      // The module reads this after cancellation and cleanup have completed.
+      get cancellationExitCode() {
+        return cancellationExitCode;
+      },
+    });
+    // The finalized report already contains redacted runtime issues. Preserve exact
+    // observed assertion text and parity with the module-owned output file.
+    process.stdout.write(`${JSON.stringify(result.report, null, 2)}\n`);
+    return result.exitCode;
+  } finally {
+    process.off('SIGINT', interrupt);
+    process.off('SIGTERM', terminate);
+  }
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   let options: CliOptions;
   try {
@@ -119,6 +200,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 
   try {
     switch (options.command) {
+      case 'bot-test':
+        return await runBotTestCommand(options);
       case 'demo':
         return await runAndRender(demoScenario, options);
       case 'run':

@@ -20,13 +20,13 @@
     "dev:web": "pnpm --filter @disrunner/desktop dev:web",
     "build": "pnpm -r --if-present run build",
     "build:core": "pnpm --filter @disrunner/core build",
-    "build:desktop": "pnpm --filter @disrunner/desktop build",
-    "build:cli": "pnpm --filter @disrunner/cli build",
+    "build:desktop": "pnpm run build:runtime && pnpm --filter @disrunner/desktop build",
+    "build:cli": "pnpm run build:runtime && pnpm --filter @disrunner/cli build",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check:versions": "node .github/scripts/check-versions.mjs",
-    "lint": "pnpm run build:core && eslint . --max-warnings=0",
-    "typecheck": "pnpm run build:core && pnpm -r --if-present run typecheck",
+    "lint": "pnpm run build:runtime && eslint . --max-warnings=0",
+    "typecheck": "pnpm run build:runtime && pnpm -r --if-present run typecheck",
     "test": "pnpm -r --if-present run test",
     "test:unit": "pnpm --filter @disrunner/core test:unit",
     "test:contract": "pnpm --filter @disrunner/core test:contract",
@@ -41,7 +41,9 @@
     "verify": "pnpm run check:versions && pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test:unit && pnpm run test:contract && pnpm run test:integration && pnpm run test:offline && pnpm run test:security && pnpm run test:desktop && pnpm run test:raw-webhook && pnpm run test:secret-scanner && pnpm run build",
     "verify:release": "pnpm run verify && pnpm run test:e2e && pnpm run test:perf",
     "cli": "pnpm --filter @disrunner/cli start",
-    "clean": "node scripts/clean.mjs"
+    "clean": "node scripts/clean.mjs",
+    "build:runtime": "pnpm run build:core && pnpm --filter @disrunner/runtime build",
+    "test:runtime": "pnpm run build:runtime && pnpm --filter @disrunner/runtime test"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

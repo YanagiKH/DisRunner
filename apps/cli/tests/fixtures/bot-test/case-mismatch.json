@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "execution": "bot",
+  "name": "first mismatch stops subsequent steps",
+  "context": {
+    "actorId": "3000",
+    "guildId": "1000",
+    "channelId": "2000"
+  },
+  "steps": [
+    {
+      "requestId": "ping-1",
+      "input": "/ping",
+      "expect": {
+        "responseType": "message",
+        "content": "Pong! Offline and deterministic."
+      }
+    },
+    {
+      "requestId": "ping-2",
+      "input": "/ping",
+      "expect": {
+        "responseType": "message",
+        "content": "Pong! Offline and deterministic."
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "execution": "bot",
+  "name": "raw ping",
+  "context": {
+    "actorId": "3000",
+    "guildId": "1000",
+    "channelId": "2000"
+  },
+  "steps": [
+    {
+      "requestId": "ping-1",
+      "input": "/ping",
+      "expect": {
+        "responseType": "message",
+        "content": "Pong! Offline and deterministic."
+      }
+    }
+  ]
+}

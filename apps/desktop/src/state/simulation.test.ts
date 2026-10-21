@@ -78,6 +78,9 @@ describe('simulationReducer', () => {
       type: 'execute-runtime',
       input: '/ping',
       result: {
+        runId: 'run-1',
+        requestId: 'request-1',
+        context: { actorId: '3000', guildId: '1000', channelId: '2100' },
         ok: true,
         command: 'ping',
         interactionId: '1234567890',
@@ -86,7 +89,7 @@ describe('simulationReducer', () => {
         error: null,
       },
     });
-    expect((state.messages['bot-testing'] ?? []).at(-1)).toMatchObject({
+    expect((state.messages['2100'] ?? []).at(-1)).toMatchObject({
       content: 'Actual bot response',
       responseState: 'ephemeral',
     });
@@ -96,18 +99,16 @@ describe('simulationReducer', () => {
 
   it('renders sanitized runtime failures as evidence rather than a canned bot reply', () => {
     const state = simulationReducer(runningState(), {
-      type: 'execute-runtime',
-      input: '/timeout',
-      result: {
-        ok: false,
-        command: 'timeout',
-        interactionId: '1234567891',
-        durationMs: 3_001,
-        response: null,
-        error: 'Bot interaction timed out after 3000 ms.',
+      type: 'runtime-failed',
+      request: {
+        runId: 'run-1',
+        requestId: 'request-2',
+        input: '/timeout',
+        context: { actorId: '3000', guildId: '1000', channelId: '2100' },
       },
+      error: 'Bot interaction timed out after 3000 ms.',
     });
-    expect((state.messages['bot-testing'] ?? []).at(-1)).toMatchObject({
+    expect((state.messages['2100'] ?? []).at(-1)).toMatchObject({
       content: 'Bot interaction timed out after 3000 ms.',
       responseState: 'timeout',
     });

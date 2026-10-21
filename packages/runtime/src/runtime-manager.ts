@@ -1,22 +1,27 @@
 import { generateKeyPairSync, type KeyObject } from 'node:crypto';
-import { createConnection, createServer } from 'node:net';
+import { createServer } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
 
-import { createWebhookPeerSecret } from './interaction-peer-auth.cjs';
+import { createWebhookPeerSecret } from './interaction-peer-auth.js';
 import {
   INTERACTION_TIMEOUT_MS,
   sendSignedInteraction,
   WebhookPeerAuthenticationError,
-} from './interaction-transport.cjs';
-import { loadProjectConfiguration, type ResolvedProjectConfiguration } from './project-config.cjs';
+} from './interaction-transport.js';
+import { loadProjectConfiguration, type ResolvedProjectConfiguration } from './project-config.js';
 import {
   emptyRuntimeState,
+  SessionError,
+  type SessionIssue,
+  type InvocationContext,
   type DesktopRuntimeState,
   type RuntimeEndpoints,
   type RuntimeInvocationResult,
   type RuntimeOutputEntry,
   type RuntimeRiskEntry,
   type RuntimeTraceEntry,
-} from './runtime-contract.cjs';
+} from './contracts.js';
 
 const CORE_SPECIFIER: string = '@disrunner/core';
 const MAX_RENDERER_OUTPUT = 200;
@@ -29,12 +34,15 @@ const MAX_INTERACTION_INPUT_BYTES = 2_000;
 interface BotSnapshotLike {
   readonly status: string;
   readonly pid?: number;
+  readonly startedAtMs?: number;
+  readonly exitedAtMs?: number;
 }
 
 interface BotRunnerLike {
   start(config: Readonly<Record<string, unknown>>): Promise<BotSnapshotLike>;
   stop(graceMs?: number): Promise<BotSnapshotLike>;
   snapshot(): BotSnapshotLike;
+  observeExit?(): 'alive' | 'exited' | 'unknown';
 }
 
 interface RestServerLike {
@@ -111,7 +119,91 @@ export class DesktopRuntimeManager {
   readonly #onState: StateListener;
   readonly #onEndpoints: EndpointListener;
   #state: DesktopRuntimeState = emptyRuntimeState();
-  #selectedRoot: string | null = null;
+  #configuration: ResolvedProjectConfiguration | null = null;
+  #runAbort: AbortController | null = null;
+  #failure: SessionError | null = null;
+  #cleanupIssues: SessionIssue[] = [];
+  #unexpectedExit = false;
+  #expectedStop = false;
+  #generation = 0;
+
+  public get failure(): SessionError | null {
+    return this.#failure;
+  }
+  public get shutdownIssues(): readonly SessionIssue[] {
+    return structuredClone([
+      ...(this.#unexpectedExit
+        ? [{ code: 'child-exited' as const, message: 'Bot process exited unexpectedly.' }]
+        : []),
+      ...this.#cleanupIssues,
+    ]);
+  }
+  public get hasResources(): boolean {
+    return this.#bot !== null || this.#rest !== null || this.#gatewayServer !== null;
+  }
+  public contexts(): InvocationContext[] {
+    const resources = this.#configuration?.resources ?? [];
+    return resources
+      .filter((r) => r['resourceType'] === 'user')
+      .flatMap((user) =>
+        resources
+          .filter(
+            (r) =>
+              r['resourceType'] === 'channel' &&
+              r['type'] === 0 &&
+              resources.some((g) => g['resourceType'] === 'guild' && g['id'] === r['guild_id']),
+          )
+          .map((channel) => ({
+            actorId: String(user['id']),
+            guildId: String(channel['guild_id']),
+            channelId: String(channel['id']),
+          })),
+      );
+  }
+  public validateContext(context: InvocationContext): InvocationContext {
+    if (
+      context === null ||
+      typeof context !== 'object' ||
+      ![context.actorId, context.guildId, context.channelId].every(
+        (id) =>
+          typeof id === 'string' &&
+          id.length > 0 &&
+          Buffer.byteLength(id) <= 128 &&
+          !id.includes('\0'),
+      ) ||
+      !this.contexts().some(
+        (candidate) =>
+          candidate.actorId === context.actorId &&
+          candidate.guildId === context.guildId &&
+          candidate.channelId === context.channelId,
+      )
+    ) {
+      throw new SessionError(
+        'invalid',
+        'Invocation context must identify an existing fixture user, guild and guild text channel.',
+      );
+    }
+    return { actorId: context.actorId, guildId: context.guildId, channelId: context.channelId };
+  }
+  public assertLive(): void {
+    const bot = this.#bot?.snapshot();
+    if (
+      bot !== undefined &&
+      !this.#expectedStop &&
+      !this.#unexpectedExit &&
+      (bot.startedAtMs !== undefined || bot.exitedAtMs !== undefined)
+    ) {
+      if (['stopped', 'crashed'].includes(bot.status)) this.#unexpectedExit = true;
+      else if (process.platform === 'linux') {
+        const observed = this.#bot?.observeExit?.();
+        if (observed === 'exited') this.#unexpectedExit = true;
+        else if (observed === 'unknown')
+          throw new SessionError('transport', 'Bot process liveness is uncertain.');
+      }
+    }
+    if (this.#unexpectedExit)
+      throw new SessionError('child-exited', 'Bot process exited unexpectedly.');
+  }
   #bot: BotRunnerLike | null = null;
   #rest: RestServerLike | null = null;
   #gatewayServer: GatewayServerLike | null = null;
@@ -145,14 +237,16 @@ export class DesktopRuntimeManager {
     }
     try {
       const project = await loadProjectConfiguration(directory);
-      this.#selectedRoot = project.summary.root;
+      this.#configuration = structuredClone(project);
+      this.#failure = null;
       this.#publish({
         ...emptyRuntimeState(),
         phase: 'ready',
         project: project.summary,
       });
     } catch (error) {
-      this.#selectedRoot = null;
+      this.#configuration = null;
+      this.#failure = new SessionError('invalid', 'Project configuration could not be validated.');
       this.#publish({
         ...emptyRuntimeState(),
         phase: 'error',
@@ -162,10 +256,13 @@ export class DesktopRuntimeManager {
     return this.snapshot();
   }
 
-  public async start(): Promise<DesktopRuntimeState> {
+  public async start(
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<DesktopRuntimeState> {
     if (this.#startPromise !== null) return this.#startPromise;
     if (this.#stopPromise !== null) await this.#stopPromise;
-    const operation = this.#startInternal();
+    this.#runAbort = new AbortController();
+    const operation = Promise.resolve().then(() => this.#startInternal(options));
     this.#startPromise = operation;
     try {
       return await operation;
@@ -174,13 +271,34 @@ export class DesktopRuntimeManager {
     }
   }
 
-  async #startInternal(): Promise<DesktopRuntimeState> {
+  async #startInternal(options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }): Promise<DesktopRuntimeState> {
     if (this.#state.phase === 'running' || this.#state.phase === 'starting') return this.snapshot();
     if (this.#state.phase === 'stopping')
       return this.#setError('The current bot is still stopping.');
-    if (this.#selectedRoot === null)
+    if (this.#configuration === null)
       return this.#setError('Select a valid bot project before starting.');
 
+    if (this.hasResources)
+      return this.#setError('Outstanding cleanup must succeed before restart.');
+    this.#runAbort ??= new AbortController();
+    const deadline = new AbortController();
+    const timer = setTimeout(
+      () => deadline.abort(new SessionError('timeout', 'Startup deadline exceeded.')),
+      options.timeoutMs ?? 10_000,
+    );
+    const signal = AbortSignal.any([
+      this.#runAbort.signal,
+      deadline.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
+    const generation = ++this.#generation;
+    this.#expectedStop = false;
+    this.#unexpectedExit = false;
+    this.#failure = null;
+    this.#cleanupIssues = [];
     this.#publish({
       ...this.#state,
       phase: 'starting',
@@ -191,9 +309,11 @@ export class DesktopRuntimeManager {
     });
     let configuration: ResolvedProjectConfiguration | null = null;
     try {
-      configuration = await loadProjectConfiguration(this.#selectedRoot);
+      signal.throwIfAborted();
+      configuration = this.#configuration;
       this.#publish({ ...this.#state, project: configuration.summary });
       const core = await loadCore();
+      signal.throwIfAborted();
       const GatewayServer = core.LocalGatewayServer;
       if (GatewayServer === undefined) {
         throw new Error(
@@ -243,6 +363,7 @@ export class DesktopRuntimeManager {
       this.#applicationId = applicationId;
       this.#interactionContext = deriveInteractionContext(configuration.resources);
       const gatewayPort = await reserveLoopbackPort();
+      signal.throwIfAborted();
       const expectedGatewayUrl = `ws://127.0.0.1:${gatewayPort}/gateway`;
       const gateway = new core.GatewayEmulator({
         clock,
@@ -254,6 +375,7 @@ export class DesktopRuntimeManager {
       const gatewayServer = new GatewayServer({ gateway, trace });
       this.#gatewayServer = gatewayServer;
       const gatewayStartResult = await gatewayServer.start(gatewayPort);
+      signal.throwIfAborted();
       const gatewayUrl = requireGatewayUrl(gatewayStartResult ?? gatewayServer.address);
       if (gatewayUrl !== expectedGatewayUrl) {
         throw new Error('LocalGatewayServer address does not match the Gateway READY resume URL.');
@@ -281,16 +403,19 @@ export class DesktopRuntimeManager {
       });
       this.#rest = rest;
       const restAddress = requireRestAddress(await rest.start(0));
+      signal.throwIfAborted();
       const interactionEndpoint = await resolveInteractionEndpoint(
         configuration.adapter.interactionEndpoint,
       );
+      signal.throwIfAborted();
       this.#interactionEndpoint = interactionEndpoint ?? null;
       const endpoints: RuntimeEndpoints = {
         restBaseUrl: restAddress.apiBaseUrl,
         gatewayUrl,
         ...(interactionEndpoint === undefined ? {} : { interactionEndpoint }),
       };
-      this.#onEndpoints(endpoints);
+      this.#notifyEndpoints(endpoints);
+      signal.throwIfAborted();
 
       const output: RuntimeOutputEntry[] = [];
       let outputBytes = 0;
@@ -299,6 +424,7 @@ export class DesktopRuntimeManager {
         maxOutputBytes: MAX_RENDERER_OUTPUT_BYTES,
         maxOutputLineBytes: 65_536,
         onOutput: (entry: unknown) => {
+          if (generation !== this.#generation || this.#expectedStop) return;
           const sanitized = sanitizeOutput(entry);
           if (sanitized === null) return;
           outputBytes += Buffer.byteLength(sanitized.text);
@@ -338,20 +464,22 @@ export class DesktopRuntimeManager {
         ...(interactionPeerSecret === null ? {} : { interactionPeerSecret }),
         fakeToken: sessionToken,
       });
-      if (interactionEndpoint !== undefined) {
-        await waitForLoopbackEndpoint(interactionEndpoint, 10_000);
-        if (interactionCredentials !== null) {
-          if (this.#interactionPrivateKey === null)
-            throw new Error('Interaction signing key was not retained.');
-          if (this.#interactionPeerSecret === null)
-            throw new Error('Interaction peer secret was not retained.');
-          await verifySignedPing(
-            interactionEndpoint,
-            this.#interactionPrivateKey,
-            this.#interactionPeerSecret,
-          );
-        }
+      signal.throwIfAborted();
+      if (
+        interactionEndpoint !== undefined &&
+        interactionCredentials !== null &&
+        interactionPeerSecret !== null
+      ) {
+        await waitForSignedPing(
+          interactionEndpoint,
+          interactionCredentials.privateKey,
+          interactionPeerSecret,
+          signal,
+          () => this.assertLive(),
+        );
       }
+      signal.throwIfAborted();
+      this.assertLive();
       this.#trace = trace;
       this.#risks = risks;
       this.#publish({
@@ -362,9 +490,11 @@ export class DesktopRuntimeManager {
         endpoints,
         output: [...output],
       });
+      signal.throwIfAborted();
       this.#startPolling();
     } catch (error) {
-      const rawFailure = errorMessage(error);
+      this.#failure = operationFailure(error, signal, 'start-failed');
+      const rawFailure = this.#failure.message;
       const sanitizedFailure = this.#sanitizeForExport?.({ message: rawFailure });
       const primaryFailure =
         isRecord(sanitizedFailure) && typeof sanitizedFailure['message'] === 'string'
@@ -388,13 +518,23 @@ export class DesktopRuntimeManager {
         endpoints: null,
       });
     }
+    clearTimeout(timer);
     return this.snapshot();
   }
 
   public async stop(): Promise<DesktopRuntimeState> {
+    try {
+      this.assertLive();
+    } catch {
+      /* Retain unexpected exit before shutdown intent. */
+    }
+    this.#expectedStop = true;
+    this.#runAbort?.abort(
+      new SessionError('cancelled', 'Runtime operation cancelled by shutdown.'),
+    );
     if (this.#startPromise !== null) await this.#startPromise;
     if (this.#stopPromise !== null) return this.#stopPromise;
-    const operation = this.#stopInternal();
+    const operation = Promise.resolve().then(() => this.#stopInternal());
     this.#stopPromise = operation;
     try {
       return await operation;
@@ -438,8 +578,17 @@ export class DesktopRuntimeManager {
     return this.snapshot();
   }
 
-  public async invoke(input: string): Promise<RuntimeInvocationResult> {
+  public async invoke(
+    input: string,
+    context?: InvocationContext,
+    options: { signal?: AbortSignal; timeoutMs?: number; requireExactResponse?: boolean } = {},
+  ): Promise<RuntimeInvocationResult> {
+    const signal = AbortSignal.any([
+      ...(this.#runAbort ? [this.#runAbort.signal] : []),
+      ...(options.signal ? [options.signal] : []),
+    ]);
     const startedAtMs = Date.now();
+    this.#failure = null;
     if (
       typeof input !== 'string' ||
       input.length > MAX_INTERACTION_INPUT_BYTES ||
@@ -491,6 +640,15 @@ export class DesktopRuntimeManager {
     let interactionId: string | null = null;
     let span: unknown;
     try {
+      signal.throwIfAborted();
+      this.assertLive();
+      const selectedContext = context === undefined ? undefined : this.validateContext(context);
+      const actor = this.#configuration?.resources.find(
+        (r) => r['resourceType'] === 'user' && r['id'] === selectedContext?.actorId,
+      );
+      const actorUser = Object.fromEntries(
+        Object.entries(actor ?? {}).filter(([key]) => key !== 'resourceType'),
+      );
       const argumentText = normalized.slice(commandToken.length).trim();
       const created = this.#interactions.create({
         type: 'command',
@@ -516,10 +674,17 @@ export class DesktopRuntimeManager {
         type: 2,
         token: created['token'],
         version: 1,
-        ...(this.#interactionContext.guildId === undefined
+        ...(selectedContext === undefined
+          ? {}
+          : {
+              guild_id: selectedContext.guildId,
+              channel_id: selectedContext.channelId,
+              member: { user: actorUser },
+            }),
+        ...(selectedContext !== undefined || this.#interactionContext.guildId === undefined
           ? {}
           : { guild_id: this.#interactionContext.guildId }),
-        ...(this.#interactionContext.channelId === undefined
+        ...(selectedContext !== undefined || this.#interactionContext.channelId === undefined
           ? {}
           : { channel_id: this.#interactionContext.channelId }),
         data: {
@@ -538,22 +703,30 @@ export class DesktopRuntimeManager {
         this.#interactionPrivateKey,
         this.#interactionPeerSecret,
         payload,
+        { ...options, signal },
       );
+      signal.throwIfAborted();
+      this.assertLive();
       const normalizedCallback = normalizeInteractionCallback(callback);
-      this.#interactions.respond(interactionId, normalizedCallback.type, normalizedCallback.data);
-      this.#trace.end(span, 'ok', { callbackType: normalizedCallback.type });
-      this.#refreshEvidence();
-      return this.#invocationResult({
+      const result: RuntimeInvocationResult = {
         ok: true,
         command: commandName,
         interactionId,
         durationMs: Date.now() - startedAtMs,
         response: normalizedCallback,
         error: null,
-      });
+      };
+      // Exact consumers must never evaluate a redacted or truncated display projection.
+      // Validate before recording an accepted callback or a successful trace.
+      const exactResult = options.requireExactResponse ? this.#exactInvocationResult(result) : null;
+      this.#interactions.respond(interactionId, normalizedCallback.type, normalizedCallback.data);
+      this.#trace.end(span, 'ok', { callbackType: normalizedCallback.type });
+      this.#refreshEvidence();
+      return exactResult ?? this.#invocationResult(result);
     } catch (error) {
-      if (interactionId !== null) this.#interactions.get(interactionId);
-      const timedOut = isTimeoutError(error);
+      this.#failure = operationFailure(error, signal, 'transport');
+      if (interactionId !== null) this.#interactions?.get(interactionId);
+      const timedOut = this.#failure.code === 'timeout';
       const peerAuthenticationFailed = error instanceof WebhookPeerAuthenticationError;
       this.#risks?.add({
         ruleId: timedOut
@@ -569,7 +742,7 @@ export class DesktopRuntimeManager {
             ? 'Webhook peer authentication failed'
             : 'Invalid interaction callback',
         evidence: timedOut
-          ? `/${commandName} did not return a callback within ${INTERACTION_TIMEOUT_MS} ms.`
+          ? `/${commandName} did not return a callback within ${options.timeoutMs ?? INTERACTION_TIMEOUT_MS} ms.`
           : peerAuthenticationFailed
             ? `/${commandName} returned bytes without valid per-run response authentication.`
             : `/${commandName} returned a callback that could not be accepted.`,
@@ -589,17 +762,36 @@ export class DesktopRuntimeManager {
         }
       }
       this.#refreshEvidence();
-      return this.#invocationResult({
+      const failureResult: RuntimeInvocationResult = {
         ok: false,
         command: commandName,
         interactionId,
         durationMs: Date.now() - startedAtMs,
         response: null,
-        error: timedOut
-          ? `Bot interaction timed out after ${INTERACTION_TIMEOUT_MS} ms.`
-          : errorMessage(error),
-      });
+        error: options.requireExactResponse
+          ? this.#failure.message
+          : timedOut
+            ? `Bot interaction timed out after ${options.timeoutMs ?? INTERACTION_TIMEOUT_MS} ms.`
+            : errorMessage(error),
+      };
+      // Exact-mode errors contain no response and must not re-enter a failed sanitizer.
+      return options.requireExactResponse ? failureResult : this.#invocationResult(failureResult);
     }
+  }
+
+  #exactInvocationResult(result: RuntimeInvocationResult): RuntimeInvocationResult {
+    try {
+      const sanitized = this.#sanitizeForExport?.(result);
+      if (isInvocationResult(sanitized) && isDeepStrictEqual(sanitized.response, result.response)) {
+        return sanitized;
+      }
+    } catch {
+      // Sanitizer failures are not safe response evidence either.
+    }
+    throw new SessionError(
+      'transport',
+      'Authenticated response cannot be represented exactly and safely.',
+    );
   }
 
   #invocationResult(result: RuntimeInvocationResult): RuntimeInvocationResult {
@@ -610,6 +802,7 @@ export class DesktopRuntimeManager {
   }
 
   #refreshEvidence(): void {
+    if (this.#expectedStop) return;
     this.#publish({
       ...this.#state,
       traces: sanitizeTraces(this.#trace?.spans(MAX_RENDERER_TRACES) ?? []),
@@ -644,7 +837,7 @@ export class DesktopRuntimeManager {
         this.#handlingChildExit = true;
         void this.stop()
           .then(() => {
-            if (processSnapshot.status === 'crashed') {
+            if (this.#unexpectedExit) {
               this.#publish({
                 ...this.#state,
                 phase: 'error',
@@ -669,7 +862,7 @@ export class DesktopRuntimeManager {
 
   async #cleanup(): Promise<void> {
     if (this.#cleanupPromise !== null) return this.#cleanupPromise;
-    const operation = this.#cleanupInternal();
+    const operation = Promise.resolve().then(() => this.#cleanupInternal());
     this.#cleanupPromise = operation;
     try {
       await operation;
@@ -683,9 +876,7 @@ export class DesktopRuntimeManager {
     const bot = this.#bot;
     const rest = this.#rest;
     const gatewayServer = this.#gatewayServer;
-    this.#bot = null;
-    this.#rest = null;
-    this.#gatewayServer = null;
+
     this.#trace = null;
     this.#risks = null;
     this.#interactionPrivateKey = null;
@@ -694,37 +885,58 @@ export class DesktopRuntimeManager {
     this.#applicationId = null;
     this.#interactionContext = null;
     this.#interactions = null;
-    this.#sanitizeForExport = null;
-    this.#onEndpoints(null);
+    this.#notifyEndpoints(null);
     const errors: string[] = [];
     if (bot !== null) {
       try {
-        await bot.stop(5_000);
-      } catch (error) {
-        errors.push(`bot: ${errorMessage(error)}`);
+        const stopped = await bot.stop(5_000);
+        if (stopped.status !== 'stopped' && stopped.status !== 'crashed')
+          throw new Error('Child termination was not confirmed.');
+        this.#bot = null;
+      } catch {
+        errors.push('Bot termination could not be confirmed.');
       }
     }
     if (rest !== null) {
       try {
         await rest.stop();
-      } catch (error) {
-        errors.push(`REST: ${errorMessage(error)}`);
+        this.#rest = null;
+      } catch {
+        errors.push('REST closure could not be confirmed.');
       }
     }
     if (gatewayServer !== null) {
       try {
         await gatewayServer.stop();
-      } catch (error) {
-        errors.push(`Gateway: ${errorMessage(error)}`);
+        this.#gatewayServer = null;
+      } catch {
+        errors.push('Gateway closure could not be confirmed.');
       }
     }
-    if (errors.length > 0) throw new Error(errors.join('; '));
+    this.#cleanupIssues = errors.map((message) => ({
+      code: 'cleanup',
+      message: redactText(message),
+    }));
+    if (errors.length > 0) throw new Error('Runtime resource cleanup failed.');
+    this.#sanitizeForExport = null;
+  }
+
+  #notifyEndpoints(endpoints: RuntimeEndpoints | null): void {
+    try {
+      this.#onEndpoints(structuredClone(endpoints));
+    } catch {
+      /* Observer only. */
+    }
   }
 
   #publish(state: DesktopRuntimeState): void {
     const sanitized = this.#sanitizeForExport?.(state);
     this.#state = structuredClone(isRuntimeState(sanitized) ? sanitized : state);
-    this.#onState(this.snapshot());
+    try {
+      this.#onState(this.snapshot());
+    } catch {
+      /* Observers cannot corrupt lifecycle. */
+    }
   }
 }
 
@@ -792,30 +1004,26 @@ function reserveLoopbackPort(): Promise<number> {
   });
 }
 
-async function waitForLoopbackEndpoint(endpoint: string, timeoutMs: number): Promise<void> {
-  const parsed = new URL(endpoint);
-  const port = Number(parsed.port);
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await canConnect(parsed.hostname, port)) return;
-    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 100));
+async function waitForSignedPing(
+  endpoint: string,
+  key: KeyObject,
+  secret: string,
+  signal: AbortSignal,
+  assertLive: () => void,
+): Promise<void> {
+  while (true) {
+    signal.throwIfAborted();
+    assertLive();
+    try {
+      await verifySignedPing(endpoint, key, secret, signal);
+      return;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof WebhookPeerAuthenticationError) throw error;
+      if (!(error instanceof TypeError && error.message === 'fetch failed')) throw error;
+    }
+    await delay(50, undefined, { signal });
   }
-  throw new Error(`Bot interaction endpoint did not become ready within ${timeoutMs} ms.`);
-}
-
-function canConnect(host: string, port: number): Promise<boolean> {
-  return new Promise((resolvePromise) => {
-    const socket = createConnection({ host, port });
-    const finish = (connected: boolean): void => {
-      socket.removeAllListeners();
-      socket.destroy();
-      resolvePromise(connected);
-    };
-    socket.setTimeout(250);
-    socket.once('connect', () => finish(true));
-    socket.once('error', () => finish(false));
-    socket.once('timeout', () => finish(false));
-  });
 }
 
 function createInteractionCredentials(): {
@@ -829,6 +1037,7 @@ function createInteractionCredentials(): {
   return { publicKeyHex: bytes.subarray(bytes.byteLength - 32).toString('hex'), privateKey };
 }
 
+/** Legacy string-invoke compatibility only; Session always supplies an explicit context. */
 function deriveInteractionContext(resources: readonly Readonly<Record<string, unknown>>[]): {
   readonly guildId?: string;
   readonly channelId?: string;
@@ -849,8 +1058,15 @@ async function verifySignedPing(
   endpoint: string,
   privateKey: KeyObject,
   peerSecretHex: string,
+  signal: AbortSignal,
 ): Promise<void> {
-  const payload = await sendSignedInteraction(endpoint, privateKey, peerSecretHex, { type: 1 });
+  const payload = await sendSignedInteraction(
+    endpoint,
+    privateKey,
+    peerSecretHex,
+    { type: 1 },
+    { signal, timeoutMs: 60_000 },
+  );
   if (!isRecord(payload) || payload['type'] !== 1) {
     throw new Error('Signed interaction PING readiness returned an invalid response.');
   }
@@ -905,10 +1121,6 @@ function isRuntimeState(value: unknown): value is DesktopRuntimeState {
     Array.isArray(value['traces']) &&
     Array.isArray(value['risks'])
   );
-}
-
-function isTimeoutError(error: unknown): boolean {
-  return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
 }
 
 function requireGatewayUrl(value: unknown): string {
@@ -1021,4 +1233,24 @@ function errorMessage(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function operationFailure(
+  error: unknown,
+  signal: AbortSignal,
+  fallback: 'transport' | 'start-failed',
+): SessionError {
+  if (signal.aborted)
+    return signal.reason instanceof SessionError
+      ? signal.reason
+      : new SessionError('cancelled', 'Runtime operation cancelled.');
+  if (error instanceof SessionError) return error;
+  if (error instanceof WebhookPeerAuthenticationError)
+    return new SessionError('peer-auth', 'Webhook response authentication failed.');
+  if (error instanceof Error && error.name === 'TimeoutError')
+    return new SessionError('timeout', 'Interaction deadline exceeded.');
+  return new SessionError(
+    fallback,
+    fallback === 'transport' ? 'Bot interaction failed.' : 'Bot startup failed.',
+  );
 }
