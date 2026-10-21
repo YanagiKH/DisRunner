@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createSession } from '../dist/index.js';
 const project = fileURLToPath(new URL('../../../examples/raw-webhook-bot/', import.meta.url));
 const context = { actorId: '3000', guildId: '1000', channelId: '2100' };
@@ -89,7 +89,7 @@ test('reentrant snapshot changes remain ordered and disposed start cannot succee
 test('cleanup tries every server and retains failed ownership until retry', async () => {
   const { createRequire } = await import('node:module');
   const require = createRequire(new URL('../dist/index.js', import.meta.url));
-  const core = await import(require.resolve('@disrunner/core'));
+  const core = await import(pathToFileURL(require.resolve('@disrunner/core')).href);
   const restStop = core.LocalRestEmulator.prototype.stop;
   const gatewayStop = core.LocalGatewayServer.prototype.stop;
   let restCalls = 0;
