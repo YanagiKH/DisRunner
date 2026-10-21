@@ -198,12 +198,18 @@ export class LocalGatewayServer {
         this.#bindSession(socket, state, result.sessionId);
         this.#send(socket, result.ready);
       } else if (packet.op === GatewayOpcodes.HEARTBEAT) {
-        if (state.sessionId === undefined)
-          throw new GatewayProtocolError(4003, 'Identify before heartbeating.');
         const sequence =
           packet.d === null ? null : requireSafeInteger(packet.d, 'heartbeat sequence');
-        const ack = this.#gateway.heartbeat(state.sessionId, sequence);
-        if (ack !== undefined) this.#send(socket, ack);
+        // HELLO can trigger a heartbeat before IDENTIFY or RESUME. This ACK is
+        // transport-only: do not bind a session or change the auth deadline.
+        if (state.sessionId === undefined) {
+          if (sequence !== null && sequence < 0)
+            throw new GatewayProtocolError(4002, 'Heartbeat sequence must be nonnegative.');
+          this.#send(socket, { op: GatewayOpcodes.HEARTBEAT_ACK, d: null });
+        } else {
+          const ack = this.#gateway.heartbeat(state.sessionId, sequence);
+          if (ack !== undefined) this.#send(socket, ack);
+        }
       } else if (packet.op === GatewayOpcodes.RESUME) {
         if (state.sessionId !== undefined) {
           throw new GatewayProtocolError(4005, 'Connection is already authenticated.');
