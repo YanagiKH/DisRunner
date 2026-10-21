@@ -262,12 +262,19 @@ export class InteractionEngine {
     if (interaction.status === 'pending') {
       throw new DiscordApiError(404, 10015, 'Unknown webhook.');
     }
-    const clonedData = cloneBoundedPayload(data, this.#maxPayloadBytes, 'Interaction response');
+    if (interaction.status === 'deleted') throw new DiscordApiError(404, 10008, 'Unknown message.');
+    const ephemeral = interaction.initialResponse?.ephemeral ?? false;
+    const mergedData = this.#mergePatch(
+      interaction.initialResponse?.data ?? {},
+      data,
+      ephemeral,
+      'Interaction response',
+    );
     const response: InteractionResponse = {
       type: 'message',
-      data: clonedData,
+      data: mergedData,
       atMs: this.#clock.now(),
-      ephemeral: interaction.initialResponse?.ephemeral ?? isEphemeral(clonedData),
+      ephemeral,
     };
     const retainedBytes = this.#prepareResize(interaction, {
       ...interaction,
@@ -283,6 +290,7 @@ export class InteractionEngine {
   public deleteOriginal(id: string): SimulatedInteraction {
     const interaction = this.#requireUsableToken(id);
     if (interaction.status === 'pending') throw new DiscordApiError(404, 10015, 'Unknown webhook.');
+    if (interaction.status === 'deleted') throw new DiscordApiError(404, 10008, 'Unknown message.');
     const retainedBytes = this.#prepareResize(interaction, { ...interaction, status: 'deleted' });
     interaction.status = 'deleted';
     this.#commitResize(interaction, retainedBytes);
@@ -302,7 +310,7 @@ export class InteractionEngine {
     const current = interaction.followups[index] as InteractionFollowup;
     const updated: InteractionFollowup = {
       ...current,
-      data: cloneBoundedPayload(data, this.#maxPayloadBytes, 'Interaction follow-up'),
+      data: this.#mergePatch(current.data, data, current.ephemeral, 'Interaction follow-up'),
       ephemeral: current.ephemeral,
     };
     const nextFollowups = [...interaction.followups];
@@ -343,6 +351,54 @@ export class InteractionEngine {
         expired.push(cloneInteraction(interaction));
     }
     return expired;
+  }
+
+  // PATCH contract: omitted fields stay, explicit null clears (removes) a field, any other value
+  // (including an empty array) replaces that top-level field. A content edit without
+  // allowed_mentions drops the stored allowed_mentions (default allowances for this edit). An
+  // EPHEMERAL bit flip is ignored so flags stay consistent with the fixed ephemeral identity. The
+  // patch and the merged result are both bounded by the payload limit. Nothing is mutated here.
+  #mergePatch(
+    current: Readonly<Record<string, unknown>>,
+    patch: Readonly<Record<string, unknown>>,
+    ephemeral: boolean,
+    label: string,
+  ): Readonly<Record<string, unknown>> {
+    const clonedPatch = cloneBoundedPayload(patch, this.#maxPayloadBytes, label);
+    const patchesFlags = Object.hasOwn(clonedPatch, 'flags');
+    const patchFlags = clonedPatch['flags'];
+    const merged: Record<string, unknown> = {};
+    const assign = (name: string, value: unknown): void => {
+      Object.defineProperty(merged, name, {
+        value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    };
+    for (const name of Object.keys(current)) assign(name, current[name]);
+    for (const name of Object.keys(clonedPatch)) {
+      const value = clonedPatch[name];
+      if (value === null) delete merged[name];
+      else assign(name, value);
+    }
+    if (Object.hasOwn(clonedPatch, 'content') && !Object.hasOwn(clonedPatch, 'allowed_mentions')) {
+      delete merged['allowed_mentions'];
+    }
+    // Only null and non-negative safe integer flags are normalized; other flag values are stored as
+    // sent (flag value validation is out of scope).
+    if (patchesFlags && patchFlags === null && ephemeral) assign('flags', EPHEMERAL_FLAG);
+    if (
+      patchesFlags &&
+      typeof patchFlags === 'number' &&
+      Number.isSafeInteger(patchFlags) &&
+      patchFlags >= 0
+    ) {
+      const hasEphemeralBit = Math.floor(patchFlags / EPHEMERAL_FLAG) % 2 === 1;
+      const withoutEphemeral = hasEphemeralBit ? patchFlags - EPHEMERAL_FLAG : patchFlags;
+      assign('flags', ephemeral ? withoutEphemeral + EPHEMERAL_FLAG : withoutEphemeral);
+    }
+    return cloneBoundedPayload(merged, this.#maxPayloadBytes, label);
   }
 
   #ensureInteractionCapacity(): void {
@@ -477,6 +533,15 @@ export class InteractionEngine {
   }
 }
 
+const MODELED_INTERACTION_KINDS: ReadonlySet<string> = new Set([
+  'command',
+  'component',
+  'autocomplete',
+  'modal-submit',
+]);
+
+const EPHEMERAL_FLAG = 64;
+
 export class InteractionCapacityError extends Error {
   public constructor(message: string) {
     super(message);
@@ -503,6 +568,10 @@ function validateResponseType(
   interactionType: string,
   responseType: InteractionResponseType,
 ): void {
+  if (!MODELED_INTERACTION_KINDS.has(interactionType)) {
+    // Simulator input validation: only the modeled kind labels can be answered (not a Discord rule).
+    throw new DiscordApiError(400, 50035, 'Unknown or unmodeled interaction kind label.');
+  }
   if (interactionType === 'autocomplete' && responseType !== 'autocomplete') {
     throw new DiscordApiError(
       400,
@@ -515,6 +584,16 @@ function validateResponseType(
       400,
       50035,
       'Autocomplete response is invalid for this interaction type.',
+    );
+  }
+  if (
+    interactionType === 'command' &&
+    (responseType === 'update' || responseType === 'defer-update')
+  ) {
+    throw new DiscordApiError(
+      400,
+      50035,
+      'Application command interactions cannot update or defer-update a message.',
     );
   }
   if (interactionType === 'modal-submit' && responseType === 'modal') {

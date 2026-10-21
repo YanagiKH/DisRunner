@@ -7,6 +7,7 @@ import {
   type GatewayPacket,
   type IdentifyPayload,
 } from './gateway.js';
+import { GatewayIntentError } from './intents.js';
 import type { TraceCollector } from './trace.js';
 
 export interface LocalGatewayServerOptions {
@@ -225,7 +226,7 @@ export class LocalGatewayServer {
           error: error instanceof Error ? error.message : String(error),
         });
       const protocol =
-        error instanceof GatewayProtocolError
+        error instanceof GatewayProtocolError || error instanceof GatewayIntentError
           ? error
           : new GatewayProtocolError(4002, 'Invalid gateway payload.');
       socket.close(protocol.closeCode, protocol.message.slice(0, 123));
