@@ -14,6 +14,12 @@ import type { Channel, Guild, Surface } from './types';
 import './styles.css';
 
 const EMPTY_RUNTIME_STATE: DisRunnerRuntimeState = {
+  schemaVersion: 1,
+  sessionId: '',
+  runId: null,
+  revision: 0,
+  disposed: false,
+  contexts: [],
   phase: 'idle',
   project: null,
   error: null,
@@ -36,27 +42,113 @@ function findChannel(guild: Guild, channelId: string): Channel {
 }
 
 export default function App() {
-  const [state, dispatch] = useReducer(simulationReducer, createInitialState());
-  const [runtimeState, setRuntimeState] = useState<DisRunnerRuntimeState>(EMPTY_RUNTIME_STATE);
-  const pendingTimers = useRef<Set<number>>(new Set());
   const desktopBridge = window.disrunnerDesktop;
   const desktop = desktopBridge !== undefined;
+  const [state, dispatch] = useReducer(simulationReducer, createInitialState(!desktop));
+  const [actorId, setActorId] = useState('');
+  const [invocationError, setInvocationError] = useState<string | null>(null);
+  const requestSequence = useRef(0);
+  const requestPrefix = useRef(crypto.randomUUID());
+  const responseEpoch = useRef(0);
+  const resyncPending = useRef(false);
+  const latestRuntime = useRef(EMPTY_RUNTIME_STATE);
+  const [runtimeState, setRuntimeState] = useState<DisRunnerRuntimeState>(EMPTY_RUNTIME_STATE);
+  const pendingTimers = useRef<Set<number>>(new Set());
   const displayedBotStatus = desktop ? runtimeState.phase : state.botStatus;
-  const guild = useMemo(() => findGuild(state.guildId), [state.guildId]);
-  const channel = useMemo(() => findChannel(guild, state.channelId), [guild, state.channelId]);
+  const runtimeContext =
+    runtimeState.contexts.find(
+      (context) =>
+        context.guildId === state.guildId &&
+        context.channelId === state.channelId &&
+        context.actorId === actorId,
+    ) ??
+    runtimeState.contexts.find(
+      (context) => context.channelId === state.channelId && context.actorId === actorId,
+    ) ??
+    runtimeState.contexts.find((context) => context.channelId === state.channelId) ??
+    runtimeState.contexts.find((context) => context.actorId === actorId) ??
+    runtimeState.contexts[0];
+  const guilds = useMemo<readonly Guild[]>(
+    () =>
+      desktop
+        ? [...new Set(runtimeState.contexts.map((context) => context.guildId))].map((guildId) => ({
+            id: guildId,
+            name: `Project guild ${guildId}`,
+            accent: '#5865f2',
+            mark: 'P',
+            members: [],
+            groups: [
+              {
+                id: `project-${guildId}`,
+                name: 'Validated project channels',
+                channels: [
+                  ...new Set(
+                    runtimeState.contexts
+                      .filter((context) => context.guildId === guildId)
+                      .map((context) => context.channelId),
+                  ),
+                ].map((id) => ({ id, name: id, description: 'Validated project text channel' })),
+              },
+            ],
+          }))
+        : GUILDS,
+    [desktop, runtimeState.contexts],
+  );
+  const emptyGuild: Guild = {
+    id: '',
+    name: 'Select a project',
+    accent: '#5865f2',
+    mark: 'P',
+    members: [],
+    groups: [],
+  };
+  const guild = desktop
+    ? (guilds.find((item) => item.id === runtimeContext?.guildId) ?? emptyGuild)
+    : findGuild(state.guildId);
+  const channel = desktop
+    ? (guild.groups
+        .flatMap((group) => group.channels)
+        .find((item) => item.id === runtimeContext?.channelId) ?? {
+        id: '',
+        name: 'no-project',
+        description: 'Select a validated project before invoking commands.',
+      })
+    : findChannel(guild, state.channelId);
+  const applyRuntimeState = useCallback((next: DisRunnerRuntimeState) => {
+    const previous = latestRuntime.current;
+    if (next.sessionId === previous.sessionId && next.revision < previous.revision) return;
+    resyncPending.current = false;
+    latestRuntime.current = next;
+    setRuntimeState(next);
+  }, []);
   const messages = state.messages[channel.id] ?? [];
   const detailMode = state.surface !== 'simulator';
 
   useEffect(() => {
     if (desktopBridge === undefined) return undefined;
     let active = true;
-    const unsubscribe = desktopBridge.onRuntimeState((nextState) => {
-      if (active) setRuntimeState(nextState);
+    const unsubscribe = desktopBridge.onRuntimeState((event) => {
+      if (!active) return;
+      const previous = latestRuntime.current;
+      if (
+        event.sessionId !== previous.sessionId ||
+        event.runId !== previous.runId ||
+        event.sequence > previous.revision + 1
+      ) {
+        responseEpoch.current += 1;
+        resyncPending.current = true;
+        void desktopBridge
+          .getRuntimeState()
+          .then((snapshot) => {
+            if (active) applyRuntimeState(snapshot);
+          })
+          .catch(() => {});
+      } else applyRuntimeState(event.snapshot);
     });
     void desktopBridge
       .getRuntimeState()
       .then((nextState) => {
-        if (active) setRuntimeState(nextState);
+        if (active) applyRuntimeState(nextState);
       })
       .catch((error: unknown) => {
         if (active)
@@ -70,7 +162,7 @@ export default function App() {
       active = false;
       unsubscribe();
     };
-  }, [desktopBridge]);
+  }, [desktopBridge, applyRuntimeState]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -85,7 +177,7 @@ export default function App() {
     }
     void desktopBridge
       .startRuntime()
-      .then(setRuntimeState)
+      .then(applyRuntimeState)
       .catch((error: unknown) => {
         setRuntimeState((current) => ({
           ...current,
@@ -93,7 +185,7 @@ export default function App() {
           error: error instanceof Error ? error.message : String(error),
         }));
       });
-  }, [desktopBridge]);
+  }, [desktopBridge, applyRuntimeState]);
 
   const stopBot = useCallback(() => {
     if (desktopBridge === undefined) {
@@ -102,7 +194,10 @@ export default function App() {
     }
     void desktopBridge
       .stopRuntime()
-      .then(setRuntimeState)
+      .then((result) => {
+        applyRuntimeState(result.snapshot);
+        if (!result.ok) setInvocationError(result.errors.map((issue) => issue.message).join('; '));
+      })
       .catch((error: unknown) => {
         setRuntimeState((current) => ({
           ...current,
@@ -110,12 +205,12 @@ export default function App() {
           error: error instanceof Error ? error.message : String(error),
         }));
       });
-  }, [desktopBridge]);
+  }, [desktopBridge, applyRuntimeState]);
 
   const selectProject = async (): Promise<void> => {
     if (desktopBridge === undefined) return;
     const selected = await desktopBridge.selectProject();
-    if (selected !== null) setRuntimeState(selected);
+    if (selected !== null) applyRuntimeState(selected);
   };
 
   useEffect(
@@ -173,24 +268,55 @@ export default function App() {
 
   const submitComposer = (input: string) => {
     if (desktopBridge !== undefined) {
+      if (
+        resyncPending.current ||
+        runtimeContext === undefined ||
+        runtimeState.runId === null ||
+        runtimeState.phase !== 'running'
+      ) {
+        setInvocationError(
+          'Select a validated project and start its bot before invoking commands.',
+        );
+        return;
+      }
+      const request: DisRunnerInvocationRequest = {
+        runId: runtimeState.runId,
+        requestId: `${requestPrefix.current}-${++requestSequence.current}`,
+        input,
+        context: { ...runtimeContext },
+      };
+      setInvocationError(null);
+      const epoch = responseEpoch.current;
       void desktopBridge
-        .invokeCommand(input)
+        .invokeCommand(request)
         .then((result) => {
+          if (
+            epoch !== responseEpoch.current ||
+            latestRuntime.current.runId !== request.runId ||
+            latestRuntime.current.phase !== 'running'
+          )
+            return;
+          if (
+            result.runId !== request.runId ||
+            result.requestId !== request.requestId ||
+            result.context.actorId !== request.context.actorId ||
+            result.context.guildId !== request.context.guildId ||
+            result.context.channelId !== request.context.channelId
+          )
+            throw new Error('Runtime response identity does not match the submitted invocation.');
           dispatch({ type: 'execute-runtime', input, result });
         })
         .catch((error: unknown) => {
-          const command = input.trim().split(/\s+/u)[0]?.replace(/^\//u, '') ?? '';
+          if (
+            epoch !== responseEpoch.current ||
+            latestRuntime.current.runId !== request.runId ||
+            latestRuntime.current.phase !== 'running'
+          )
+            return;
           dispatch({
-            type: 'execute-runtime',
-            input,
-            result: {
-              ok: false,
-              command,
-              interactionId: null,
-              durationMs: 0,
-              response: null,
-              error: error instanceof Error ? error.message : String(error),
-            },
+            type: 'runtime-failed',
+            request,
+            error: error instanceof Error ? error.message : String(error),
           });
         });
       return;
@@ -204,9 +330,7 @@ export default function App() {
   const invokeFromExplorer = (commandName: string) => {
     if (desktopBridge !== undefined) {
       dispatch({ type: 'navigate', surface: 'simulator' });
-      void desktopBridge.invokeCommand(commandName).then((result) => {
-        dispatch({ type: 'execute-runtime', input: commandName, result });
-      });
+      submitComposer(commandName);
       return;
     }
     const executionId = state.executionCount + 1;
@@ -235,13 +359,39 @@ export default function App() {
         onStop={stopBot}
       />
       <RuntimeStrip desktop={desktop} runtime={runtimeState} />
+      {desktop && (
+        <section aria-label="Runtime invocation context">
+          <span>Real project runtime · preview panels are sample data</span>
+          <label>
+            Actor{' '}
+            <select
+              aria-label="Invocation actor"
+              value={runtimeContext?.actorId ?? ''}
+              onChange={(event) => setActorId(event.target.value)}
+            >
+              {[
+                ...new Set(
+                  runtimeState.contexts
+                    .filter((context) => context.channelId === runtimeContext?.channelId)
+                    .map((context) => context.actorId),
+                ),
+              ].map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          </label>
+          {invocationError && <span role="alert">{invocationError}</span>}
+        </section>
+      )}
       <div className={`app-main ${detailMode ? 'detail-mode' : ''}`}>
         <WorkspaceRail
           active={state.surface}
           onNavigate={(surface) => dispatch({ type: 'navigate', surface })}
         />
         <GuildSidebar
-          guilds={GUILDS}
+          guilds={guilds}
           onChannelSelect={(channelId) => dispatch({ type: 'select-channel', channelId })}
           onGuildSelect={(guildId) => dispatch({ type: 'select-guild', guildId })}
           selectedChannelId={channel.id}

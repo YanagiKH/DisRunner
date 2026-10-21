@@ -1,83 +1,41 @@
 /// <reference types="vite/client" />
 
-interface DisRunnerRuntimeInfo {
-  readonly platform: string;
-  readonly version: string;
-  readonly packaged: boolean;
-  readonly offline: true;
-}
+import type { RuntimeInfo } from '../electron/runtime-contract.cjs';
+import type {
+  RuntimePhase,
+  ProjectSummary,
+  SessionSnapshot,
+  SessionInvocationResult,
+  InvocationRequest,
+  InvocationContext,
+  SessionEvent,
+  ShutdownResult,
+} from '@disrunner/runtime';
 
-type DisRunnerRuntimePhase = 'idle' | 'ready' | 'starting' | 'running' | 'stopping' | 'error';
+declare global {
+  type DisRunnerRuntimeInfo = RuntimeInfo;
+  type DisRunnerRuntimePhase = RuntimePhase;
+  type DisRunnerProjectSummary = ProjectSummary;
+  type DisRunnerRuntimeState = SessionSnapshot;
+  type DisRunnerInvocationResult = SessionInvocationResult;
+  type DisRunnerInvocationRequest = InvocationRequest;
+  type DisRunnerInvocationContext = InvocationContext;
+  type DisRunnerSessionEvent = SessionEvent;
 
-interface DisRunnerProjectSummary {
-  readonly root: string;
-  readonly configPath: string;
-  readonly botName: string;
-  readonly executable: string;
-  readonly args: readonly string[];
-  readonly cwd: string;
-  readonly adapter: string;
-  readonly mode: 'strict' | 'lenient';
-  readonly seed: number;
-  readonly environmentNames: readonly string[];
-}
+  interface DisRunnerDesktopBridge {
+    readonly getRuntimeInfo: () => Promise<DisRunnerRuntimeInfo>;
+    readonly getRuntimeState: () => Promise<DisRunnerRuntimeState>;
+    readonly selectProject: () => Promise<DisRunnerRuntimeState | null>;
+    readonly startRuntime: () => Promise<DisRunnerRuntimeState>;
+    readonly stopRuntime: () => Promise<ShutdownResult>;
+    readonly invokeCommand: (
+      request: DisRunnerInvocationRequest,
+    ) => Promise<DisRunnerInvocationResult>;
+    readonly onRuntimeState: (listener: (event: DisRunnerSessionEvent) => void) => () => void;
+    readonly controlWindow: (action: 'minimize' | 'maximize' | 'close') => Promise<boolean>;
+  }
 
-interface DisRunnerRuntimeState {
-  readonly phase: DisRunnerRuntimePhase;
-  readonly project: DisRunnerProjectSummary | null;
-  readonly error: string | null;
-  readonly pid: number | null;
-  readonly endpoints: {
-    readonly restBaseUrl: string;
-    readonly gatewayUrl: string;
-    readonly interactionEndpoint?: string;
-  } | null;
-  readonly output: readonly {
-    readonly stream: 'stdout' | 'stderr';
-    readonly text: string;
-    readonly atMs: number;
-  }[];
-  readonly traces: readonly {
-    readonly id: string;
-    readonly traceId: string;
-    readonly kind: string;
-    readonly name: string;
-    readonly status: string;
-    readonly startedAtMs: number;
-    readonly durationMs: number;
-  }[];
-  readonly risks: readonly {
-    readonly ruleId: string;
-    readonly severity: string;
-    readonly title: string;
-    readonly evidence: string;
-  }[];
-}
-
-interface DisRunnerInvocationResult {
-  readonly ok: boolean;
-  readonly command: string;
-  readonly interactionId: string | null;
-  readonly durationMs: number;
-  readonly response: {
-    readonly type:
-      'pong' | 'message' | 'defer' | 'update' | 'defer-update' | 'autocomplete' | 'modal';
-    readonly data: Readonly<Record<string, unknown>>;
-  } | null;
-  readonly error: string | null;
-}
-
-interface DisRunnerDesktopBridge {
-  readonly getRuntimeInfo: () => Promise<DisRunnerRuntimeInfo>;
-  readonly getRuntimeState: () => Promise<DisRunnerRuntimeState>;
-  readonly selectProject: () => Promise<DisRunnerRuntimeState | null>;
-  readonly startRuntime: () => Promise<DisRunnerRuntimeState>;
-  readonly stopRuntime: () => Promise<DisRunnerRuntimeState>;
-  readonly invokeCommand: (input: string) => Promise<DisRunnerInvocationResult>;
-  readonly onRuntimeState: (listener: (state: DisRunnerRuntimeState) => void) => () => void;
-  readonly controlWindow: (action: 'minimize' | 'maximize' | 'close') => Promise<boolean>;
-}
-
-interface Window {
-  readonly disrunnerDesktop?: DisRunnerDesktopBridge;
+  interface Window {
+    readonly disrunnerDesktop?: DisRunnerDesktopBridge;
+  }
 }

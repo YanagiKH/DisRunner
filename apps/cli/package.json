@@ -17,6 +17,7 @@
     "test:integration": "vitest run"
   },
   "dependencies": {
-    "@disrunner/core": "workspace:*"
+    "@disrunner/core": "workspace:*",
+    "@disrunner/runtime": "workspace:*"
   }
 }

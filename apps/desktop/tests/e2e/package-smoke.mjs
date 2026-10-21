@@ -143,16 +143,18 @@ async function runFullPackagedSmoke(signal) {
     assert.equal(started.phase, 'running', started.error ?? 'runtime should start');
     assert.equal(typeof started.pid, 'number');
 
-    const composer = page.getByRole('textbox', { name: 'Message #bot-testing' });
+    const composer = page.getByRole('textbox', {
+      name: `Message #${started.contexts[0].channelId}`,
+    });
     await composer.fill('/ping');
     await composer.press('Enter');
     await page.getByText('Pong! Offline and deterministic.').last().waitFor();
 
-    const ping = await page.evaluate(() => window.disrunnerDesktop.invokeCommand('/ping'));
+    const ping = await invokeSessionCommand(page, '/ping');
     assert.equal(ping.ok, true, ping.error ?? 'signed /ping should succeed');
     assert.equal(ping.response?.data.content, 'Pong! Offline and deterministic.');
 
-    const secret = await page.evaluate(() => window.disrunnerDesktop.invokeCommand('/secret'));
+    const secret = await invokeSessionCommand(page, '/secret');
     assert.equal(secret.ok, true, secret.error ?? 'signed /secret should succeed');
     assert.equal(secret.response?.data.content, 'Only you can see this.');
     assert.equal(secret.response?.data.flags, 64);
@@ -165,8 +167,9 @@ async function runFullPackagedSmoke(signal) {
       .waitFor();
 
     const stopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());
-    assert.equal(stopped.phase, 'ready', stopped.error ?? 'runtime should stop');
-    assert.equal(stopped.pid, null);
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.errors));
+    assert.equal(stopped.snapshot.phase, 'ready', stopped.snapshot.error ?? 'runtime should stop');
+    assert.equal(stopped.snapshot.pid, null);
 
     await electronApplication.evaluate(async ({ dialog }, selectedProject) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selectedProject] });
@@ -184,7 +187,7 @@ async function runFullPackagedSmoke(signal) {
       negativeStarted.error ?? 'negative runtime should start',
     );
 
-    const context = await page.evaluate(() => window.disrunnerDesktop.invokeCommand('/context'));
+    const context = await invokeSessionCommand(page, '/context');
     assert.equal(
       context.ok,
       true,
@@ -192,12 +195,16 @@ async function runFullPackagedSmoke(signal) {
     );
     assert.equal(context.response?.data.content, 'Pong from package smoke bot.');
 
-    const invalid = await page.evaluate(() => window.disrunnerDesktop.invokeCommand('/invalid'));
-    assert.equal(invalid.ok, false);
-    assert.match(invalid.error ?? '', /unsupported interaction callback/iu);
-    const timeout = await page.evaluate(() => window.disrunnerDesktop.invokeCommand('/timeout'));
-    assert.equal(timeout.ok, false);
-    assert.match(timeout.error ?? '', /timed out/iu);
+    // Session failures crossing IPC expose safe messages, not raw callback details.
+    // The distinct trace and risk assertions below establish each failure's cause.
+    await assert.rejects(
+      invokeSessionCommand(page, '/invalid'),
+      /SessionError: Bot interaction failed\.$/u,
+    );
+    await assert.rejects(
+      invokeSessionCommand(page, '/timeout'),
+      /SessionError: Interaction deadline exceeded\.$/u,
+    );
     const evidence = await page.evaluate(() => window.disrunnerDesktop.getRuntimeState());
     assert.ok(
       evidence.traces.some((trace) => trace.name === '/invalid' && trace.status === 'error'),
@@ -215,11 +222,19 @@ async function runFullPackagedSmoke(signal) {
       evidence.risks.some((risk) => risk.ruleId === 'INTERACTION_TIMEOUT'),
       'timeout must produce risk evidence',
     );
-    const negativeStopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());
     assert.equal(
-      negativeStopped.phase,
+      evidence.traces.some(
+        (trace) => ['/invalid', '/timeout'].includes(trace.name) && trace.status === 'ok',
+      ),
+      false,
+      'rejected callbacks must not produce successful interaction traces',
+    );
+    const negativeStopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());
+    assert.equal(negativeStopped.ok, true, JSON.stringify(negativeStopped.errors));
+    assert.equal(
+      negativeStopped.snapshot.phase,
       'ready',
-      negativeStopped.error ?? 'negative runtime should stop',
+      negativeStopped.snapshot.error ?? 'negative runtime should stop',
     );
 
     await electronApplication.evaluate(async ({ dialog }, selectedProject) => {
@@ -231,16 +246,16 @@ async function runFullPackagedSmoke(signal) {
       'ready',
       forgedPeerSelected?.error ?? 'forged-peer project should validate',
     );
-    const forgedPeerStarted = await page.evaluate(() => window.disrunnerDesktop.startRuntime());
+    await assert.rejects(
+      page.evaluate(() => window.disrunnerDesktop.startRuntime()),
+      /response authentication failed/iu,
+      'forged readiness response must reject with peer-authentication failure',
+    );
+    const forgedPeerStarted = await page.evaluate(() => window.disrunnerDesktop.getRuntimeState());
     assert.equal(
       forgedPeerStarted.phase,
       'error',
       'a fixed forged listener must fail authenticated readiness',
-    );
-    assert.match(
-      forgedPeerStarted.error ?? '',
-      /response authentication failed/iu,
-      'forged readiness response must report peer-authentication failure',
     );
     assert.equal(forgedPeerStarted.pid, null);
     assert.equal(forgedPeerStarted.endpoints, null);
@@ -269,6 +284,28 @@ async function runFullPackagedSmoke(signal) {
     await electronApplication?.close().catch(() => undefined);
     await removeDirectory(userDataDirectory);
   }
+}
+
+async function invokeSessionCommand(page, input) {
+  const request = await page.evaluate(async (command) => {
+    const snapshot = await window.disrunnerDesktop.getRuntimeState();
+    if (snapshot.runId === null || snapshot.contexts.length === 0)
+      throw new Error('No active validated invocation context.');
+    return {
+      runId: snapshot.runId,
+      requestId: crypto.randomUUID(),
+      input: command,
+      context: { ...snapshot.contexts[0] },
+    };
+  }, input);
+  const result = await page.evaluate(
+    (captured) => window.disrunnerDesktop.invokeCommand(captured),
+    request,
+  );
+  assert.equal(result.runId, request.runId);
+  assert.equal(result.requestId, request.requestId);
+  assert.deepEqual(result.context, request.context);
+  return result;
 }
 
 async function findExecutable() {

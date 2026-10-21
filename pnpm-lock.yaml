@@ -54,12 +54,18 @@ importers:
       '@disrunner/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@disrunner/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
 
   apps/desktop:
     dependencies:
       '@disrunner/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@disrunner/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@19.3.1)
@@ -136,6 +142,12 @@ importers:
       ajv:
         specifier: 8.20.0
         version: 8.20.0
+
+  packages/runtime:
+    dependencies:
+      '@disrunner/core':
+        specifier: workspace:*
+        version: link:../core
 
 packages:
 
