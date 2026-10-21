@@ -1,6 +1,6 @@
 # Scenario format
 
-Scenarios are versioned YAML or JSON programs that initialize virtual state, schedule actions, and assert evidence. YAML files use the `.discord-scenario.yml` suffix. Version 1 accepts two equivalent input styles: a concise absolute-time `actions` dialect and the canonical engine `steps` dialect.
+Scenarios are versioned YAML or JSON programs that initialize virtual state, schedule actions, and assert evidence. YAML files use the `.discord-scenario.yml` suffix. Version 1 accepts two equivalent input styles: a concise absolute-time `actions` dialect and the canonical engine `steps` dialect. Supply exactly one of `steps` and `actions`, even when either array is empty; supplying both is an error. Either array accepts the supported action forms below, including normalized `timeline-*` forms returned by the parser.
 
 The JSON Schema is [docs/schemas/discord-scenario.schema.json](schemas/discord-scenario.schema.json).
 
@@ -104,13 +104,31 @@ Canonical actions in version 1 are `advance-time`, `create-resource`, `update-re
 
 ## Common fields
 
-- `version`: format version; version 1 is assumed only where the parser documents that compatibility behavior.
+- `version`: optional format version; omission defaults to 1. Any supplied value other than the number `1`, including `null`, is rejected.
 - `name`/`description`/`tags`: stable identity and filtering metadata.
 - `seed`: deterministic ID, randomness, jitter, and selection input.
-- `mode`: `strict` or `lenient` in the concise dialect; the canonical runner otherwise receives the selected simulation profile.
+- `mode`: `strict` or `lenient` in either dialect. Neither mode permits an expectation mismatch or unasserted operation error to pass.
 - `initialState`: concise resource collections or canonical records with `resourceType`.
 - `actions` or `steps`: exactly one execution dialect per scenario.
 - `assertions`: checks evaluated after execution.
+
+### Validation and compatibility
+
+The scenario root, each action, and each assertion are closed configuration objects: unknown keys are errors, not ignored settings. Optional fields must have their documented type when supplied (`description` is a string, `tags` is an array of non-empty strings, `saveAs` is a non-empty string, `resumable` is a boolean, and interaction `data` is an object). The optional `$schema` string is editor metadata, not an instruction to load a remote schema. Seeds may be any safe integer. Resource types and collection names remain extensible, and resource records, `data`, `changes`, and assertion `expected` payloads remain open dictionaries/values; application-specific nested keys are not rejected as unknown configuration. Inputs must contain JSON-compatible data, not explicit `undefined` values.
+
+For compatibility, `action` may replace `type`, but supplying both is an error. The standalone `{ advance: '250ms' }` shorthand also accepts a non-negative number of milliseconds or a duration string with `ms`, `s`, or `m`; it cannot be combined with other action fields. Concise `interaction`, `permission-check`, and `rest-request` actions default omitted `at` to zero. Normalized `timeline-*` actions require `at`. Array order remains execution order; an `at` earlier than the current virtual time does not rewind the clock.
+
+Only timeline actions accept `at`. Gateway disconnect accepts `resumable` only with a timeline `at`; canonical disconnect has no options. Canonical Gateway resume accepts an optional non-negative safe-integer `sequence`, while timeline resume uses the recorded sequence and rejects a supplied `sequence`. These distinctions prevent ineffective settings from being silently dropped. Assertion event counts are non-negative safe integers, permission names must be known permission constants, and interaction-state assertions accept only `pending`, `deferred`, `responded`, `deleted`, or `expired`.
+
+### What makes a run fail
+
+A permission-check `expected` mismatch always sets `report.passed` to `false` and `report.status` to `failed`, even with no assertions, in either mode. An assertion for `SCENARIO_EXPECTATION_MISMATCH` cannot excuse it. An explicitly expected denial is still valid and can pass while reporting the missing-permission risk.
+
+Scheduled interaction acknowledgement/follow-up errors cannot pass just because a risk was collected. An explicit, passing `risk-present` or `risk-detected` assertion for a risk associated with that failing operation can describe an intentional negative test. For example, `INTERACTION_ACK_LATE` can cover a deliberately late acknowledgement, `FOLLOWUP_BEFORE_ACK` an early follow-up, and `EXPIRED_INTERACTION_TOKEN` an expired follow-up. Unrelated passing assertions do not cover other failures. Unexpected non-API exceptions still reject execution; canonical operation exceptions also continue to reject rather than return success. Rejected timeline Gateway resumes fail the run. Report metadata includes total and unhandled operation-failure counts for returned reports.
+
+Risks alone are not a blanket failure criterion: permission-denial observations and rate-limit acquisition probes can intentionally produce warnings. `rest-request`/`rate-limit-request` probe the rate-limit engine; they do not perform a Discord REST operation. Negative-test compatibility does not authorize swallowing unrelated operation errors.
+
+These scenarios exercise the offline execution model. The runner's generated interaction replies, Gateway packets, and reports are not evidence that a real Discord bot or SDK is compatible. No live Discord connection or production token is required.
 
 ## Capacity limits
 

@@ -116,7 +116,30 @@ export function parseScenario(
       : input;
   validateValueBudget(raw, limits);
   if (!isRecord(raw)) throw new TypeError('Scenario must be a YAML or JSON object.');
-  const version = raw['version'] ?? 1;
+  assertKnownKeys(
+    raw,
+    [
+      'version',
+      '$schema',
+      'name',
+      'description',
+      'tags',
+      'seed',
+      'mode',
+      'initialState',
+      'steps',
+      'actions',
+      'assertions',
+    ],
+    'Scenario',
+  );
+  if (Object.hasOwn(raw, 'steps') === Object.hasOwn(raw, 'actions'))
+    throw new TypeError('Scenario must contain exactly one of steps or actions.');
+  if (raw['$schema'] !== undefined) requireText(raw['$schema'], 'Schema URI');
+  if (raw['description'] !== undefined) requireText(raw['description'], 'Scenario description');
+  if (raw['tags'] !== undefined && !Array.isArray(raw['tags']))
+    throw new TypeError('Scenario tags must be an array.');
+  const version = raw['version'] === undefined ? 1 : raw['version'];
   if (version !== 1)
     throw new RangeError(`Unsupported scenario version: ${displayValue(version)}.`);
   const name = requireString(raw['name'], 'Scenario name');
@@ -197,12 +220,32 @@ export class ScenarioRunner {
     const state = new VirtualState(clock, snowflakes, this.#baseResources);
     const risks = new RiskCollector(clock);
     const trace = new TraceCollector({ clock, random });
+    const operationFailures: string[][] = [];
+    let activeOperationRisks: string[] | undefined;
+    const observeOperation = (
+      operation: () => void,
+      relatedRules: readonly string[] = [],
+    ): void => {
+      const emitted: string[] = [];
+      activeOperationRisks = emitted;
+      try {
+        operation();
+      } catch (error) {
+        if (!(error instanceof DiscordApiError)) throw error;
+        operationFailures.push([...emitted, ...relatedRules]);
+      } finally {
+        activeOperationRisks = undefined;
+      }
+    };
     const interactions = new InteractionEngine({
       clock,
       random,
       snowflakes,
       profile,
-      onRisk: (finding) => void risks.add(finding),
+      onRisk: (finding) => {
+        risks.add(finding);
+        activeOperationRisks?.push(finding.ruleId);
+      },
     });
     const rateLimits = new RateLimitEngine(clock, [
       {
@@ -278,8 +321,12 @@ export class ScenarioRunner {
           break;
         case 'send-message': {
           assertResourceCapacity(resourceCount, this.#limits.maxResources);
+          // Preserve legacy unclassified channels; only an existing channel supplies
+          // guild context. Relationship validation belongs to the authority layer.
+          const guildId = state.get('channel', action.channelId)?.['guild_id'];
           const message = state.create('message', {
             channel_id: action.channelId,
+            ...(typeof guildId === 'string' ? { guild_id: guildId } : {}),
             author: { id: action.authorId },
             content: action.content,
             timestamp: new Date(clock.now()).toISOString(),
@@ -373,16 +420,21 @@ export class ScenarioRunner {
             interaction.createdAtMs + action.acknowledgeAfterMs,
           );
           clock.schedule(action.acknowledgeAfterMs, () => {
-            try {
-              const responseType = action.followUpAfterMs === undefined ? 'message' : 'defer';
-              interactions.respond(interaction.id, responseType, { content: `/${action.command}` });
-              observation.acknowledgedAtMs = clock.now();
-              trace.end(interactionSpan, 'ok', { acknowledgedAtMs: clock.now() });
-            } catch (error) {
-              trace.end(interactionSpan, 'error', {
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
+            observeOperation(() => {
+              try {
+                const responseType = action.followUpAfterMs === undefined ? 'message' : 'defer';
+                interactions.respond(interaction.id, responseType, {
+                  content: `/${action.command}`,
+                });
+                observation.acknowledgedAtMs = clock.now();
+                trace.end(interactionSpan, 'ok', { acknowledgedAtMs: clock.now() });
+              } catch (error) {
+                trace.end(interactionSpan, 'error', {
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                throw error;
+              }
+            }, ['INTERACTION_ACK_LATE']);
           });
           if (action.followUpAfterMs !== undefined) {
             lastScheduledAtMs = Math.max(
@@ -390,11 +442,20 @@ export class ScenarioRunner {
               interaction.createdAtMs + action.followUpAfterMs,
             );
             clock.schedule(action.followUpAfterMs, () => {
-              try {
-                interactions.followup(interaction.id, { content: `/${action.command} completed` });
-              } catch (error) {
-                if (!(error instanceof DiscordApiError)) throw error;
-              }
+              const span = trace.start('interaction', `/${action.command} follow-up`);
+              observeOperation(() => {
+                try {
+                  interactions.followup(interaction.id, {
+                    content: `/${action.command} completed`,
+                  });
+                  trace.end(span, 'ok');
+                } catch (error) {
+                  trace.end(span, 'error', {
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                  throw error;
+                }
+              });
             });
           }
           break;
@@ -415,6 +476,10 @@ export class ScenarioRunner {
               retainedEventBytes,
             );
             gatewayResumed = true;
+          } else {
+            operationFailures.push([]);
+            const span = trace.start('gateway', 'Gateway resume rejected');
+            trace.end(span, 'error', { accepted: false });
           }
           break;
         }
@@ -461,7 +526,21 @@ export class ScenarioRunner {
         },
       ),
     );
-    const passed = assertions.every((assertion) => assertion.passed);
+    const expectedRisks = new Set(
+      assertions.flatMap((result) =>
+        result.passed &&
+        (result.assertion.type === 'risk-present' || result.assertion.type === 'risk-detected')
+          ? [result.assertion.ruleId]
+          : [],
+      ),
+    );
+    const unhandledOperationFailures = operationFailures.filter(
+      (rules) => !rules.some((rule) => expectedRisks.has(rule) && risks.has(rule)),
+    ).length;
+    const passed =
+      assertions.every((assertion) => assertion.passed) &&
+      !risks.has('SCENARIO_EXPECTATION_MISMATCH') &&
+      unhandledOperationFailures === 0;
     const spans = trace.spans();
     const findings = risks.all();
     return {
@@ -480,6 +559,8 @@ export class ScenarioRunner {
           mode: profile.mode,
           apiVersion: profile.apiVersion,
           networkPolicy: profile.networkPolicy,
+          operationFailureCount: operationFailures.length,
+          unhandledOperationFailureCount: unhandledOperationFailures,
         },
       },
       assertions,
@@ -495,6 +576,99 @@ export async function runScenario(
 ): Promise<ScenarioRunResult> {
   const runner = new ScenarioRunner(options);
   return runner.run(input, options);
+}
+
+function assertKnownKeys(
+  value: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (!allowed.includes(key)) throw new TypeError(`${label} contains unknown field: ${key}.`);
+  }
+}
+
+function validateActionKeys(value: Readonly<Record<string, unknown>>, type: string): void {
+  const fields: Readonly<Record<string, readonly string[]>> = {
+    'advance-time': ['ms'],
+    'create-resource': ['resourceType', 'data', 'saveAs'],
+    'update-resource': ['resourceType', 'id', 'changes'],
+    'delete-resource': ['resourceType', 'id'],
+    'send-message': ['channelId', 'authorId', 'content', 'saveAs'],
+    'gateway-dispatch': ['event', 'data'],
+    'gateway-disconnect': value['at'] === undefined ? [] : ['at', 'resumable'],
+    'gateway-resume': value['at'] === undefined ? ['sequence'] : ['at'],
+    'interaction-create': ['interactionType', 'data', 'saveAs'],
+    'interaction-respond': ['interactionId', 'responseType', 'data'],
+    'interaction-followup': ['interactionId', 'data'],
+    'rate-limit-request': ['method', 'path'],
+    interaction: ['at', 'command', 'acknowledgeAfterMs', 'followUpAfterMs'],
+    'timeline-interaction': ['at', 'command', 'acknowledgeAfterMs', 'followUpAfterMs'],
+    'permission-check': ['at', 'permission', 'expected'],
+    'timeline-permission-check': ['at', 'permission', 'expected'],
+    'rest-request': ['at', 'route', 'repeat'],
+    'timeline-rest-request': ['at', 'method', 'path', 'repeat'],
+    'timeline-gateway-disconnect': ['at', 'resumable'],
+    'timeline-gateway-resume': ['at'],
+  };
+  if (!Object.hasOwn(fields, type))
+    throw new TypeError(`Unsupported scenario action type: ${type}.`);
+  assertKnownKeys(value, ['type', 'action', ...fields[type]!], 'Scenario action');
+}
+
+function validateAssertionKeys(value: Readonly<Record<string, unknown>>, type: string): void {
+  const fields: Readonly<Record<string, readonly string[]>> = {
+    'resource-exists': ['resourceType', 'id'],
+    'resource-field-equals': ['resourceType', 'id', 'field', 'expected'],
+    'event-received': ['event', 'count'],
+    'risk-present': ['ruleId'],
+    'risk-absent': ['ruleId'],
+    'risk-detected': ['ruleId'],
+    'interaction-state': ['interactionId', 'state'],
+    'state-hash': ['expected'],
+    'interaction-acknowledged': ['command', 'withinMs'],
+    'gateway-resumed': [],
+    'no-secret-leak': [],
+  };
+  if (!Object.hasOwn(fields, type))
+    throw new TypeError(`Unsupported scenario assertion type: ${type}.`);
+  assertKnownKeys(value, ['type', ...fields[type]!], 'Scenario assertion');
+}
+
+function requireText(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new TypeError(`${label} must be a string.`);
+  return value;
+}
+
+function requireBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw new TypeError(`${label} must be a boolean.`);
+  return value;
+}
+
+function requireCommand(value: unknown): string {
+  return requireString(
+    requireString(value, 'Interaction command').replace(/^\//, ''),
+    'Interaction command',
+  );
+}
+
+function requirePermissionName(value: unknown): string {
+  const name = requireString(value, 'Permission name');
+  if (!Object.hasOwn(Permissions, name)) throw new TypeError(`Unknown permission: ${name}.`);
+  return name;
+}
+
+function requireInteractionState(value: unknown): string {
+  const state = requireString(value, 'Interaction state');
+  if (!['pending', 'deferred', 'responded', 'deleted', 'expired'].includes(state))
+    throw new TypeError('Invalid interaction state.');
+  return state;
+}
+
+function requireNonNegativeInteger(value: unknown, label: string): number {
+  const number = requireNonNegativeNumber(value, label);
+  if (!Number.isSafeInteger(number)) throw new TypeError(`${label} must be a safe integer.`);
+  return number;
 }
 
 function normalizeInitialState(value: unknown): readonly (Readonly<Record<string, unknown>> & {
@@ -531,16 +705,20 @@ function normalizeAction(
   limits: ScenarioLimits = DEFAULT_SCENARIO_LIMITS,
 ): ScenarioAction {
   if (!isRecord(value)) throw new TypeError('Scenario action must be an object.');
-  if (value['advance'] !== undefined) {
+  if (Object.hasOwn(value, 'advance')) {
+    assertKnownKeys(value, ['advance'], 'Advance action');
     return { type: 'advance-time', ms: parseDuration(value['advance']) };
   }
+  if (Object.hasOwn(value, 'type') && Object.hasOwn(value, 'action'))
+    throw new TypeError('Action must not contain both type and action.');
   const type = requireString(value['type'] ?? value['action'], 'Scenario action type');
+  validateActionKeys(value, type);
   const at = optionalNonNegativeNumber(value['at'], 'Action time');
   if (type === 'interaction') {
     return {
       type: 'timeline-interaction',
       at: at ?? 0,
-      command: requireString(value['command'], 'Interaction command').replace(/^\//, ''),
+      command: requireCommand(value['command']),
       acknowledgeAfterMs: requireNonNegativeNumber(
         value['acknowledgeAfterMs'],
         'Interaction acknowledge delay',
@@ -563,7 +741,7 @@ function normalizeAction(
     return {
       type: 'timeline-permission-check',
       at: at ?? 0,
-      permission: requireString(value['permission'], 'Permission name'),
+      permission: requirePermissionName(value['permission']),
       ...(expected === undefined ? {} : { expected }),
     };
   }
@@ -585,7 +763,9 @@ function normalizeAction(
     return {
       type: 'timeline-gateway-disconnect',
       at,
-      ...(typeof value['resumable'] === 'boolean' ? { resumable: value['resumable'] } : {}),
+      ...(value['resumable'] === undefined
+        ? {}
+        : { resumable: requireBoolean(value['resumable'], 'Gateway resumable') }),
     };
   }
   if (type === 'gateway-resume' && at !== undefined) return { type: 'timeline-gateway-resume', at };
@@ -594,7 +774,7 @@ function normalizeAction(
       return {
         type,
         at: requireNonNegativeNumber(value['at'], 'Action time'),
-        command: requireString(value['command'], 'Interaction command').replace(/^\//, ''),
+        command: requireCommand(value['command']),
         acknowledgeAfterMs: requireNonNegativeNumber(
           value['acknowledgeAfterMs'],
           'Interaction acknowledge delay',
@@ -612,7 +792,9 @@ function normalizeAction(
       return {
         type,
         at: requireNonNegativeNumber(value['at'], 'Action time'),
-        ...(typeof value['resumable'] === 'boolean' ? { resumable: value['resumable'] } : {}),
+        ...(value['resumable'] === undefined
+          ? {}
+          : { resumable: requireBoolean(value['resumable'], 'Gateway resumable') }),
       };
     case 'timeline-gateway-resume':
       return { type, at: requireNonNegativeNumber(value['at'], 'Action time') };
@@ -624,7 +806,7 @@ function normalizeAction(
       return {
         type,
         at: requireNonNegativeNumber(value['at'], 'Action time'),
-        permission: requireString(value['permission'], 'Permission name'),
+        permission: requirePermissionName(value['permission']),
         ...(expected === undefined ? {} : { expected }),
       };
     }
@@ -645,7 +827,9 @@ function normalizeAction(
         type,
         resourceType: requireString(value['resourceType'], 'Resource type'),
         data: requireRecord(value['data'], 'Resource data'),
-        ...(typeof value['saveAs'] === 'string' ? { saveAs: value['saveAs'] } : {}),
+        ...(value['saveAs'] === undefined
+          ? {}
+          : { saveAs: requireString(value['saveAs'], 'Action alias') }),
       };
     case 'update-resource':
       return {
@@ -666,9 +850,12 @@ function normalizeAction(
         channelId: requireString(value['channelId'], 'Channel id'),
         authorId: requireString(value['authorId'], 'Author id'),
         content: requireString(value['content'], 'Message content'),
-        ...(typeof value['saveAs'] === 'string' ? { saveAs: value['saveAs'] } : {}),
+        ...(value['saveAs'] === undefined
+          ? {}
+          : { saveAs: requireString(value['saveAs'], 'Action alias') }),
       };
     case 'gateway-dispatch':
+      if (!Object.hasOwn(value, 'data')) throw new TypeError('Gateway data is required.');
       return {
         type,
         event: requireString(value['event'], 'Gateway event'),
@@ -681,16 +868,20 @@ function normalizeAction(
         type,
         ...(value['sequence'] === undefined
           ? {}
-          : { sequence: requireNonNegativeNumber(value['sequence'], 'Gateway sequence') }),
+          : { sequence: requireNonNegativeInteger(value['sequence'], 'Gateway sequence') }),
       };
     case 'interaction-create':
       return {
         type,
-        ...(typeof value['interactionType'] === 'string'
-          ? { interactionType: value['interactionType'] }
-          : {}),
-        ...(isRecord(value['data']) ? { data: value['data'] } : {}),
-        ...(typeof value['saveAs'] === 'string' ? { saveAs: value['saveAs'] } : {}),
+        ...(value['interactionType'] === undefined
+          ? {}
+          : { interactionType: requireString(value['interactionType'], 'Interaction type') }),
+        ...(value['data'] === undefined
+          ? {}
+          : { data: requireRecord(value['data'], 'Interaction data') }),
+        ...(value['saveAs'] === undefined
+          ? {}
+          : { saveAs: requireString(value['saveAs'], 'Action alias') }),
       };
     case 'interaction-respond': {
       const responseType = value['responseType'];
@@ -706,14 +897,18 @@ function normalizeAction(
         interactionId: requireString(value['interactionId'], 'Interaction id'),
         responseType: responseType as
           'message' | 'defer' | 'update' | 'defer-update' | 'autocomplete' | 'modal',
-        ...(isRecord(value['data']) ? { data: value['data'] } : {}),
+        ...(value['data'] === undefined
+          ? {}
+          : { data: requireRecord(value['data'], 'Interaction data') }),
       };
     }
     case 'interaction-followup':
       return {
         type,
         interactionId: requireString(value['interactionId'], 'Interaction id'),
-        ...(isRecord(value['data']) ? { data: value['data'] } : {}),
+        ...(value['data'] === undefined
+          ? {}
+          : { data: requireRecord(value['data'], 'Interaction data') }),
       };
     case 'rate-limit-request':
       return {
@@ -732,6 +927,7 @@ function normalizeAssertions(value: unknown): readonly ScenarioAssertion[] {
   return value.map((raw) => {
     if (!isRecord(raw)) throw new TypeError('Scenario assertion must be an object.');
     const type = requireString(raw['type'], 'Scenario assertion type');
+    validateAssertionKeys(raw, type);
     switch (type) {
       case 'resource-exists':
         return {
@@ -740,6 +936,8 @@ function normalizeAssertions(value: unknown): readonly ScenarioAssertion[] {
           id: requireString(raw['id'], 'Resource id'),
         };
       case 'resource-field-equals':
+        if (!Object.hasOwn(raw, 'expected'))
+          throw new TypeError('Equality assertion expected value is required.');
         return {
           type,
           resourceType: requireString(raw['resourceType'], 'Resource type'),
@@ -753,7 +951,7 @@ function normalizeAssertions(value: unknown): readonly ScenarioAssertion[] {
           event: requireString(raw['event'], 'Gateway event'),
           ...(raw['count'] === undefined
             ? {}
-            : { count: requireNonNegativeNumber(raw['count'], 'Event count') }),
+            : { count: requireNonNegativeInteger(raw['count'], 'Event count') }),
         };
       case 'risk-present':
       case 'risk-absent':
@@ -763,14 +961,14 @@ function normalizeAssertions(value: unknown): readonly ScenarioAssertion[] {
         return {
           type,
           interactionId: requireString(raw['interactionId'], 'Interaction id'),
-          state: requireString(raw['state'], 'Interaction state'),
+          state: requireInteractionState(raw['state']),
         };
       case 'state-hash':
         return { type, expected: requireString(raw['expected'], 'Expected state hash') };
       case 'interaction-acknowledged':
         return {
           type,
-          command: requireString(raw['command'], 'Interaction command').replace(/^\//, ''),
+          command: requireCommand(raw['command']),
           ...(raw['withinMs'] === undefined
             ? {}
             : { withinMs: requireNonNegativeNumber(raw['withinMs'], 'Acknowledgement deadline') }),
@@ -926,10 +1124,7 @@ function validateValueBudget(value: unknown, limits: ScenarioLimits): void {
       charge(current ? 4 : 5);
       return;
     }
-    if (current === undefined) {
-      charge(4);
-      return;
-    }
+    if (current === undefined) throw new TypeError('Scenario values must not be undefined.');
     if (typeof current !== 'object') {
       throw new TypeError('Scenario must contain only JSON-compatible values.');
     }
@@ -1178,7 +1373,7 @@ function collectionResourceType(collection: string): DiscordResourceType {
     presences: 'presence',
     voiceStates: 'voice-state',
   };
-  return mapping[collection] ?? collection.replace(/s$/, '');
+  return Object.hasOwn(mapping, collection) ? mapping[collection]! : collection.replace(/s$/, '');
 }
 
 function normalizeResourceFields(
@@ -1192,7 +1387,10 @@ function normalizeResourceFields(
     parentId: 'parent_id',
   };
   return Object.fromEntries(
-    Object.entries(resource).map(([key, value]) => [aliases[key] ?? key, structuredClone(value)]),
+    Object.entries(resource).map(([key, value]) => [
+      Object.hasOwn(aliases, key) ? aliases[key]! : key,
+      structuredClone(value),
+    ]),
   );
 }
 
@@ -1235,7 +1433,7 @@ function parseDuration(value: unknown): number {
   const match = /^(\d+(?:\.\d+)?)(ms|s|m)$/.exec(value.trim());
   if (match === null) throw new TypeError(`Invalid duration: ${value}.`);
   const multiplier = match[2] === 'ms' ? 1 : match[2] === 's' ? 1_000 : 60_000;
-  return Number(match[1]) * multiplier;
+  return requireNonNegativeNumber(Number(match[1]) * multiplier, 'Duration');
 }
 
 function requireRecord(value: unknown, label: string): Readonly<Record<string, unknown>> {

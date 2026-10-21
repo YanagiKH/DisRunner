@@ -1,0 +1,2094 @@
+[
+  {
+    "name": "steps alone",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": []
+    }
+  },
+  {
+    "name": "actions alone",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": []
+    }
+  },
+  {
+    "name": "both execution roots",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "actions": []
+    }
+  },
+  {
+    "name": "neither execution root",
+    "valid": false,
+    "scenario": {
+      "name": "oracle"
+    }
+  },
+  {
+    "name": "null version",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "version": null
+    }
+  },
+  {
+    "name": "unsupported version 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "version": 0
+    }
+  },
+  {
+    "name": "unsupported version 2",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "version": 2
+    }
+  },
+  {
+    "name": "unsupported version '1'",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "version": "1"
+    }
+  },
+  {
+    "name": "unsupported version False",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "version": false
+    }
+  },
+  {
+    "name": "unknown root key",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "stepps": []
+    }
+  },
+  {
+    "name": "schema metadata",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "$schema": "https://example.invalid/schema"
+    }
+  },
+  {
+    "name": "wrong description 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "description": 1
+    }
+  },
+  {
+    "name": "wrong description 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "description": null
+    }
+  },
+  {
+    "name": "wrong description 2",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "description": []
+    }
+  },
+  {
+    "name": "wrong tags 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "tags": "x"
+    }
+  },
+  {
+    "name": "wrong tags 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "tags": null
+    }
+  },
+  {
+    "name": "wrong tags 2",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "tags": {}
+    }
+  },
+  {
+    "name": "wrong $schema 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "$schema": 1
+    }
+  },
+  {
+    "name": "wrong $schema 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "$schema": null
+    }
+  },
+  {
+    "name": "wrong mode 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "mode": null
+    }
+  },
+  {
+    "name": "wrong mode 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "mode": 1
+    }
+  },
+  {
+    "name": "wrong mode 2",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "mode": "loose"
+    }
+  },
+  {
+    "name": "wrong seed 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "seed": "1"
+    }
+  },
+  {
+    "name": "wrong seed 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "seed": null
+    }
+  },
+  {
+    "name": "wrong seed 2",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "seed": 1.1
+    }
+  },
+  {
+    "name": "wrong seed 3",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "seed": 9007199254740992
+    }
+  },
+  {
+    "name": "wrong initialState 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "initialState": null
+    }
+  },
+  {
+    "name": "wrong initialState 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "initialState": "x"
+    }
+  },
+  {
+    "name": "wrong assertions 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": null
+    }
+  },
+  {
+    "name": "wrong assertions 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": {}
+    }
+  },
+  {
+    "name": "valid metadata and full safe seed",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "description": "",
+      "tags": ["a", "a"],
+      "seed": -9007199254740991
+    }
+  },
+  {
+    "name": "open collection and resources",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "initialState": {
+        "customThings": [
+          {
+            "id": "x",
+            "extra": {
+              "arbitrary": true
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "open canonical resources",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "initialState": [
+        {
+          "resourceType": "x",
+          "anyKey": {
+            "x": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 0 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "advance-time",
+          "ms": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 0 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "advance-time",
+          "ms": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "advance-time",
+          "ms": 1,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 1 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "advance": "1s"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 1 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "advance": "1s"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "advance": "1s",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 2 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "action": "advance-time",
+          "ms": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 2 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "action": "advance-time",
+          "ms": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 2",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "action": "advance-time",
+          "ms": 1,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 3 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "create-resource",
+          "resourceType": "x",
+          "data": {
+            "anything": 1
+          },
+          "saveAs": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 3 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "create-resource",
+          "resourceType": "x",
+          "data": {
+            "anything": 1
+          },
+          "saveAs": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 3",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "create-resource",
+          "resourceType": "x",
+          "data": {
+            "anything": 1
+          },
+          "saveAs": "x",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 4 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "update-resource",
+          "resourceType": "x",
+          "id": "x",
+          "changes": {
+            "anything": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 4 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "update-resource",
+          "resourceType": "x",
+          "id": "x",
+          "changes": {
+            "anything": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 4",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "update-resource",
+          "resourceType": "x",
+          "id": "x",
+          "changes": {
+            "anything": 1
+          },
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 5 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "delete-resource",
+          "resourceType": "x",
+          "id": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 5 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "delete-resource",
+          "resourceType": "x",
+          "id": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 5",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "delete-resource",
+          "resourceType": "x",
+          "id": "x",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 6 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "send-message",
+          "channelId": "x",
+          "authorId": "x",
+          "content": "hello",
+          "saveAs": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 6 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "send-message",
+          "channelId": "x",
+          "authorId": "x",
+          "content": "hello",
+          "saveAs": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 6",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "send-message",
+          "channelId": "x",
+          "authorId": "x",
+          "content": "hello",
+          "saveAs": "x",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 7 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-dispatch",
+          "event": "X",
+          "data": [
+            1,
+            {
+              "anything": 1
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 7 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "gateway-dispatch",
+          "event": "X",
+          "data": [
+            1,
+            {
+              "anything": 1
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 7",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-dispatch",
+          "event": "X",
+          "data": [
+            1,
+            {
+              "anything": 1
+            }
+          ],
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 8 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-disconnect"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 8 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "gateway-disconnect"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 8",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-disconnect",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 9 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-resume",
+          "sequence": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 9 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "gateway-resume",
+          "sequence": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 9",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-resume",
+          "sequence": 0,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 10 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-create",
+          "interactionType": "custom",
+          "data": {
+            "anything": 1
+          },
+          "saveAs": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 10 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "interaction-create",
+          "interactionType": "custom",
+          "data": {
+            "anything": 1
+          },
+          "saveAs": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 10",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-create",
+          "interactionType": "custom",
+          "data": {
+            "anything": 1
+          },
+          "saveAs": "x",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 11 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-respond",
+          "interactionId": "x",
+          "responseType": "message",
+          "data": {
+            "anything": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 11 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "interaction-respond",
+          "interactionId": "x",
+          "responseType": "message",
+          "data": {
+            "anything": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 11",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-respond",
+          "interactionId": "x",
+          "responseType": "message",
+          "data": {
+            "anything": 1
+          },
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 12 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-followup",
+          "interactionId": "x",
+          "data": {
+            "anything": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 12 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "interaction-followup",
+          "interactionId": "x",
+          "data": {
+            "anything": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 12",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-followup",
+          "interactionId": "x",
+          "data": {
+            "anything": 1
+          },
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 13 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "rate-limit-request",
+          "method": "GET",
+          "path": "/x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 13 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "rate-limit-request",
+          "method": "GET",
+          "path": "/x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 13",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "rate-limit-request",
+          "method": "GET",
+          "path": "/x",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 14 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction",
+          "command": "/x",
+          "acknowledgeAfterMs": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 14 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "interaction",
+          "command": "/x",
+          "acknowledgeAfterMs": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 14",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction",
+          "command": "/x",
+          "acknowledgeAfterMs": 0,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 15 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "permission-check",
+          "permission": "MANAGE_MESSAGES",
+          "expected": "denied"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 15 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "permission-check",
+          "permission": "MANAGE_MESSAGES",
+          "expected": "denied"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 15",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "permission-check",
+          "permission": "MANAGE_MESSAGES",
+          "expected": "denied",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 16 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "rest-request",
+          "route": "POST /x",
+          "repeat": 2
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 16 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "rest-request",
+          "route": "POST /x",
+          "repeat": 2
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 16",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "rest-request",
+          "route": "POST /x",
+          "repeat": 2,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 17 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-disconnect",
+          "at": 0,
+          "resumable": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 17 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "gateway-disconnect",
+          "at": 0,
+          "resumable": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 17",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-disconnect",
+          "at": 0,
+          "resumable": false,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 18 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-resume",
+          "at": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 18 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "gateway-resume",
+          "at": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 18",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-resume",
+          "at": 0,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 19 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-interaction",
+          "at": 0,
+          "command": "x",
+          "acknowledgeAfterMs": 0,
+          "followUpAfterMs": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 19 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "timeline-interaction",
+          "at": 0,
+          "command": "x",
+          "acknowledgeAfterMs": 0,
+          "followUpAfterMs": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 19",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-interaction",
+          "at": 0,
+          "command": "x",
+          "acknowledgeAfterMs": 0,
+          "followUpAfterMs": 1,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 20 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-permission-check",
+          "at": 0,
+          "permission": "MANAGE_MESSAGES"
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 20 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "timeline-permission-check",
+          "at": 0,
+          "permission": "MANAGE_MESSAGES"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 20",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-permission-check",
+          "at": 0,
+          "permission": "MANAGE_MESSAGES",
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 21 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-rest-request",
+          "at": 0,
+          "method": "GET",
+          "path": "/x",
+          "repeat": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 21 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "timeline-rest-request",
+          "at": 0,
+          "method": "GET",
+          "path": "/x",
+          "repeat": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 21",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-rest-request",
+          "at": 0,
+          "method": "GET",
+          "path": "/x",
+          "repeat": 1,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 22 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-gateway-disconnect",
+          "at": 0,
+          "resumable": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 22 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "timeline-gateway-disconnect",
+          "at": 0,
+          "resumable": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 22",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-gateway-disconnect",
+          "at": 0,
+          "resumable": true,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 23 in steps",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-gateway-resume",
+          "at": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "action 23 in actions",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "actions": [
+        {
+          "type": "timeline-gateway-resume",
+          "at": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown key action 23",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-gateway-resume",
+          "at": 0,
+          "typo": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "advance-time",
+          "ms": 1,
+          "at": 5
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "advance": "1s",
+          "type": "advance-time",
+          "ms": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 2",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "advance-time",
+          "action": "advance-time",
+          "ms": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 3",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "create-resource",
+          "resourceType": "x",
+          "data": {},
+          "saveAs": 5
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 4",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "send-message",
+          "channelId": "x",
+          "authorId": "x",
+          "content": "x",
+          "saveAs": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 5",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-disconnect",
+          "resumable": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 6",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-disconnect",
+          "sequence": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 7",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-disconnect",
+          "at": 0,
+          "resumable": "yes"
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 8",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "timeline-gateway-disconnect",
+          "at": 0,
+          "resumable": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 9",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-resume",
+          "at": 0,
+          "sequence": 5
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 10",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-resume",
+          "sequence": 0.5
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 11",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "gateway-dispatch",
+          "event": "X"
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 12",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-create",
+          "interactionType": 3
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 13",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-create",
+          "data": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 14",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-respond",
+          "interactionId": "x",
+          "responseType": "message",
+          "data": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 15",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction-followup",
+          "interactionId": "x",
+          "data": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 16",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "rest-request",
+          "route": "bad-route"
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 17",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "rest-request",
+          "route": "GET /x",
+          "repeat": 1001
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 18",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "permission-check",
+          "permission": "NOT_A_PERMISSION"
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 19",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "permission-check",
+          "permission": "toString"
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 20",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction",
+          "command": "/",
+          "acknowledgeAfterMs": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "ineffective or mistyped action 21",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction",
+          "command": "x",
+          "acknowledgeAfterMs": 0,
+          "followUpAfterMs": "1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 0",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "resource-exists",
+          "resourceType": "x",
+          "id": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 0",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "resource-exists",
+          "resourceType": "x",
+          "id": "x",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 1",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "resource-field-equals",
+          "resourceType": "x",
+          "id": "x",
+          "field": "x",
+          "expected": {
+            "open": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 1",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "resource-field-equals",
+          "resourceType": "x",
+          "id": "x",
+          "field": "x",
+          "expected": {
+            "open": true
+          },
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 2",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "event-received",
+          "event": "X",
+          "count": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 2",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "event-received",
+          "event": "X",
+          "count": 0,
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 3",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "risk-present",
+          "ruleId": "X"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 3",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "risk-present",
+          "ruleId": "X",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 4",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "risk-absent",
+          "ruleId": "X"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 4",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "risk-absent",
+          "ruleId": "X",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 5",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "risk-detected",
+          "ruleId": "X"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 5",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "risk-detected",
+          "ruleId": "X",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 6",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "interaction-state",
+          "interactionId": "x",
+          "state": "expired"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 6",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "interaction-state",
+          "interactionId": "x",
+          "state": "expired",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 7",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "state-hash",
+          "expected": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 7",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "state-hash",
+          "expected": "x",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 8",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "interaction-acknowledged",
+          "command": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 8",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "interaction-acknowledged",
+          "command": "x",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 9",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "gateway-resumed"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 9",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "gateway-resumed",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "assertion 10",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "no-secret-leak"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown assertion key 10",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "no-secret-leak",
+          "typo": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "fractional event count",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "event-received",
+          "event": "X",
+          "count": 0.5
+        }
+      ]
+    }
+  },
+  {
+    "name": "missing equality expected",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "resource-field-equals",
+          "resourceType": "x",
+          "id": "x",
+          "field": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "invalid interaction state",
+    "valid": false,
+    "scenario": {
+      "name": "oracle",
+      "steps": [],
+      "assertions": [
+        {
+          "type": "interaction-state",
+          "interactionId": "x",
+          "state": "typo"
+        }
+      ]
+    }
+  },
+  {
+    "name": "newline in open command text",
+    "valid": true,
+    "scenario": {
+      "name": "oracle",
+      "steps": [
+        {
+          "type": "interaction",
+          "command": "\nx",
+          "acknowledgeAfterMs": 0
+        }
+      ],
+      "assertions": [
+        {
+          "type": "interaction-acknowledged",
+          "command": "\nx"
+        }
+      ]
+    }
+  }
+]

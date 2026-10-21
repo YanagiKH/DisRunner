@@ -4,7 +4,18 @@ All notable changes to DisRunner are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
-No changes yet.
+### Fixed
+
+- Reject permission expectation mismatches and unasserted scheduled operation failures instead of reporting false success in model scenarios.
+- Align strict scenario parsing with the published schema, reject simultaneous `steps` and `actions`, and reject unknown closed configuration keys without closing arbitrary payload dictionaries.
+- Preserve Gateway intent close codes 4013/4014 over the local WebSocket transport.
+- Reject invalid application-command callbacks, prevent edits from reviving deleted originals, and merge interaction message PATCH fields with atomic capacity checks.
+- Apply the documented simulator policies for content-edit mention settings and immutable ephemeral identity. Unknown interaction labels now fail callback validation rather than inheriting component behavior; existing scenarios using custom labels must use a modeled kind.
+
+### Maintenance
+
+- Refresh compatible dependencies, constrain vulnerable build transitives, and migrate the test runner to Vitest 4 while retaining coverage thresholds and an explicit source scope.
+- Add a proposed v1.0 capability/evidence baseline and shared-runtime ADR. SDK adapters and target-platform certification remain pending; these documents are not a v1.0 support claim.
 
 ## [0.1.0] - 2026-09-01
 

@@ -120,11 +120,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     switch (options.command) {
       case 'demo':
-        return runAndRender(demoScenario, options);
+        return await runAndRender(demoScenario, options);
       case 'run':
-        return runAndRender(await readInputFile(requireFile(options)), options);
+        return await runAndRender(await readInputFile(requireFile(options)), options);
       case 'test':
-        return runTests(
+        return await runTests(
           options.file === undefined ? demoScenario : await readInputFile(options.file),
           options,
         );
@@ -134,7 +134,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const file = requireFile(options);
         const output = requireOutput(options);
         assertDistinctPaths(file, output);
-        return runAndRender(await readInputFile(file), options);
+        return await runAndRender(await readInputFile(file), options);
       }
       case 'record': {
         const file = requireFile(options);
