@@ -195,11 +195,16 @@ async function runFullPackagedSmoke(signal) {
     );
     assert.equal(context.response?.data.content, 'Pong from package smoke bot.');
 
+    // Session failures crossing IPC expose safe messages, not raw callback details.
+    // The distinct trace and risk assertions below establish each failure's cause.
     await assert.rejects(
       invokeSessionCommand(page, '/invalid'),
-      /unsupported interaction callback/iu,
+      /SessionError: Bot interaction failed\.$/u,
     );
-    await assert.rejects(invokeSessionCommand(page, '/timeout'), /timed out/iu);
+    await assert.rejects(
+      invokeSessionCommand(page, '/timeout'),
+      /SessionError: Interaction deadline exceeded\.$/u,
+    );
     const evidence = await page.evaluate(() => window.disrunnerDesktop.getRuntimeState());
     assert.ok(
       evidence.traces.some((trace) => trace.name === '/invalid' && trace.status === 'error'),
@@ -216,6 +221,13 @@ async function runFullPackagedSmoke(signal) {
     assert.ok(
       evidence.risks.some((risk) => risk.ruleId === 'INTERACTION_TIMEOUT'),
       'timeout must produce risk evidence',
+    );
+    assert.equal(
+      evidence.traces.some(
+        (trace) => ['/invalid', '/timeout'].includes(trace.name) && trace.status === 'ok',
+      ),
+      false,
+      'rejected callbacks must not produce successful interaction traces',
     );
     const negativeStopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());
     assert.equal(negativeStopped.ok, true, JSON.stringify(negativeStopped.errors));
