@@ -336,9 +336,10 @@ async function gui() {
     assert.equal(info.packaged, true);
     assert.equal(info.offline, true);
     const packageIdentity = await application.evaluate(async ({ app }) => {
-      const fs = await import('node:fs/promises');
-      const crypto = await import('node:crypto');
-      const path = await import('node:path');
+      // Inspector evaluation has no ESM import hook; load builtins from the main process.
+      const fs = process.getBuiltinModule('fs/promises');
+      const crypto = process.getBuiltinModule('crypto');
+      const path = process.getBuiltinModule('path');
       const appPath = app.getAppPath();
       const files = {};
       async function walk(relative) {
