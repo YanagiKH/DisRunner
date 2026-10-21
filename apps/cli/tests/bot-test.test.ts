@@ -574,6 +574,51 @@ async function waitTrace(projectPath: string, event: string): Promise<void> {
   throw Error(`Bounded fixture wait failed: ${event}`);
 }
 
+// Linux-only independent process observation, not the runtime's snapshot/status oracle.
+async function processIdentity(
+  pid: number,
+  readStat: (path: string, encoding: 'utf8') => Promise<string> = readFile,
+): Promise<{ startTime: string; state: string } | null> {
+  let raw: string;
+  try {
+    raw = await readStat(`/proc/${pid}/stat`, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ESRCH') return null;
+    throw error;
+  }
+  const closingParen = raw.lastIndexOf(')');
+  if (!raw.startsWith(`${pid} (`) || closingParen < 0)
+    throw Error('Cannot establish the original child identity.');
+  const fields = raw
+    .slice(closingParen + 2)
+    .trim()
+    .split(/\s+/u);
+  const state = fields[0];
+  const startTime = fields[19];
+  if (
+    state === undefined ||
+    !/^[RSDZTtXxKWPI]$/u.test(state) ||
+    startTime === undefined ||
+    !/^\d+$/u.test(startTime)
+  )
+    throw Error('Cannot establish the original child identity.');
+  return { startTime, state };
+}
+
+describe('C14 procfs observer error classification', () => {
+  for (const code of ['ENOENT', 'ESRCH'])
+    it(`classifies ${code} from a disappearing procfs entry as absent`, async () => {
+      const error = Object.assign(new Error('Process disappeared during observation.'), { code });
+      await expect(processIdentity(123, () => Promise.reject(error))).resolves.toBeNull();
+    });
+  for (const code of ['EACCES', 'EIO', undefined])
+    it(`preserves ${code ?? 'unexpected'} observation errors`, async () => {
+      const error = Object.assign(new Error('Observation failed without proof of exit.'), { code });
+      await expect(processIdentity(123, () => Promise.reject(error))).rejects.toBe(error);
+    });
+});
+
 describe.sequential(
   'real shared-session / authenticated child oracles (not fake-session evidence)',
   () => {
@@ -867,36 +912,6 @@ describe.sequential(
         let observerFailure: unknown;
         let actualShutdown: ShutdownResult | undefined;
         let disposeAfterProof = false;
-
-        // Linux-only independent process observation, not the runtime's snapshot/status oracle.
-        async function processIdentity(
-          pid: number,
-        ): Promise<{ startTime: string; state: string } | null> {
-          let raw: string;
-          try {
-            raw = await readFile(`/proc/${pid}/stat`, 'utf8');
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-            throw error;
-          }
-          const closingParen = raw.lastIndexOf(')');
-          if (!raw.startsWith(`${pid} (`) || closingParen < 0)
-            throw Error('Cannot establish the original child identity.');
-          const fields = raw
-            .slice(closingParen + 2)
-            .trim()
-            .split(/\s+/u);
-          const state = fields[0];
-          const startTime = fields[19];
-          if (
-            state === undefined ||
-            !/^[RSDZTtXxKWPI]$/u.test(state) ||
-            startTime === undefined ||
-            !/^\d+$/u.test(startTime)
-          )
-            throw Error('Cannot establish the original child identity.');
-          return { startTime, state };
-        }
 
         const factory: typeof createSession = () => {
           const session = observed.factory();
