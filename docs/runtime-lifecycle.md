@@ -32,10 +32,14 @@ Linux evidence only; Windows and macOS behaviour is pending until it is executed
   `spawn`/`error` pair in `waitForSpawn`. Child event handlers are generation-guarded, so a stale
   event cannot change a newer run's snapshot.
 - Windows: when cleaning up a live owned child, `stop()` requires a zero exit from `taskkill /T`
-  and awaits the direct child's termination, escalating with `/F` if that child remains live.
+  (graceful or forced) and awaits the direct child's termination, escalating with `/F` if that child remains live.
   Each taskkill command is bounded by `Math.min(2000, graceMs || 2000)` milliseconds, separately
   from the child-exit waits. On timeout, only the owned taskkill helper is best-effort terminated.
-  A thrown spawn error, emitted error, nonzero or signal-only command exit, or command timeout
+  A completed nonzero graceful command permits exactly one `/F` attempt only while the same
+  owned direct child remains live. A departed child is never targeted again. The forced command
+  must exit zero and the direct child must terminate within the bounded force wait; otherwise
+  cleanup rejects. A thrown spawn error, emitted error, signal-only command exit, or command
+  timeout never triggers automatic escalation and rejects cleanup. A nonzero forced command also
   rejects cleanup. Unconfirmed cleanup retains ownership and
   blocks `start()`, even if the direct child subsequently exits. A live owned child permits retry
   after command failure, but not after a command timeout: the timed-out mutating helper may still

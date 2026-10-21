@@ -281,7 +281,7 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
     child.emit('exit', 0, null);
   }
 
-  for (const failure of ['throw', 'error', 'nonzero', 'signal'] as const) {
+  for (const failure of ['throw', 'error', 'signal'] as const) {
     it(`rejects taskkill ${failure} and retains live-child ownership for retry`, async () => {
       const runner = await started();
       if (failure === 'throw')
@@ -291,9 +291,9 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
       const stopping = runner.stop(1);
       const rejected = expect(stopping).rejects.toThrow(/taskkill/i);
       if (failure === 'error') killer.emit('error', errno('ENOENT'));
-      if (failure === 'nonzero') killer.emit('exit', 1, null);
       if (failure === 'signal') killer.emit('exit', null, 'SIGTERM');
       await rejected;
+      expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(1);
       await expect(runner.start({} as never)).rejects.toThrow('already running');
       const retry = runner.stop(1);
       killer.emit('exit', 0, null);
@@ -302,6 +302,106 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
       expect(killSpy).not.toHaveBeenCalled();
     });
   }
+
+  for (const graceMs of [0, 10]) {
+    it(`forces once after completed nonzero graceful exit (graceMs=${graceMs})`, async () => {
+      const runner = await started();
+      vi.useFakeTimers();
+      const forced = new EventEmitter();
+      mocks.spawn.mockImplementationOnce(() => killer).mockImplementationOnce(() => forced);
+      const stopping = runner.stop(graceMs);
+      const concurrent = runner.stop(graceMs);
+      void stopping.catch(() => {});
+      void concurrent.catch(() => {});
+      killer.emit('exit', 1, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        mocks.spawn.mock.calls
+          .filter(([exe]) => exe === 'taskkill')
+          .map(([, args]) => args as readonly string[]),
+      ).toEqual([
+        ['/PID', String(pid), '/T'],
+        ['/PID', String(pid), '/T', '/F'],
+      ]);
+      let settled = false;
+      void stopping.then(() => {
+        settled = true;
+      });
+      forced.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      exitChild();
+      await expect(stopping).resolves.toMatchObject({ status: 'stopped' });
+      await expect(concurrent).resolves.toMatchObject({ status: 'stopped' });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(killer.listenerCount('exit')).toBe(0);
+      expect(forced.listenerCount('exit')).toBe(0);
+      expect(killSpy).not.toHaveBeenCalled();
+    });
+  }
+
+  for (const failure of ['throw', 'nonzero', 'error', 'signal', 'timeout', 'still-live'] as const) {
+    it(`retains ownership on forced ${failure} after completed graceful failure`, async () => {
+      const runner = await started();
+      vi.useFakeTimers();
+      const forced = Object.assign(new EventEmitter(), { kill: vi.fn(() => true) });
+      mocks.spawn.mockImplementationOnce(() => killer).mockImplementationOnce(() => forced);
+      if (failure === 'throw') {
+        mocks.spawn.mockReset();
+        mocks.spawn
+          .mockImplementationOnce(() => killer)
+          .mockImplementationOnce(() => {
+            throw errno('ENOENT');
+          });
+      }
+      const rejected = expect(runner.stop(10)).rejects.toThrow(
+        /taskkill|termination could not be confirmed/i,
+      );
+      killer.emit('exit', 1, null);
+      await vi.advanceTimersByTimeAsync(0);
+      if (failure === 'nonzero') forced.emit('exit', 2, null);
+      if (failure === 'error') forced.emit('error', errno('ENOENT'));
+      if (failure === 'signal') forced.emit('exit', null, 'SIGTERM');
+      if (failure === 'still-live') forced.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(10);
+      await rejected;
+      if (failure === 'timeout') await expect(runner.stop(10)).rejects.toThrow(/taskkill/i);
+      await expect(runner.start({} as never)).rejects.toThrow('already running');
+      exitChild();
+      await expect(runner.stop(10)).rejects.toThrow(/taskkill|termination could not be confirmed/i);
+      expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(forced.listenerCount('exit')).toBe(0);
+      expect(killSpy).not.toHaveBeenCalled();
+    });
+  }
+
+  it('bounds a zero-grace hung forced helper at 2000 ms without a third helper', async () => {
+    const runner = await started();
+    vi.useFakeTimers();
+    const forced = Object.assign(new EventEmitter(), { kill: vi.fn(() => true) });
+    mocks.spawn.mockImplementationOnce(() => killer).mockImplementationOnce(() => forced);
+    let settled = false;
+    const stopping = runner.stop(0);
+    void stopping.catch(() => {
+      settled = true;
+    });
+    const rejected = expect(stopping).rejects.toThrow(/taskkill.*timed out/i);
+    killer.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(forced.kill).toHaveBeenCalledOnce();
+    await expect(runner.stop(0)).rejects.toThrow(/taskkill/i);
+    forced.emit('exit', 0, null);
+    exitChild();
+    await expect(runner.stop(0)).rejects.toThrow(/taskkill/i);
+    expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(forced.listenerCount('exit')).toBe(0);
+  });
 
   it('retains an unknown tree after the child exits and never targets its potentially reused PID', async () => {
     const runner = await started();
@@ -375,6 +475,7 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
       expect(helperKill).toHaveBeenCalledOnce();
       expect(killer.listenerCount('exit')).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
+      killer.emit('exit', 0, null);
       killer.emit('error', errno('ESRCH'));
       await expect(runner.stop(10)).rejects.toThrow(/taskkill/i);
       await expect(runner.start({} as never)).rejects.toThrow('already running');

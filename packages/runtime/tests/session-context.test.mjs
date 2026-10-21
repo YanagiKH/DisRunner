@@ -75,7 +75,8 @@ test('wire context is explicit and selected fixtures stay frozen across disk edi
     assert.deepEqual(observed.memberKeys, ['user']);
     assert.equal(result.context.channelId, '2100');
   } finally {
-    assert.equal((await session.dispose()).ok, true);
+    const shutdown = await session.dispose();
+    assert.equal(shutdown.ok, true, JSON.stringify(shutdown.errors));
     await rm(directory, { recursive: true, force: true });
   }
 });

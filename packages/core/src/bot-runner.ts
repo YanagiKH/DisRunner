@@ -322,8 +322,28 @@ export class BotRunner {
   ): Promise<BotProcessSnapshot> {
     const generation = this.#generation;
     if (child !== undefined) this.#status = 'stopping';
-    await this.#signalOwned(child, false, Math.min(2_000, graceMs || 2_000));
-    if (!(await this.#waitForOwnedTermination(child, graceMs))) {
+    const forceWaitMs = Math.min(2_000, graceMs || 2_000);
+    let forced = false;
+    try {
+      await this.#signalOwned(child, false, forceWaitMs);
+    } catch (error) {
+      // Only a completed helper is safe to supersede. Never target a departed child's PID.
+      if (
+        !(error instanceof WindowsTaskkillExitError) ||
+        child === undefined ||
+        this.#child !== child ||
+        child.exitCode !== null ||
+        child.signalCode !== null
+      )
+        throw error;
+      await this.#signalOwned(child, true, forceWaitMs);
+      forced = true;
+    }
+    if (!(await this.#waitForOwnedTermination(child, forced ? forceWaitMs : graceMs))) {
+      if (forced)
+        throw new Error(
+          'Bot process termination could not be confirmed; ownership is retained for retry.',
+        );
       await this.#signalOwned(child, true, Math.min(2_000, graceMs || 2_000));
       if (!(await this.#waitForOwnedTermination(child, Math.min(2_000, graceMs || 2_000)))) {
         throw new Error(
@@ -816,6 +836,13 @@ function parseProcStat(pid: number, raw: string): ProcStatResult {
 // that uncertainty by launching another helper or a new bot run.
 class WindowsTaskkillTimeoutError extends Error {}
 
+// Only this completed nonzero outcome permits automatic graceful-to-force escalation.
+class WindowsTaskkillExitError extends Error {
+  public constructor(code: number) {
+    super(`Windows taskkill exited with code ${code}; process-tree termination is unconfirmed.`);
+  }
+}
+
 /** Windows: observes taskkill failure; success still requires awaiting the owned child. */
 function runTaskkill(pid: number, force: boolean, timeoutMs: number): Promise<void> {
   return new Promise((resolvePromise, reject) => {
@@ -835,15 +862,27 @@ function runTaskkill(pid: number, force: boolean, timeoutMs: number): Promise<vo
       return;
     }
     let settled = false;
-    const finish = (success: boolean, timedOut = false): void => {
+    const finish = (success: boolean, timedOut = false, exitCode?: number): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       killer.off('exit', onExit);
       if (success) resolvePromise();
-      else reject(timedOut ? new WindowsTaskkillTimeoutError(failure().message) : failure());
+      else
+        reject(
+          timedOut
+            ? new WindowsTaskkillTimeoutError(failure().message)
+            : exitCode === undefined
+              ? failure()
+              : new WindowsTaskkillExitError(exitCode),
+        );
     };
-    const onExit = (code: number | null): void => finish(code === 0);
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
+      finish(
+        code === 0 && signal === null,
+        false,
+        code !== null && code !== 0 && signal === null ? code : undefined,
+      );
     const timer = setTimeout(() => {
       finish(false, true);
       // Terminate only our taskkill helper, never an exited bot's potentially reused PID.
