@@ -242,3 +242,22 @@ The model-only browser mode retains its separate example messages. Invocation va
 wire actor identity read the full retained live store, never the truncated display projection.
 Deleted actors/channels/guilds and unsupported or reassociated channels invalidate contexts;
 pre-run validation still uses the selected, frozen project fixtures.
+
+## Signed PING readiness retries
+
+A readiness transport failure reported as `TypeError('fetch failed')` can happen
+after the bot has accepted a request but before its response reaches the runtime.
+Readiness retries therefore wait until the actual wall-clock signing second is
+later than the previous attempt. The PING body and authentication protocol are
+unchanged, and peer-authentication failures still stop startup without retrying.
+
+Polling remains cancellable at 50 ms intervals under the original startup
+deadline. Under normal clocks, a retry can take roughly one extra second; slow
+startup or connection-refusal polling can consequently exhaust that deadline
+with fewer attempts. A frozen or backward-adjusted wall clock waits for recovery
+or cancellation/deadline expiry, rather than inventing a future timestamp. A
+clock rollback between checking time and signing is rejected before dispatch.
+
+The focused readiness regression injects loss of an authenticated response from
+the actual loopback fixture. This establishes the controlled retry/replay hazard;
+it does not attribute any historical intermittent startup failure to that cause.

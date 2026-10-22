@@ -33,7 +33,12 @@ export async function sendSignedInteraction(
   privateKey: KeyObject,
   peerSecretHex: string,
   payload: Readonly<Record<string, unknown>>,
-  options: { readonly signal?: AbortSignal; readonly timeoutMs?: number } = {},
+  options: {
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    /** Internal readiness observer; called synchronously before dispatch, without credentials. */
+    readonly onSignedTimestamp?: (timestamp: string) => void;
+  } = {},
 ): Promise<unknown> {
   const timeoutMs = options.timeoutMs ?? INTERACTION_TIMEOUT_MS;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_483_647) {
@@ -52,6 +57,8 @@ export async function sendSignedInteraction(
     Buffer.concat([Buffer.from(timestamp, 'utf8'), rawBody]),
     privateKey,
   ).toString('hex');
+  // Observer failures propagate before any request or timer is created.
+  options.onSignedTimestamp?.(timestamp);
   const controller = new AbortController();
   const abortFromCaller = (): void => controller.abort(options.signal?.reason);
   options.signal?.addEventListener('abort', abortFromCaller, { once: true });
