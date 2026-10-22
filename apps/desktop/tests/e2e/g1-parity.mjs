@@ -418,38 +418,86 @@ async function gui() {
       executableSha256: await digest(executablePath),
       asarSha256: await digest(packageIdentity.appPath),
     });
-    let previousMessageIds = [];
-    const freshBotContents = () =>
-      page
-        .locator('.chat-message')
-        .evaluateAll(
-          (nodes, previous) =>
-            nodes
-              .filter(
-                (node) =>
-                  !previous.includes(node.getAttribute('data-message-id')) &&
-                  node.querySelector('.chat-avatar.bot'),
-              )
-              .map((node) => node.querySelector('.message-content').textContent),
-          previousMessageIds,
+    const visibleMessageContents = () =>
+      page.locator('.chat-message:visible .message-content').allTextContents();
+    async function visibleInspector(check) {
+      const expand = page.getByRole('button', { name: 'Expand inspector', exact: true });
+      const restoreCollapsed = (await expand.count()) === 1;
+      if (restoreCollapsed) await expand.click();
+      try {
+        await page.getByRole('tab', { name: 'Trace', exact: true }).click();
+        return await check();
+      } finally {
+        if (restoreCollapsed)
+          await page.getByRole('button', { name: 'Collapse inspector', exact: true }).click();
+      }
+    }
+    async function expectNoDiagnostics() {
+      await visibleInspector(async () => {
+        const empty = page.getByRole('tabpanel');
+        await until(
+          async () =>
+            (await empty.isVisible()) &&
+            (await empty.textContent()) === 'No invocation diagnostics for this context.',
+          'visible empty invocation diagnostics',
         );
-    const freshSuccessfulReplies = () =>
-      page
-        .locator('.chat-message')
-        .evaluateAll(
-          (nodes, previous) =>
-            nodes
-              .filter(
-                (node) =>
-                  !previous.includes(node.getAttribute('data-message-id')) &&
-                  node.querySelector('.chat-avatar.bot') &&
-                  node
-                    .querySelector('.message-metadata')
-                    ?.textContent.startsWith('Signed local callback'),
-              )
-              .map((node) => node.querySelector('.message-content').textContent),
-          previousMessageIds,
+        assert.equal(await page.locator('.outcome-panel:visible').count(), 0);
+      });
+    }
+    const diagnosticRequestIds = new Set();
+    async function expectDiagnostic(
+      content,
+      actor = '3000',
+      channel = '2001',
+      failed = false,
+      command = '/ping',
+    ) {
+      return visibleInspector(async () => {
+        const details = page
+          .locator('.outcome-panel section')
+          .filter({
+            has: page.getByRole('heading', { name: 'Details', exact: true }),
+          })
+          .locator('p');
+        await until(async () => {
+          if (!(await details.isVisible())) return false;
+          const visibleCommand = page.locator('.trace-details dd').first();
+          if (
+            !(await visibleCommand.isVisible()) ||
+            (await visibleCommand.textContent()) !== command
+          )
+            return false;
+          const actual = await details.textContent();
+          return content instanceof RegExp ? content.test(actual) : actual === content;
+        }, 'visible exact callback diagnostic');
+        const actual = await details.textContent();
+        assert.equal(
+          await page.locator('.outcome-badge:visible').textContent(),
+          failed ? 'Denied' : 'Passed',
         );
+        await page.getByRole('tab', { name: 'Payload', exact: true }).click();
+        const payloadElement = page.locator('.payload-view pre code');
+        assert.equal(await payloadElement.isVisible(), true);
+        const payload = JSON.parse(await payloadElement.textContent());
+        assert.deepEqual(
+          [payload.actorId, payload.guildId, payload.channelId],
+          [actor, '1000', channel],
+        );
+        assert.equal(payload.command, command);
+        assert.equal(typeof payload.requestId, 'string');
+        assert.ok(payload.requestId.length > 0);
+        assert.equal(
+          diagnosticRequestIds.has(payload.requestId),
+          false,
+          'each invocation must expose its own diagnostic',
+        );
+        diagnosticRequestIds.add(payload.requestId);
+        assert.equal(payload.signed, !failed);
+        assert.equal(payload.runId, (await snapshot()).runId);
+        await page.getByRole('tab', { name: 'Trace', exact: true }).click();
+        return actual;
+      });
+    }
     const snapshot = () =>
       bounded(
         page.evaluate(() => window.disrunnerDesktop.getRuntimeState()),
@@ -565,6 +613,7 @@ async function gui() {
         }
       }
     }
+    let reachabilityMessageId = null;
     async function reachability(label) {
       const disclosure = control('Expand inspector');
       const collapsed = (await disclosure.count()) === 1;
@@ -575,7 +624,14 @@ async function gui() {
         capExercised: element.scrollHeight > element.clientHeight,
       }));
       const targets = [
-        ['message', page.locator('.message-content').filter({ hasText: canonical }).first()],
+        reachabilityMessageId === null
+          ? ['feed-status', page.getByRole('status', { name: 'Live message feed status' })]
+          : [
+              'message',
+              page.locator(
+                `.chat-message[data-message-id="${reachabilityMessageId}"] .message-content`,
+              ),
+            ],
         ['composer', page.getByRole('textbox', { name: 'Message #2001', exact: true })],
       ];
       if (await page.locator('#invocation-unavailable').count())
@@ -627,9 +683,10 @@ async function gui() {
           collapsed,
           runtimePanel,
           observations,
-          messageProvenance: label.startsWith('ux-recovery')
-            ? 'retained historical normal-run reply, not a Route A current-run response'
-            : 'current normal-run authenticated reply',
+          messageProvenance:
+            reachabilityMessageId === null
+              ? 'visible retained-feed availability status; callbacks are diagnostics, not chat rows'
+              : 'ordinary message created by authenticated REST in the current run',
           classification: runtimePanel.capExercised
             ? 'observed capped runtime overflow'
             : 'actual recovery height observed; maximum-height recovery case not proven',
@@ -819,6 +876,14 @@ async function gui() {
       const composer = page.getByRole('textbox', { name: 'Message #2001', exact: true });
       await composer.fill('');
       assert.equal(await control('Send local event').isDisabled(), true);
+      // Diagnostic checks can leave focus inside the wide inspector. Compact resizing
+      // intentionally expands it to preserve that focus; establish this oracle's baseline
+      // through the visible disclosure before its single keyboard anchor below.
+      const collapse = control('Collapse inspector');
+      if ((await collapse.count()) === 1) {
+        assert.equal(await collapse.getAttribute('aria-expanded'), 'true');
+        await collapse.click();
+      }
       const disclosure = control('Expand inspector');
       assert.equal(await disclosure.getAttribute('aria-expanded'), 'false');
       const controlledId = await disclosure.getAttribute('aria-controls');
@@ -990,21 +1055,11 @@ async function gui() {
       const actorSelect = page.getByRole('combobox', { name: 'Invocation actor' });
       assert.equal(await actorSelect.inputValue(), actor);
       assert.equal(await actorSelect.locator('option').count(), 1, 'one loaded user only');
-      previousMessageIds = await page
-        .locator('.chat-message')
-        .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-message-id')));
-      // Capture existing history in both channels; selecting projects does not clear it.
-      for (const id of ['2000', '2001']) {
-        const button = page.getByRole('button', { name: id, exact: true });
-        if (await button.count()) {
-          await button.click();
-          previousMessageIds.push(
-            ...(await page
-              .locator('.chat-message')
-              .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-message-id')))),
-          );
-        }
-      }
+      assert.deepEqual(
+        await visibleMessageContents(),
+        [],
+        'project selection clears retained feed',
+      );
       const first = page.getByRole('button', { name: '2000', exact: true });
       if (await first.count()) await first.click();
     }
@@ -1024,16 +1079,22 @@ async function gui() {
       });
       return state;
     }
-    async function send() {
+    async function send(command = '/ping') {
       await page.getByRole('button', { name: '2001', exact: true }).click();
       const composer = page.getByRole('textbox', { name: 'Message #2001', exact: true });
-      await composer.fill('/ping');
+      await composer.fill(command);
       await composer.press('Enter');
     }
     async function stop(directory) {
       await page.getByRole('button', { name: /^(Stop bot|Retry cleanup)$/u }).click();
       await until(async () => (await snapshot()).phase === 'ready', 'UI Stop bot');
       await released(directory);
+      assert.deepEqual(await visibleMessageContents(), [], 'stopped runtime clears retained feed');
+      assert.match(
+        await page.getByRole('status', { name: 'Live message feed status' }).textContent(),
+        /Live messages unavailable/u,
+      );
+      await expectNoDiagnostics();
     }
     // Each negative response is authenticated; the canonical expectation is never rewritten.
     for (const mode of Object.keys(expected)) {
@@ -1052,7 +1113,7 @@ async function gui() {
       if (mode.startsWith('exit-startup-')) {
         await page.getByRole('button', { name: 'Start bot', exact: true }).click();
         await until(async () => (await snapshot()).phase === 'error', 'pre-ready exit');
-        assert.deepEqual(await freshBotContents(), []);
+        assert.deepEqual(await visibleMessageContents(), []);
         await released(directory);
         if (mode === 'exit-startup-0') await compact(() => retryUx(directory));
       } else if (mode === 'stalled-startup') {
@@ -1062,7 +1123,7 @@ async function gui() {
           'pending real readiness',
         );
         await stop(directory);
-        assert.deepEqual(await freshBotContents(), []);
+        assert.deepEqual(await visibleMessageContents(), []);
       } else {
         await start();
         await send();
@@ -1076,39 +1137,34 @@ async function gui() {
             async () => (await trace(directory)).some((event) => event.event === 'callback'),
             'delayed callback',
           );
-          assert.deepEqual(await freshBotContents(), []);
+          assert.deepEqual(await visibleMessageContents(), []);
           await page.getByRole('button', { name: '2001', exact: true }).click();
-          await until(
-            async () => (await freshBotContents()).includes(canonical),
-            'new exact delayed reply',
-          );
-          assert.deepEqual(await freshBotContents(), [canonical]);
-          await page.getByRole('button', { name: '2000', exact: true }).click();
-          assert.deepEqual(
-            await freshBotContents(),
-            [],
-            'resolved reply cannot belong to first channel',
-          );
-          await page.getByRole('button', { name: '2001', exact: true }).click();
+          // Completion was observed in the real child's trace before switching back.
+          // Returning to the old context must not restore its discarded diagnostics.
+          await expectNoDiagnostics();
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          await expectNoDiagnostics();
+          assert.deepEqual(await visibleMessageContents(), []);
+          await send();
+          await expectDiagnostic(canonical);
+          assert.deepEqual(await visibleMessageContents(), []);
         } else if (mode === 'pong-only') {
-          await until(
-            async () => (await freshBotContents()).length > 0,
-            'visible rejected command',
-          );
-          assert.deepEqual(await freshSuccessfulReplies(), []);
-          assert.equal((await freshBotContents()).includes(canonical), false);
+          // Existing UI labels this deadline failure Denied; it is not a permission denial.
+          await expectDiagnostic(/Interaction deadline exceeded\./u, '3000', '2001', true);
+          assert.deepEqual(await visibleMessageContents(), []);
           assert.ok((await snapshot()).traces.some((item) => item.status === 'error'));
         } else if (mode !== 'stalled-command') {
-          const actual = mode === 'wrong-safe' ? 'Different G1 reply.' : canonical;
-          await until(
-            async () => (await freshBotContents()).includes(actual),
-            'new exact authenticated reply',
+          const expectedDiagnostic = mode === 'wrong-safe' ? 'Different G1 reply.' : canonical;
+          const actual = await expectDiagnostic(expectedDiagnostic);
+          assert.deepEqual(
+            await visibleMessageContents(),
+            [],
+            'callbacks are not ordinary messages',
           );
-          assert.deepEqual(await freshBotContents(), [actual]);
           assert.equal(
-            (await freshBotContents())[0] === canonical,
+            actual === canonical,
             mode !== 'wrong-safe',
-            'fixed whole-response parity assertion',
+            'fixed diagnostic parity assertion',
           );
         }
         if (mode === 'stalled-command')
@@ -1130,7 +1186,7 @@ async function gui() {
         await stop(directory);
         if (mode === 'stalled-command')
           assert.deepEqual(
-            await freshSuccessfulReplies(),
+            await visibleMessageContents(),
             [],
             'stopped pending command cannot create success',
           );
@@ -1141,7 +1197,7 @@ async function gui() {
         mode,
         outcome: 'control-passed',
         expectedContent: canonical,
-        actualNewBotContents: await freshBotContents(),
+        visibleOrdinaryMessageContents: await visibleMessageContents(),
         canonicalParityExpected: ['normal', 'delayed-reply'].includes(mode),
       });
     }
@@ -1162,13 +1218,14 @@ async function gui() {
     await page.getByRole('button', { name: '2001', exact: true }).click();
     await new Promise((resolve) => setTimeout(resolve, 1000));
     assert.deepEqual(
-      await freshBotContents(),
+      await visibleMessageContents(),
       [],
-      'stale run cannot add a reply to replacement project',
+      'replacement project starts without ordinary messages',
     );
+    await expectNoDiagnostics();
     await send();
-    await until(async () => (await freshBotContents()).includes(canonical), 'actor-B exact reply');
-    assert.deepEqual(await freshBotContents(), [canonical]);
+    await expectDiagnostic(canonical, '3001');
+    assert.deepEqual(await visibleMessageContents(), []);
     const command = (await trace(nextProject)).find((event) => event.event === 'command');
     assert.deepEqual(
       [command.actorId, command.guildId, command.channelId],
@@ -1182,11 +1239,8 @@ async function gui() {
     const composer = page.getByRole('textbox', { name: 'Message #2000', exact: true });
     await composer.fill('/ping');
     await composer.press('Enter');
-    await until(
-      async () => (await freshBotContents()).includes('Pong! Offline and deterministic.'),
-      'unchanged raw reply',
-    );
-    assert.deepEqual(await freshBotContents(), ['Pong! Offline and deterministic.']);
+    await expectDiagnostic('Pong! Offline and deterministic.', '3000', '2000');
+    assert.deepEqual(await visibleMessageContents(), []);
     await capture('gui-unchanged-raw');
     await page.getByRole('button', { name: 'Stop bot', exact: true }).click();
     await until(async () => (await snapshot()).phase === 'ready', 'raw control stop');
@@ -1194,6 +1248,167 @@ async function gui() {
       surface: 'packaged-electron',
       mode: 'actor-b-restart-and-unchanged-raw',
       outcome: 'control-passed',
+    });
+    assert.deepEqual(await visibleMessageContents(), []);
+    await expectNoDiagnostics();
+
+    async function selectLiveFixture(label, actor = 'a') {
+      const directory = await project(label, 'normal', actor);
+      const file = path.join(directory, 'discord-simulator.config.json');
+      const config = JSON.parse(await readFile(file, 'utf8'));
+      config.bot.startCommand = 'node live-feed-bot.mjs';
+      config.bot.entryPoint = 'live-feed-bot.mjs';
+      await writeFile(file, JSON.stringify(config, null, 2));
+      await save(`${label}-fixture.json`, {
+        configSha256: await digest(file),
+        botSha256: await digest(path.join(directory, 'live-feed-bot.mjs')),
+        operationSource: 'real child using its injected synthetic credential in memory',
+      });
+      await select(directory, actor === 'b' ? '3001' : '3000');
+      return directory;
+    }
+    async function ordinaryOperation(
+      directory,
+      operation,
+      expectedText,
+      expectedId,
+      actor = '3000',
+    ) {
+      const before = await snapshot();
+      // Unchanged guild roles are intentionally outside the display DTO.
+      assert.equal(before.coreState?.truncated, true);
+      await send(`/feed-${operation}`);
+      await until(
+        async () =>
+          (await trace(directory)).some(
+            (item) => item.event === 'rest-operation' && item.operation === operation,
+          ),
+        `real REST ${operation}`,
+      );
+      const events = await trace(directory);
+      const record = events.find(
+        (item) => item.event === 'rest-operation' && item.operation === operation,
+      );
+      const bootstrap = events.find((item) => item.event === 'bootstrap');
+      const command = events.filter((item) => item.event === 'command').at(-1);
+      assert.equal(record.status, operation === 'delete' ? 204 : 200);
+      assert.match(record.messageId, /^[1-9][0-9]{0,19}$/u);
+      if (expectedId !== undefined) assert.equal(record.messageId, expectedId);
+      assert.deepEqual(
+        [command.actorId, command.guildId, command.channelId],
+        [actor, '1000', '2001'],
+      );
+      assert.equal(command.applicationIdMatches, true);
+      assert.equal(command.applicationId, bootstrap.applicationId);
+      assert.equal(record.applicationId, bootstrap.applicationId);
+      assert.equal(record.authorId, bootstrap.authorId);
+      assert.notEqual(record.authorId, actor, 'ordinary author is the bot, not the invoking human');
+      const row = page.locator(`.chat-message[data-message-id="${record.messageId}"]`);
+      await until(
+        async () =>
+          operation === 'delete'
+            ? (await row.count()) === 0
+            : (await row.count()) === 1 &&
+              (await row.isVisible()) &&
+              (await row.locator('.message-content').textContent()) === expectedText,
+        `visible ordinary ${operation}`,
+      );
+      assert.deepEqual(
+        await visibleMessageContents(),
+        operation === 'delete' ? [] : [expectedText],
+      );
+      if (operation !== 'delete')
+        assert.equal(await row.locator('.chat-avatar.bot').isVisible(), true);
+      await expectDiagnostic(
+        'G1 callback diagnostic only.',
+        actor,
+        '2001',
+        false,
+        `/feed-${operation}`,
+      );
+      assert.equal(
+        (await visibleMessageContents()).includes('G1 callback diagnostic only.'),
+        false,
+      );
+      const after = await snapshot();
+      assert.equal(after.runId, before.runId);
+      assert.equal(after.coreState.runId, after.runId);
+      assert.equal(after.coreState.truncated, true);
+      assert.ok(
+        (
+          await page.getByRole('status', { name: 'Live message feed status' }).textContent()
+        ).includes(
+          'Live messages · truncated retained snapshot. Missing messages are not evidence of deletion.',
+        ),
+      );
+      assert.ok(after.revision > before.revision, 'Session publication revision advances');
+      assert.ok(
+        record.stateRevision > before.coreState.stateRevision,
+        'core mutation revision advances independently',
+      );
+      assert.ok(after.coreState.stateRevision >= record.stateRevision);
+      const retained = after.coreState.resources.filter(
+        (item) => item.resourceType === 'message' && item.id === record.messageId,
+      );
+      if (operation === 'delete') assert.deepEqual(retained, []);
+      else {
+        assert.equal(retained.length, 1);
+        assert.deepEqual(
+          [
+            retained[0].content,
+            retained[0].channel_id,
+            retained[0].guild_id,
+            retained[0].author.id,
+          ],
+          [expectedText, '2001', '1000', bootstrap.authorId],
+        );
+      }
+      await save(`ordinary-${actor}-${operation}.json`, {
+        ...record,
+        runId: after.runId,
+        sessionRevision: after.revision,
+        coreStateRevision: after.coreState.stateRevision,
+        visibleMessageId: operation === 'delete' ? null : record.messageId,
+        visibleContent: operation === 'delete' ? null : expectedText,
+        callbackWasSeparateDiagnostic: true,
+      });
+      await capture(`gui-ordinary-${actor}-${operation}`);
+      return record.messageId;
+    }
+    const liveProject = await selectLiveFixture('gui-live-feed');
+    const liveRun = await start();
+    await expectNoDiagnostics();
+    const createdId = await ordinaryOperation(liveProject, 'create', 'G1 public message created.');
+    await page.getByRole('button', { name: '2000', exact: true }).click();
+    assert.deepEqual(
+      await visibleMessageContents(),
+      [],
+      'other channel excludes the real ordinary row',
+    );
+    await expectNoDiagnostics();
+    await page.getByRole('button', { name: '2001', exact: true }).click();
+    assert.deepEqual(await visibleMessageContents(), ['G1 public message created.']);
+    await expectNoDiagnostics();
+    reachabilityMessageId = createdId;
+    await compact(() => inspectorUx('ux-live-feed'));
+    reachabilityMessageId = null;
+    await ordinaryOperation(liveProject, 'edit', 'G1 public message edited.', createdId);
+    await ordinaryOperation(liveProject, 'delete', null, createdId);
+    await stop(liveProject);
+    const replacement = await selectLiveFixture('gui-live-feed-b', 'b');
+    const replacementRun = await start();
+    assert.notEqual(replacementRun.runId, liveRun.runId);
+    assert.deepEqual(await visibleMessageContents(), [], 'new run cannot inherit retained rows');
+    await expectNoDiagnostics();
+    await ordinaryOperation(replacement, 'create', 'G1 public message created.', undefined, '3001');
+    await stop(replacement);
+    results.push({
+      surface: 'packaged-electron',
+      mode: 'ordinary-rest-message-lifecycle',
+      outcome: 'control-passed',
+      mutationSequence: ['create', 'edit', 'delete'],
+      replacementRunCleared: true,
+      lateOldRunDeliveryProven: false,
     });
   } catch (error) {
     if (page) {

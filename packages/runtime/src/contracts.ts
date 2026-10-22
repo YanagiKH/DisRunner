@@ -185,6 +185,7 @@ export interface RuntimeResourceView {
   readonly type?: number;
   readonly content?: string;
   readonly flags?: number;
+  readonly visibility?: 'channel';
   readonly timestamp?: string;
   readonly edited_timestamp?: string | null;
   readonly author?: RuntimeAuthorView;

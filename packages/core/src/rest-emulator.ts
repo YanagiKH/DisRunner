@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import { parseRestBootstrapProfile, type RestBootstrapProfile } from './bootstrap-profile.js';
@@ -374,9 +375,9 @@ export class LocalRestEmulator {
     const callbackMatch = /^\/interactions\/(\d+)\/([^/]+)\/callback$/.exec(path);
     if (callbackMatch !== null && method === 'POST') {
       const interactionId = callbackMatch[1] as string;
-      const token = decodeURIComponent(callbackMatch[2] as string);
+      const token = decodeRouteToken(callbackMatch[2] as string);
       const interaction = this.#interactions.get(interactionId);
-      if (interaction === undefined || interaction.token !== token)
+      if (interaction === undefined || !routeTokenEqual(token, interaction.token))
         throw new DiscordApiError(404, 10062, 'Unknown interaction.');
       const payload = requireObjectBody(body);
       const callbackType = callbackTypeName(payload['type']);
@@ -387,7 +388,7 @@ export class LocalRestEmulator {
 
     const webhookMatch = /^\/webhooks\/(\d+)\/([^/]+)$/.exec(path);
     if (webhookMatch !== null && method === 'POST') {
-      const token = decodeURIComponent(webhookMatch[2] as string);
+      const token = decodeRouteToken(webhookMatch[2] as string);
       const interaction = this.#interactions.getByToken(token);
       if (interaction === undefined) throw new DiscordApiError(404, 10015, 'Unknown webhook.');
       sendJson(
@@ -425,22 +426,41 @@ export class LocalRestEmulator {
       const interactionId = callbackMatch[1] as string;
       const token = decodeRouteToken(callbackMatch[2] as string);
       const interaction = this.#interactions.get(interactionId);
-      if (interaction === undefined || interaction.token !== token) {
+      // Unknown interaction, wrong token, no bound application, or expired: rejected here,
+      // before any rate-limit quota is spent and before the body is read.
+      if (
+        interaction === undefined ||
+        !routeTokenEqual(token, interaction.token) ||
+        interaction.applicationId === undefined ||
+        interaction.status === 'expired'
+      ) {
         throw new DiscordApiError(404, 10062, 'Unknown interaction.');
       }
       return `/interactions/${interaction.id}/${encodeURIComponent(interaction.token)}/callback`;
     }
     const webhookMatch = /^\/webhooks\/(\d+)\/([^/]+)$/.exec(path);
     if (webhookMatch !== null) {
+      const applicationId = webhookMatch[1] as string;
       const token = decodeRouteToken(webhookMatch[2] as string);
       const interaction = this.#interactions.getByToken(token);
-      if (interaction === undefined) {
+      // The path application ID must exactly equal the application the interaction is bound
+      // to; unbound interactions fail closed. Rejected before quota and before the body read.
+      if (
+        interaction === undefined ||
+        !routeTokenEqual(token, interaction.token) ||
+        interaction.applicationId === undefined ||
+        interaction.applicationId !== applicationId
+      ) {
         throw new DiscordApiError(404, 10015, 'Unknown webhook.');
       }
-      // The core interaction model does not yet carry an application ID. Canonicalize the
-      // untrusted webhookId to the verified interaction ID so rotating path IDs cannot create
-      // unbounded rate-limit majors for one valid token.
-      return `/webhooks/${interaction.id}/${encodeURIComponent(interaction.token)}`;
+      if (interaction.status === 'expired') {
+        // The model's own token check reports EXPIRED_INTERACTION_TOKEN and throws 404/10015
+        // for an expired interaction without changing it; quota has not been spent yet.
+        this.#interactions.followup(interaction.id, {});
+        throw new DiscordApiError(404, 10015, 'Unknown webhook.');
+      }
+      // The bucket path is the verified identity, so rotating path IDs cannot add buckets.
+      return `/webhooks/${interaction.applicationId}/${encodeURIComponent(interaction.token)}`;
     }
     throw new DiscordApiError(404, 0, '404: Not Found');
   }
@@ -451,12 +471,11 @@ function stripApiVersion(path: string): string {
 }
 
 function traceRouteTemplate(path: string): string {
-  return path
-    .replace(
-      /^\/interactions\/\d+\/[^/]+\/callback$/,
-      '/interactions/:interactionId/:token/callback',
-    )
-    .replace(/^\/webhooks\/\d+\/[^/]+$/, '/webhooks/:webhookId/:token');
+  // Trace metadata is recorded before authorization. Never reflect path segments from
+  // sensitive route families, even when the method, ID, token encoding, or suffix is invalid.
+  if (/^\/interactions(?:\/|$)/.test(path)) return '/interactions/:interactionId/:token/callback';
+  if (/^\/webhooks(?:\/|$)/.test(path)) return '/webhooks/:webhookId/:token';
+  return path;
 }
 
 function isTokenAuthenticatedRoute(method: string, path: string): boolean {
@@ -464,6 +483,13 @@ function isTokenAuthenticatedRoute(method: string, path: string): boolean {
     method === 'POST' &&
     (/^\/interactions\/\d+\/[^/]+\/callback$/.test(path) || /^\/webhooks\/\d+\/[^/]+$/.test(path))
   );
+}
+
+/** Constant-time comparison for route tokens; the value is compared exactly as sent. */
+function routeTokenEqual(received: string, expected: string): boolean {
+  const left = Buffer.from(received, 'utf8');
+  const right = Buffer.from(expected, 'utf8');
+  return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
 
 function decodeRouteToken(value: string): string {

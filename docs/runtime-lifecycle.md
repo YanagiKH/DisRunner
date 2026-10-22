@@ -210,3 +210,26 @@ fixtures in `packages/core/tests/fixtures/bot-runner-lifecycle/`. They cover:
 - **L04's "close every resource even if one fails"** and **L05's "failed cleanup is retried"**
   are not covered by real-process failures. They are covered by the injected cases in
   `cleanup-failures.test.mjs` (see above), which use the internal dependency seam.
+
+## Live conversation projection
+
+Desktop displays a read-only projection of ordinary messages from the current running
+session's retained core store. A message is eligible only when its visibility is explicitly
+`channel`, its type is `0`, its flags are one of `0`, `4`, `4096`, or `4100`, and it belongs
+to an existing type-0 guild text channel in the same guild. Unknown visibility, private or
+ephemeral messages, unsupported flags, and mismatched channel/guild references are excluded
+before renderer IPC. This is a bounded supported-channel view, not a general Discord
+permission system or support for direct messages.
+
+The projection is capped by resource count and serialized bytes. Truncation and unavailable
+snapshots are shown explicitly; absence from this view does not prove a resource was deleted.
+Session publication revision and core state revision are separate counters. Desktop consumes
+only the accepted current session/run snapshot, clears the feed while resynchronizing or when
+stopped, and does not append optimistic messages. A failed cleanup can retain the underlying
+store for a retry without presenting it as a running conversation.
+
+Command callback responses remain invocation diagnostics, not state-backed conversation rows.
+The model-only browser mode retains its separate example messages. Invocation validation and
+wire actor identity read the full retained live store, never the truncated display projection.
+Deleted actors/channels/guilds and unsupported or reassociated channels invalidate contexts;
+pre-run validation still uses the selected, frozen project fixtures.

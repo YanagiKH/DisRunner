@@ -80,3 +80,181 @@ test('wire context is explicit and selected fixtures stay frozen across disk edi
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('authenticated live channel edits and deletes revoke invocation contexts immediately', async () => {
+  const { createSessionWithDependencies } = await import('../dist/session.js');
+  let token;
+  const session = createSessionWithDependencies(
+    {},
+    {
+      wrapBot(bot) {
+        return {
+          start(config) {
+            token = config.fakeToken;
+            return bot.start(config);
+          },
+          stop: (...args) => bot.stop(...args),
+          snapshot: () => bot.snapshot(),
+          observeExit: () => bot.observeExit(),
+        };
+      },
+    },
+  );
+  try {
+    await session.selectProject(project);
+    const started = await session.start();
+    const mutate = (method, body) =>
+      fetch(`${started.endpoints.restBaseUrl}/channels/2000`, {
+        method,
+        headers: { authorization: `Bot ${token}`, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(5000),
+      });
+    assert.deepEqual(session.validateContext(context), context);
+    const changed = await mutate('PATCH', { type: 2 });
+    assert.equal(changed.status, 200);
+    await changed.json();
+    assert.throws(() => session.validateContext(context), { code: 'invalid' });
+    await assert.rejects(
+      session.invoke({
+        runId: started.runId,
+        requestId: 'changed-channel',
+        input: '/ping',
+        context,
+      }),
+      { code: 'invalid' },
+    );
+    const restored = await mutate('PATCH', { type: 0 });
+    assert.equal(restored.status, 200);
+    await restored.json();
+    assert.deepEqual(session.validateContext(context), context);
+    const removed = await mutate('DELETE');
+    assert.equal(removed.status, 204);
+    assert.equal(
+      session.snapshot().contexts.some((c) => c.channelId === '2000'),
+      false,
+    );
+    await assert.rejects(
+      session.invoke({
+        runId: started.runId,
+        requestId: 'deleted-channel',
+        input: '/ping',
+        context,
+      }),
+      { code: 'invalid' },
+    );
+    assert.equal((await session.stop()).ok, true);
+    assert.deepEqual(
+      session.validateContext(context),
+      context,
+      'Stopped pre-run selection uses frozen fixture again.',
+    );
+  } finally {
+    assert.equal((await session.dispose()).ok, true);
+  }
+});
+
+test('wire actor uses actual retained state and deleted live actor cannot invoke', async () => {
+  const { VirtualState } = await import('@disrunner/core');
+  const originalSnapshot = VirtualState.prototype.revisionedSnapshot;
+  let actual;
+  // Observe the actual production store used for publication; do not substitute data or methods.
+  VirtualState.prototype.revisionedSnapshot = function (...args) {
+    actual = { state: this };
+    return originalSnapshot.apply(this, args);
+  };
+  const { cp, mkdtemp, readFile, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(tmpdir(), 'live-actor-'));
+  const session = createSession();
+  try {
+    await cp(project, directory, { recursive: true });
+    const server = join(directory, 'src/server.mjs');
+    await writeFile(
+      server,
+      (await readFile(server, 'utf8'))
+        .replace(
+          'function handleInteraction(send, interaction)',
+          'async function handleInteraction(send, interaction)',
+        )
+        .replace(
+          '  const name = interaction.data?.name;',
+          `
+  if (interaction.data?.name === 'wait') {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile('dispatched', 'ready');
+    while (true) {
+      try { await fs.access('release'); break; } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  const name = interaction.data?.name === 'wait' ? 'ping' : interaction.data?.name;`,
+        )
+        .replace("'Pong! Offline and deterministic.'", 'interaction.member.user.username'),
+    );
+    await session.selectProject(directory);
+    const started = await session.start();
+    VirtualState.prototype.revisionedSnapshot = originalSnapshot;
+    assert.ok(actual?.state instanceof VirtualState);
+    const published = [];
+    const unsubscribe = session.subscribe((event) => published.push(event));
+    for (const [id, visibility, flags] of [
+      ['private-fixture', 'private', 0],
+      ['ephemeral-fixture', 'channel', 64],
+      ['unknown-fixture', 'unknown', 0],
+      ['forged-fixture', 'channel', 2 ** 40],
+    ]) {
+      actual.state.create('message', {
+        id,
+        visibility,
+        flags,
+        type: 0,
+        guild_id: '1000',
+        channel_id: '2000',
+        content: 'PRIVATE_IPC_SENTINEL',
+      });
+    }
+    assert.equal(JSON.stringify(published).includes('PRIVATE_IPC_SENTINEL'), false);
+    assert.equal(JSON.stringify(session.snapshot()).includes('PRIVATE_IPC_SENTINEL'), false);
+    unsubscribe();
+    actual.state.update('user', '3000', { username: 'Live renamed actor' });
+    const result = await session.invoke({
+      runId: started.runId,
+      requestId: 'renamed',
+      input: '/ping',
+      context,
+    });
+    assert.equal(result.response.data.content, 'Live renamed actor');
+    const pending = session.invoke({
+      runId: started.runId,
+      requestId: 'pending-deletion',
+      input: '/wait',
+      context,
+    });
+    const rejected = assert.rejects(pending, { code: 'invalid' });
+    const deadline = Date.now() + 5000;
+    while (true) {
+      try {
+        await readFile(join(directory, 'dispatched'));
+        break;
+      } catch {
+        // Wait until the signed callback creates its dispatch marker.
+      }
+      assert.ok(Date.now() < deadline, 'Signed callback was not dispatched.');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    actual.state.delete('user', '3000');
+    await writeFile(join(directory, 'release'), 'continue');
+    await rejected;
+    assert.deepEqual(session.snapshot().contexts, []);
+    await assert.rejects(
+      session.invoke({ runId: started.runId, requestId: 'deleted', input: '/ping', context }),
+      { code: 'invalid' },
+    );
+  } finally {
+    VirtualState.prototype.revisionedSnapshot = originalSnapshot;
+    assert.equal((await session.dispose()).ok, true);
+    await rm(directory, { recursive: true, force: true });
+  }
+});

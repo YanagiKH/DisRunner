@@ -23,7 +23,13 @@ describe('LocalRestEmulator', () => {
     state.create('guild', { id: '1000', name: 'Lab' });
     state.create('channel', { id: '2000', guild_id: '1000', name: 'bot-testing', type: 0 });
     const profile = createSimulationProfile({ seed: 9 });
-    const interactions = new InteractionEngine({ clock, random, snowflakes, profile });
+    const interactions = new InteractionEngine({
+      applicationId: '1',
+      clock,
+      random,
+      snowflakes,
+      profile,
+    });
     const gateway = new GatewayEmulator({
       clock,
       random,
@@ -138,6 +144,7 @@ describe('LocalRestEmulator', () => {
     state.create('guild', { id: '1000', name: 'Lab' });
     state.create('channel', { id: '2000', guild_id: '1000', name: 'bot-testing', type: 0 });
     const interactions = new InteractionEngine({
+      applicationId: '1',
       clock,
       random,
       snowflakes,
@@ -193,7 +200,7 @@ describe('LocalRestEmulator', () => {
           headers: { Authorization: authorization, 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: 'follow-up' }),
         });
-      const bucketsBeforeInvalidTokens = rateLimits.buckets().length;
+      const bucketsBeforeInvalidTokens = rateLimits.buckets();
       for (let index = 0; index < 32; index += 1) {
         const invalid = await fetch(`${address.apiBaseUrl}/webhooks/1/invalid-${index}`, {
           method: 'POST',
@@ -201,21 +208,36 @@ describe('LocalRestEmulator', () => {
         });
         expect(invalid.status).toBe(404);
       }
-      expect(rateLimits.buckets()).toHaveLength(bucketsBeforeInvalidTokens);
+      expect(rateLimits.buckets()).toEqual(bucketsBeforeInvalidTokens);
       expect((await followup('Bot attacker-controlled-one')).status).toBe(200);
-      const bucketsAfterValidToken = rateLimits.buckets().length;
+      const bucketsAfterValidToken = rateLimits.buckets();
       for (let index = 2; index < 34; index += 1) {
         const rotatedWebhookId = await fetch(
           `${address.apiBaseUrl}/webhooks/${index}/${encodeURIComponent(interaction.token)}`,
           {
             method: 'POST',
-            headers: { Authorization: `Bot attacker-valid-${index}` },
+            headers: {
+              Authorization: `Bot attacker-valid-${index}`,
+              'Content-Type': 'application/json',
+            },
+            body: '{invalid-json',
           },
         );
-        expect(rotatedWebhookId.status).toBe(429);
+        expect(rotatedWebhookId.status).toBe(404);
+        expect(await rotatedWebhookId.json()).toMatchObject({ code: 10015 });
+        expect(rateLimits.buckets()).toEqual(bucketsAfterValidToken);
       }
-      expect(rateLimits.buckets()).toHaveLength(bucketsAfterValidToken);
-      expect((await followup('Bot attacker-controlled-two')).status).toBe(429);
+      expect(rateLimits.buckets()).toEqual(bucketsAfterValidToken);
+      for (let index = 0; index < 32; index += 1) {
+        const exhausted = await followup(`Bot rotated-authorization-${index}`);
+        expect(exhausted.status).toBe(429);
+        expect(await exhausted.json()).toEqual({
+          message: 'You are being rate limited.',
+          retry_after: 5,
+          global: false,
+        });
+      }
+      expect(rateLimits.buckets()).toHaveLength(bucketsAfterValidToken.length);
     } finally {
       await server.stop();
     }
@@ -227,6 +249,7 @@ describe('LocalRestEmulator', () => {
     const snowflakes = new SnowflakeGenerator(clock);
     const risks: string[] = [];
     const interactions = new InteractionEngine({
+      applicationId: '1',
       clock,
       random,
       snowflakes,

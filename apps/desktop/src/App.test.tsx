@@ -112,7 +112,7 @@ describe('captured project runtime context', () => {
     Reflect.deleteProperty(window, 'disrunnerDesktop');
   });
 
-  it('submits real non-first project IDs and keeps a delayed reply in its captured channel', async () => {
+  it('submits real non-first project IDs and keeps callbacks diagnostic, never feed rows', async () => {
     let finish!: (result: DisRunnerInvocationResult) => void;
     const invoke = vi.fn(
       (_request: DisRunnerInvocationRequest) =>
@@ -150,7 +150,9 @@ describe('captured project runtime context', () => {
       within(screen.getByRole('main')).queryByText('Observed callback'),
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '2100' }));
-    expect(within(screen.getByRole('main')).getByText('Observed callback')).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('main')).queryByText('Observed callback'),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText('Pong!  ·  123ms')).not.toBeInTheDocument();
   });
 
@@ -159,9 +161,10 @@ describe('captured project runtime context', () => {
     const user = userEvent.setup();
     render(<App />);
     await user.type(await screen.findByRole('textbox', { name: 'Message #2000' }), '/ping{Enter}');
+    expect(await screen.findByText('Authenticated peer failed')).toBeInTheDocument();
     expect(
-      await within(screen.getByRole('main')).findByText('Authenticated peer failed'),
-    ).toBeInTheDocument();
+      within(screen.getByRole('main')).queryByText('Authenticated peer failed'),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText('Pong!  ·  123ms')).not.toBeInTheDocument();
   });
   it('rejects an old reply while a new-run snapshot is still being recovered', async () => {
@@ -1209,5 +1212,221 @@ describe('responsive recovery ownership', () => {
     expect(r.invoke).not.toHaveBeenCalled();
     expect(r.start).toBeDisabled();
     await r.finish();
+  });
+});
+
+function liveSnapshot(content = 'Retained public message'): DisRunnerRuntimeState {
+  return {
+    ...snapshot,
+    contexts: [context, { ...context, actorId: '3001' }],
+    coreState: {
+      schemaVersion: 1,
+      runId: 'run-1',
+      stateRevision: 100,
+      revisioned: true,
+      clock: { domain: 'bot', mode: 'realtime', nowMs: 1 },
+      totalResources: 1,
+      truncated: false,
+      resources: [
+        {
+          id: 'message-1',
+          resourceType: 'message',
+          visibility: 'channel',
+          guild_id: '1000',
+          channel_id: '2000',
+          type: 0,
+          flags: 0,
+          content,
+          author: { id: 'author', username: 'Runtime author' },
+        },
+      ],
+    },
+  };
+}
+
+describe('live retained Desktop message feed', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'disrunnerDesktop');
+  });
+
+  it('renders accepted edits, rejects stale publications, labels truncation and clears unavailable/stopped state', async () => {
+    let listener!: (event: DisRunnerSessionEvent) => void;
+    const initial = liveSnapshot();
+    installBridge(vi.fn(), {
+      getRuntimeState: () => Promise.resolve(initial),
+      onRuntimeState: (value) => {
+        listener = value;
+        return () => {};
+      },
+    });
+    render(<App />);
+    expect(
+      await within(screen.getByRole('main')).findByText('Retained public message'),
+    ).toBeVisible();
+    async function publish(value: DisRunnerRuntimeState) {
+      await act(async () => {
+        await Promise.resolve();
+        listener({
+          schemaVersion: 1,
+          sessionId: value.sessionId,
+          runId: value.runId,
+          sequence: value.revision,
+          kind: 'snapshot',
+          snapshot: value,
+        });
+      });
+    }
+    const edited = { ...liveSnapshot('Edited retained message'), revision: 2 };
+    await publish(edited);
+    expect(within(screen.getByRole('main')).getByText('Edited retained message')).toBeVisible();
+    await publish(initial);
+    expect(screen.queryByText('Retained public message')).not.toBeInTheDocument();
+    await publish({
+      ...edited,
+      revision: 3,
+      coreState: { ...edited.coreState!, resources: [], truncated: true },
+    });
+    expect(screen.getByLabelText('Live message feed status')).toHaveTextContent(
+      'truncated retained snapshot. Missing messages are not evidence of deletion.',
+    );
+    expect(screen.queryByText('Edited retained message')).not.toBeInTheDocument();
+    await publish({ ...edited, revision: 4, coreState: null });
+    expect(screen.getByLabelText('Live message feed status')).toHaveTextContent(
+      'Live messages unavailable',
+    );
+    await publish({ ...edited, revision: 5, phase: 'ready' });
+    expect(screen.queryByText('Edited retained message')).not.toBeInTheDocument();
+  });
+
+  it('clears old rows during a new-run resync and rejects an old-run core projection', async () => {
+    let listener!: (event: DisRunnerSessionEvent) => void;
+    let resolve!: (value: DisRunnerRuntimeState) => void;
+    const getState = vi
+      .fn()
+      .mockResolvedValueOnce(liveSnapshot())
+      .mockImplementation(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      );
+    installBridge(vi.fn(), {
+      getRuntimeState: getState,
+      onRuntimeState: (value) => {
+        listener = value;
+        return () => {};
+      },
+    });
+    render(<App />);
+    await screen.findByText('Retained public message');
+    await act(async () => {
+      await Promise.resolve();
+      listener({
+        schemaVersion: 1,
+        sessionId: 'session-1',
+        runId: 'run-2',
+        sequence: 2,
+        kind: 'snapshot',
+        snapshot: { ...liveSnapshot(), runId: 'run-2', revision: 2 },
+      });
+    });
+    expect(screen.queryByText('Retained public message')).not.toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+      resolve({ ...liveSnapshot(), runId: 'run-2', revision: 2 });
+    });
+    expect(screen.queryByText('Retained public message')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Live message feed status')).toHaveTextContent(
+      'Live messages unavailable',
+    );
+  });
+
+  it('never exposes a late actor A callback in actor B feed or diagnostics', async () => {
+    let finish!: (value: DisRunnerInvocationResult) => void;
+    let request!: DisRunnerInvocationRequest;
+    installBridge(
+      (value) => {
+        request = value;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+      { getRuntimeState: () => Promise.resolve(liveSnapshot()) },
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(
+      await screen.findByRole('textbox', { name: 'Message #2000' }),
+      '/secret{Enter}',
+    );
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3001');
+    await act(async () => {
+      await Promise.resolve();
+      finish({
+        ...request,
+        ok: true,
+        command: 'secret',
+        interactionId: 'private',
+        durationMs: 1,
+        response: { type: 'message', data: { content: 'Actor A private callback', flags: 64 } },
+        error: null,
+      });
+    });
+    expect(screen.queryByText('Actor A private callback')).not.toBeInTheDocument();
+    expect(within(screen.getByRole('main')).getByText('Retained public message')).toBeVisible();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3000');
+    await user.click(screen.getByRole('tab', { name: 'Trace' }));
+    expect(screen.queryByText('Actor A private callback')).not.toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', { name: 'Message #2000' }), '/secret{Enter}');
+    await act(async () => {
+      await Promise.resolve();
+      finish({
+        ...request,
+        ok: true,
+        command: 'secret',
+        interactionId: 'current-private',
+        durationMs: 1,
+        response: { type: 'message', data: { content: 'Actor A private callback', flags: 64 } },
+        error: null,
+      });
+    });
+    await user.click(screen.getByRole('tab', { name: 'Trace' }));
+    expect(screen.getByText('Actor A private callback')).toBeVisible();
+    expect(
+      within(screen.getByRole('main')).queryByText('Actor A private callback'),
+    ).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3001');
+    expect(screen.queryByText('Actor A private callback')).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3000');
+    expect(screen.queryByText('Actor A private callback')).not.toBeInTheDocument();
+    expect(screen.getByText('No invocation diagnostics for this context.')).toBeVisible();
+    expect(
+      within(screen.getByRole('region', { name: 'Interaction inspector' })).queryByText('Passed'),
+    ).not.toBeInTheDocument();
+  });
+  it('drops late actor A invocation failures before they can replace actor B diagnostics', async () => {
+    let reject!: (reason: Error) => void;
+    installBridge(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+      {
+        getRuntimeState: () => Promise.resolve(liveSnapshot()),
+      },
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(
+      await screen.findByRole('textbox', { name: 'Message #2000' }),
+      '/secret{Enter}',
+    );
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3001');
+    await act(async () => {
+      reject(new Error('Actor A failure detail'));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText('Actor A failure detail')).not.toBeInTheDocument();
+    expect(screen.queryByText('/secret failed locally')).not.toBeInTheDocument();
   });
 });
