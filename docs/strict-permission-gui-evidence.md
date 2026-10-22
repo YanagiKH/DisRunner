@@ -15,7 +15,13 @@ ordinary HTTP operations using the Session-issued credential held only in memory
 The allow case verifies create/edit/delete statuses, stable message identity, bot
 author rather than human invoker, distinct event headers, exact core revision
 increments, retained resource contents, and renderer updates. Interaction callbacks
-remain separate ephemeral diagnostics. Denials require literal 403/50013 with
+remain separate ephemeral diagnostics. These callbacks also commit hidden core
+resources: the harness observes the callback's exact one-step revision and
+unchanged ordinary rows first, then records the ordinary-operation baseline.
+A test-only filesystem permit tied to the authenticated interaction ID and
+operation releases the real child's HTTP request. Stale permits cannot release a
+new interaction or run. Callback snapshots are retained separately; callback
+revisions are not counted as ordinary-message mutation revisions. Denials require literal 403/50013 with
 `Missing Permissions`, absent committed-event and revision headers, identical retained core
 resources/revision and metadata (excluding advancing realtime clock readings), and no ordinary renderer row. Session publication revisions may
 advance for diagnostics and are not core mutation revisions.

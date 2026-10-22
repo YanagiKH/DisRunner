@@ -4,6 +4,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { strictExpected, assertStrictMutation, assertStrictDenial } from './g1-strict-oracle.mjs';
 import {
+  matchesOperationPermit,
   safeDenialEvidence,
   commandOperation,
   safeRestEvidence,
@@ -179,4 +180,19 @@ test('strict peer authentication helper is byte-identical to the legacy helper',
   const source = async (directory) =>
     readFile(new URL(`../fixtures/${directory}/peer-auth.mjs`, import.meta.url), 'utf8');
   assert.equal(await source('g1-strict-permissions'), await source('g1-parity'));
+});
+
+test('ordinary operation permits reject stale interactions and mismatched operations', () => {
+  const permit = { interactionId: '7000', operation: 'create' };
+  assert.equal(matchesOperationPermit(permit, '7000', 'create'), true);
+  for (const invalid of [
+    null,
+    {},
+    { ...permit, interactionId: '6999' },
+    { ...permit, operation: 'edit' },
+    { ...permit, extra: true },
+  ])
+    assert.equal(matchesOperationPermit(invalid, '7000', 'create'), false);
+  assert.equal(matchesOperationPermit(permit, 'invalid', 'create'), false);
+  assert.equal(matchesOperationPermit(permit, '7000', 'unknown'), false);
 });

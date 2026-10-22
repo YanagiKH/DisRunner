@@ -1481,10 +1481,41 @@ async function gui() {
         const eventIds = new Set();
         const operations = profileCase === 'allow' ? ['create', 'edit', 'delete'] : ['create'];
         for (const operation of operations) {
-          const before = await snapshot();
+          const callbackBefore = await snapshot();
           const beforeRows = await visibleMessageContents();
-          await capture(`${runLabel}-${operation}-before`);
           await send(`/feed-${operation}`);
+          // Ephemeral callbacks commit hidden core resources too. Finish that
+          // separate diagnostic before measuring the ordinary HTTP operation.
+          await expectDiagnostic(
+            'G1 callback diagnostic only.',
+            '3000',
+            '2001',
+            false,
+            `/feed-${operation}`,
+          );
+          await until(
+            async () =>
+              (await snapshot()).coreState.stateRevision ===
+              callbackBefore.coreState.stateRevision + 1,
+            'strict callback committed before ordinary operation',
+          );
+          const before = await snapshot();
+          assert.deepEqual(before.coreState.resources, callbackBefore.coreState.resources);
+          assert.deepEqual(await visibleMessageContents(), beforeRows);
+          const pending = (await trace(directory))
+            .filter((item) => item.event === 'command')
+            .at(-1);
+          assert.equal(pending.command, `feed-${operation}`);
+          await save(`${runLabel}-${operation}-callback-state.json`, {
+            callbackBefore,
+            before,
+            pending,
+          });
+          await capture(`${runLabel}-${operation}-before`);
+          await writeFile(
+            path.join(directory, 'operation-permit.json'),
+            JSON.stringify({ interactionId: pending.interactionId, operation }),
+          );
           await until(
             async () =>
               (await trace(directory)).some(
@@ -1493,15 +1524,6 @@ async function gui() {
                   item.operation === operation,
               ),
             `strict ${profileCase} ${operation}`,
-          );
-          // Await the authenticated callback diagnostic as the command completion
-          // barrier before examining renderer/state; it is never an ordinary row.
-          await expectDiagnostic(
-            'G1 callback diagnostic only.',
-            '3000',
-            '2001',
-            false,
-            `/feed-${operation}`,
           );
           const events = await trace(directory);
           const bootstrap = events.find((item) => item.event === 'bootstrap');

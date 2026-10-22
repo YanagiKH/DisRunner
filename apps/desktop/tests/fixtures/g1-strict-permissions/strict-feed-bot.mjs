@@ -3,6 +3,7 @@
 import { createPublicKey, verify } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -16,6 +17,20 @@ const snowflake = /^[1-9]\d{0,19}$/u;
 function requireId(value) {
   if (typeof value !== 'string' || !snowflake.test(value)) throw Error('Invalid fixture identity.');
   return value;
+}
+
+// This test-only filesystem gate is not a runtime API. A permit is tied to the
+// authenticated interaction, so a previous operation or run cannot release it.
+export function matchesOperationPermit(permit, interactionId, operation) {
+  return (
+    permit !== null &&
+    typeof permit === 'object' &&
+    Object.keys(permit).length === 2 &&
+    snowflake.test(interactionId) &&
+    ['create', 'edit', 'delete'].includes(operation) &&
+    permit.interactionId === interactionId &&
+    permit.operation === operation
+  );
 }
 
 /** Readiness PING gets a pong; every command gets the ephemeral diagnostic, never a feed row. */
@@ -227,6 +242,28 @@ async function main() {
           return;
         }
         const ping = interaction.type === 1;
+        function respond() {
+          const body = Buffer.from(JSON.stringify(interactionCallbackBody(ping)));
+          const authentication = signWebhookResponseAuthentication({
+            peerSecretHex,
+            timestamp,
+            status: 200,
+            requestBody: rawBody,
+            responseBody: body,
+          });
+          response.writeHead(200, {
+            'content-type': 'application/json',
+            'content-length': String(body.length),
+            [WEBHOOK_RESPONSE_AUTH_HEADER]: authentication,
+          });
+          response.end(body, () =>
+            trace(ping ? 'readiness-response' : 'callback', {
+              responseType: ping ? 'pong' : 'message',
+              authenticatedResponse: true,
+              ...(ping ? {} : { content: diagnostic }),
+            }),
+          );
+        }
         // Session readiness is the signed minimal { type: 1 } PING. Commands
         // carry the application identity and must match authenticated bootstrap.
         if (!ping) {
@@ -239,6 +276,7 @@ async function main() {
             interaction.channel_id !== '2001'
           )
             throw Error('Unexpected interaction context.');
+          const interactionId = requireId(interaction.id);
           const operation = commandOperation(interaction.data?.name, messageId);
           if (busy) throw Error('Concurrent fixture operation.');
           busy = true;
@@ -246,6 +284,7 @@ async function main() {
             trace('command', {
               authenticatedRequest: true,
               command: interaction.data.name,
+              interactionId,
               actorId: interaction.member.user.id,
               guildId: '1000',
               channelId: '2001',
@@ -253,6 +292,26 @@ async function main() {
               applicationIdMatches: true,
               hasInventedRoles: Object.hasOwn(interaction.member ?? {}, 'roles'),
             });
+            // Complete the callback first. The harness observes its committed
+            // diagnostic, captures the baseline, then releases this operation.
+            respond();
+            const deadline = Date.now() + 15000;
+            let permitted = false;
+            while (!stopping && Date.now() < deadline) {
+              let permit;
+              try {
+                permit = JSON.parse(readFileSync('operation-permit.json', 'utf8'));
+              } catch {
+                permit = null;
+              }
+              if (matchesOperationPermit(permit, interactionId, operation.operation)) {
+                permitted = true;
+                break;
+              }
+              await delay(20, undefined, { signal: lifetime.signal });
+            }
+            if (!permitted) throw Error('Operation permit timed out.');
+            trace('operation-released', { interactionId, operation: operation.operation });
             const { response: result, payload } = await rest(
               operation.path,
               operation.method,
@@ -303,26 +362,7 @@ async function main() {
             busy = false;
           }
         } else trace('readiness', { authenticatedRequest: true, applicationId });
-        const body = Buffer.from(JSON.stringify(interactionCallbackBody(ping)));
-        const authentication = signWebhookResponseAuthentication({
-          peerSecretHex,
-          timestamp,
-          status: 200,
-          requestBody: rawBody,
-          responseBody: body,
-        });
-        response.writeHead(200, {
-          'content-type': 'application/json',
-          'content-length': String(body.length),
-          [WEBHOOK_RESPONSE_AUTH_HEADER]: authentication,
-        });
-        response.end(body, () =>
-          trace(ping ? 'readiness-response' : 'callback', {
-            responseType: ping ? 'pong' : 'message',
-            authenticatedResponse: true,
-            ...(ping ? {} : { content: diagnostic }),
-          }),
-        );
+        if (ping) respond();
       }
     },
   );
