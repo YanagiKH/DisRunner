@@ -6,9 +6,11 @@ import { cp, mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
+import { strictExpected, assertStrictMutation, assertStrictDenial } from './g1-strict-oracle.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const corpus = path.join(root, 'apps/desktop/tests/fixtures/g1-parity');
+const strictCorpus = path.join(root, 'apps/desktop/tests/fixtures/g1-strict-permissions');
 const output = path.resolve(process.env.G1_EVIDENCE_DIR ?? 'g1-evidence');
 const cliOnly = process.argv.includes('--cli-only');
 const marker = "const mode = 'normal'; // G1_MUTATION_POINT";
@@ -71,7 +73,7 @@ await mkdir(output, { recursive: true });
 // Refuse to overwrite previous evidence, including first failures.
 await writeFile(
   path.join(output, 'expectations.json'),
-  JSON.stringify({ expected, canonical, uxExpected }, null, 2),
+  JSON.stringify({ expected, canonical, uxExpected, strictExpected }, null, 2),
   { flag: 'wx' },
 );
 const digest = async (file) =>
@@ -107,6 +109,8 @@ const identity = {
   tree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: root, encoding: 'utf8' }).trim(),
   sourceStatus: execFileSync('git', ['status', '--short'], { cwd: root, encoding: 'utf8' }),
   fixtures,
+  strictFixtures: await hashTree(strictCorpus),
+  strictOracleSha256: await digest(path.join(root, 'apps/desktop/tests/e2e/g1-strict-oracle.mjs')),
   harnessSha256: await digest(fileURLToPath(import.meta.url)),
   lockSha256: await digest(path.join(root, 'pnpm-lock.yaml')),
   buildTrees: {
@@ -1437,6 +1441,193 @@ async function gui() {
       replacementRunCleared: true,
       lateOldRunDeliveryProven: false,
     });
+
+    // Explicit opt-in projects are separate from every legacy control above.
+    let previousStrictRun;
+    for (const profileCase of ['allow', 'missing-send', 'missing-view']) {
+      const label = `gui-strict-${profileCase}`;
+      const directory = path.join(output, label);
+      await cp(path.join(strictCorpus, profileCase), directory, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+      });
+      await cp(
+        path.join(strictCorpus, 'strict-feed-bot.mjs'),
+        path.join(directory, 'strict-feed-bot.mjs'),
+      );
+      await cp(path.join(strictCorpus, 'peer-auth.mjs'), path.join(directory, 'peer-auth.mjs'));
+      await save(`${label}-fixture.json`, {
+        files: await hashTree(directory),
+        expected: strictExpected,
+        credentials: 'injected by real Session; retained only in child memory',
+      });
+      await select(directory, '3000');
+      // Restart the same selected project as well as replacing projects. Do not copy
+      // an old trace into a new run or accept old operation records as fresh evidence.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const runLabel = `${label}-${attempt}`;
+        if (attempt > 0) await writeFile(path.join(directory, 'child-trace.jsonl'), '');
+        const run = await start();
+        if (previousStrictRun) assert.notEqual(run.runId, previousStrictRun);
+        previousStrictRun = run.runId;
+        assert.deepEqual(
+          run.coreState.resources.filter((item) => item.resourceType === 'message'),
+          [],
+        );
+        assert.deepEqual(await visibleMessageContents(), []);
+        await expectNoDiagnostics();
+        let messageId;
+        const eventIds = new Set();
+        const operations = profileCase === 'allow' ? ['create', 'edit', 'delete'] : ['create'];
+        for (const operation of operations) {
+          const callbackBefore = await snapshot();
+          const beforeRows = await visibleMessageContents();
+          await send(`/feed-${operation}`);
+          // Ephemeral callbacks commit hidden core resources too. Finish that
+          // separate diagnostic before measuring the ordinary HTTP operation.
+          await expectDiagnostic(
+            'G1 callback diagnostic only.',
+            '3000',
+            '2001',
+            false,
+            `/feed-${operation}`,
+          );
+          await until(
+            async () =>
+              (await snapshot()).coreState.stateRevision ===
+              callbackBefore.coreState.stateRevision + 1,
+            'strict callback committed before ordinary operation',
+          );
+          const before = await snapshot();
+          assert.deepEqual(before.coreState.resources, callbackBefore.coreState.resources);
+          assert.deepEqual(await visibleMessageContents(), beforeRows);
+          const pending = (await trace(directory))
+            .filter((item) => item.event === 'command')
+            .at(-1);
+          assert.equal(pending.command, `feed-${operation}`);
+          await save(`${runLabel}-${operation}-callback-state.json`, {
+            callbackBefore,
+            before,
+            pending,
+          });
+          await capture(`${runLabel}-${operation}-before`);
+          await writeFile(
+            path.join(directory, 'operation-permit.json'),
+            JSON.stringify({ interactionId: pending.interactionId, operation }),
+          );
+          await until(
+            async () =>
+              (await trace(directory)).some(
+                (item) =>
+                  item.event === (profileCase === 'allow' ? 'rest-operation' : 'rest-denial') &&
+                  item.operation === operation,
+              ),
+            `strict ${profileCase} ${operation}`,
+          );
+          const events = await trace(directory);
+          const bootstrap = events.find((item) => item.event === 'bootstrap');
+          const command = events.filter((item) => item.event === 'command').at(-1);
+          const record = events.find(
+            (item) =>
+              item.event === (profileCase === 'allow' ? 'rest-operation' : 'rest-denial') &&
+              item.operation === operation,
+          );
+          assert.equal(bootstrap.authorId, '4000');
+          assert.equal(bootstrap.authenticatedRequest, true);
+          assert.deepEqual(
+            [command.actorId, command.guildId, command.channelId],
+            ['3000', '1000', '2001'],
+          );
+          assert.equal(command.authenticatedRequest, true);
+          assert.equal(command.applicationIdMatches, true);
+          assert.equal(command.applicationId, bootstrap.applicationId);
+          assert.equal(record.applicationId, bootstrap.applicationId);
+          const expectedText =
+            operation === 'create' ? 'G1 public message created.' : 'G1 public message edited.';
+          if (profileCase === 'allow') {
+            await until(
+              async () => (await snapshot()).coreState.stateRevision === record.stateRevision,
+              'strict committed state publication',
+            );
+            const row = page.locator(`.chat-message[data-message-id="${record.messageId}"]`);
+            await until(
+              async () =>
+                operation === 'delete'
+                  ? (await row.count()) === 0
+                  : (await row.count()) === 1 &&
+                    (await row.isVisible()) &&
+                    (await row.locator('.message-content').textContent()) === expectedText,
+              'strict ordinary renderer mutation',
+            );
+            if (operation !== 'delete')
+              assert.equal(await row.locator('.chat-avatar.bot').isVisible(), true);
+          }
+          const after = await snapshot();
+          if (profileCase === 'allow') {
+            assertStrictMutation(before, after, record, messageId);
+            assert.equal(
+              eventIds.has(record.eventId),
+              false,
+              'distinct committed event per mutation',
+            );
+            eventIds.add(record.eventId);
+            messageId = record.messageId;
+            const retained = after.coreState.resources.filter(
+              (item) => item.resourceType === 'message',
+            );
+            if (operation === 'delete') assert.deepEqual(retained, []);
+            else {
+              assert.equal(retained.length, 1);
+              assert.deepEqual(
+                [
+                  retained[0].id,
+                  retained[0].author.id,
+                  retained[0].channel_id,
+                  retained[0].guild_id,
+                  retained[0].content,
+                ],
+                [messageId, '4000', '2001', '1000', expectedText],
+              );
+            }
+            assert.deepEqual(
+              await visibleMessageContents(),
+              operation === 'delete' ? [] : [expectedText],
+            );
+          } else {
+            assertStrictDenial(before, after, record, beforeRows, await visibleMessageContents());
+            assert.equal(
+              events.some((item) => item.event === 'rest-operation'),
+              false,
+            );
+          }
+          await save(`${runLabel}-${operation}-http-state.json`, {
+            record,
+            before,
+            after,
+            command,
+            committedEventObservation:
+              'HTTP event header plus public core revision; private dispatch bus not observed',
+          });
+          await capture(`${runLabel}-${operation}-after`);
+        }
+        // Preserve trace before clearing it for the next fresh run.
+        await save(`${runLabel}-trace.json`, await trace(directory));
+        await stop(directory);
+        await save(`${runLabel}-cleanup.json`, {
+          trace: await trace(directory),
+          directChildDeadAndOwnedPortsClosed: true,
+        });
+        await capture(`${runLabel}-stopped`);
+      }
+      results.push({
+        surface: 'packaged-electron',
+        mode: `strict-${profileCase}`,
+        outcome: 'control-passed',
+        sameProjectRestart: true,
+        privateCommitDispatchObserved: false,
+      });
+    }
   } catch (error) {
     if (page) {
       await page.screenshot({ path: path.join(output, 'first-gui-failure.png') }).catch(() => {});
@@ -1483,6 +1674,10 @@ try {
     results,
     harnessMatrixPassed: process.exitCode !== 1,
     guiMatrixPassed: !cliOnly && process.exitCode !== 1,
+    strictPermissionMatrixPassed:
+      !cliOnly &&
+      process.exitCode !== 1 &&
+      results.filter((item) => item.mode.startsWith('strict-')).length === 3,
     completeParity: false, // Stronger late-success stale-result qualification remains pending.
   });
 }
