@@ -148,7 +148,12 @@ async function runFullPackagedSmoke(signal) {
     });
     await composer.fill('/ping');
     await composer.press('Enter');
-    await page.getByText('Pong! Offline and deterministic.').last().waitFor();
+    const pingDiagnostic = await assertCallbackDiagnostic(
+      page,
+      started,
+      '/ping',
+      'Pong! Offline and deterministic.',
+    );
 
     const ping = await invokeSessionCommand(page, '/ping');
     assert.equal(ping.ok, true, ping.error ?? 'signed /ping should succeed');
@@ -160,11 +165,13 @@ async function runFullPackagedSmoke(signal) {
     assert.equal(secret.response?.data.flags, 64);
     await composer.fill('/secret');
     await composer.press('Enter');
-    await page
-      .locator('.chat-message.ephemeral')
-      .filter({ hasText: 'Only you can see this.' })
-      .last()
-      .waitFor();
+    const secretDiagnostic = await assertCallbackDiagnostic(
+      page,
+      started,
+      '/secret',
+      'Only you can see this.',
+    );
+    assert.notEqual(secretDiagnostic.requestId, pingDiagnostic.requestId);
 
     const stopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());
     assert.equal(stopped.ok, true, JSON.stringify(stopped.errors));
@@ -283,6 +290,54 @@ async function runFullPackagedSmoke(signal) {
     signal.removeEventListener('abort', onAbort);
     await electronApplication?.close().catch(() => undefined);
     await removeDirectory(userDataDirectory);
+  }
+}
+
+// Callbacks, including ephemeral replies, are Inspector evidence, never ordinary chat rows.
+async function assertCallbackDiagnostic(page, started, command, content) {
+  // Wait for this composer invocation before selecting Trace: ephemeral replies select Payload.
+  await page
+    .locator('.toast')
+    .getByText(`${command} returned by local bot`, { exact: true })
+    .waitFor();
+  const expand = page.getByRole('button', { name: 'Expand inspector', exact: true });
+  const restoreCollapsed = (await expand.count()) === 1;
+  if (restoreCollapsed) await expand.click();
+  try {
+    await page.getByRole('tab', { name: 'Trace', exact: true }).click();
+    const details = page
+      .locator('.outcome-panel section')
+      .filter({ has: page.getByRole('heading', { name: 'Details', exact: true }) })
+      .locator('p');
+    await page.locator('.outcome-panel').getByText(content, { exact: true }).waitFor();
+    assert.equal(await details.isVisible(), true);
+    assert.equal(await details.textContent(), content);
+    assert.equal(await page.locator('.trace-details dd').first().textContent(), command);
+    assert.equal(await page.locator('.outcome-badge:visible').textContent(), 'Passed');
+    await page.getByRole('tab', { name: 'Payload', exact: true }).click();
+    const payloadElement = page.locator('.payload-view pre code');
+    await payloadElement.waitFor({ state: 'visible' });
+    const payload = JSON.parse(await payloadElement.textContent());
+    assert.equal(payload.command, command);
+    assert.equal(payload.callbackType, 'message');
+    assert.equal(payload.signed, true);
+    assert.equal(payload.runId, started.runId);
+    assert.equal(typeof payload.requestId, 'string');
+    assert.ok(payload.requestId.length > 0);
+    assert.deepEqual(
+      { actorId: payload.actorId, guildId: payload.guildId, channelId: payload.channelId },
+      started.contexts[0],
+    );
+    assert.equal(
+      await page.locator('.chat-message').count(),
+      0,
+      'callbacks must not become chat rows',
+    );
+    await page.getByRole('tab', { name: 'Trace', exact: true }).click();
+    return payload;
+  } finally {
+    if (restoreCollapsed)
+      await page.getByRole('button', { name: 'Collapse inspector', exact: true }).click();
   }
 }
 
