@@ -26,7 +26,7 @@ afterEach(async () => {
   for (const path of temporary.splice(0)) await rm(path, { recursive: true, force: true });
 });
 async function directory(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), 'disrunner-kuro-m1-'));
+  const path = await mkdtemp(join(tmpdir(), 'disrunner-bot-test-'));
   temporary.push(path);
   return path;
 }

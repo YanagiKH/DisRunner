@@ -1,6 +1,6 @@
 # DisRunner M0-01 requirements and evidence index — proposal
 
-Status: draft for review, not G0 completion or v1 certification. No project execution occurred in this task.
+Status: draft for review, not baseline qualification (G0) or v1 certification. This index records source review, not runtime test evidence.
 
 ## Identity and source of truth
 
@@ -9,6 +9,16 @@ Status: draft for review, not G0 completion or v1 certification. No project exec
 - [`capability-manifest.json`](./capability-manifest.json) holds the authoritative proposed 18-row inventory. This index supplies evidence rules and review work, rather than another independently maintained feature matrix.
 - Source paths in the manifest are repository-root-relative. The user-supplied roadmap is identified by hash and is not bundled here.
 - Existing [`COMPATIBILITY.md`](../../COMPATIBILITY.md) uses “Core-tested” for previous declarations. Here that is a **reviewed declaration**, not a new test result. Existing source is not treated as proven correct.
+
+## Roadmap terminology
+
+The identifiers below retain traceability to the planning document; they are not support claims.
+
+- `M0` is baseline scope, trust and security remediation; `M1` is shared runtime and the first real-bot CLI/Desktop workflow. `M2`–`M9` cover authoritative protocol state, SDK adapters, Desktop interaction, scenarios, persistence, stability, release rehearsal and final release, respectively.
+- `V01`–`V18` identify the requirements listed below.
+- `F04` means scenario result trust; `F05`, interaction lifecycle correctness; `F08`, Gateway close-code and message-intent handling; and `F09`, strict scenario validation.
+- `G0` requires baseline regressions, explicit unsupported boundaries, security review and executable adapter/version plans. `G1` requires the same project, fixture and scenario to receive real raw-bot replies through CLI and Desktop, with results changing when bot code changes.
+- `G2` requires message creation, edits and deletion to agree across REST, state, Gateway and trace, with no side effects from permission failures. `G8` requires downloadable, verifiable, installable release candidates and exact-artifact evidence for every declared platform; signing, notarization and provenance are separate checks.
 
 ## Evidence register
 
@@ -22,7 +32,7 @@ Future run evidence MUST include: evidence ID, exact source commit and tree, art
 
 ## Requirement navigation and proposed ownership
 
-M0 ownership is assigned: miku owns the capability baseline/shared contracts, dependency/security baseline audit and Gateway F08; fufu owns interaction F05; kuro owns scenario result trust F04 and strict scenario validation F09. These are bounded M0 slices, not acceptance of entire V requirements. The full-v1 roles below remain proposed and require named assignments before their work begins.
+Baseline work is divided into three bounded technical scopes: capability baseline/shared contracts, dependency/security audit and Gateway close-code handling; interaction lifecycle; and scenario result trust and strict validation. The manifest labels these scopes `baseline-and-gateway`, `interaction-lifecycle` and `scenario-validation`. These assignments do not establish acceptance of entire v1 requirements. The full-v1 roles below remain proposed and require accountable assignments before their work begins.
 
 | ID  | Requirement                       | Proposed owner role   | Target milestones |
 | --- | --------------------------------- | --------------------- | ----------------- |
@@ -60,7 +70,7 @@ No full Discord parity: full Components V2/new modal controls, voice/CDN/media, 
 
 ## Remaining M0-01 work
 
-Manifest/ADR review; assign remaining full-v1 owners; version/transport spikes and evidence; freeze schemas/profile limits; choose machine-readable schema home and documentation generation path. These repository documents remain proposals until reviewed and backed by the required evidence. No SDK, platform or v1 support is newly declared by this bundle.
+Manifest/ADR review; assign remaining full-v1 owners; version/transport spikes and evidence; freeze schemas/profile limits; choose machine-readable schema home and documentation generation path. These repository documents remain proposals until reviewed and backed by the required evidence. These proposals do not establish SDK, platform or v1 support.
 
 ## Architecture decision
 

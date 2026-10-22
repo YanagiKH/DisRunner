@@ -17,3 +17,5 @@ export * from './scenario.js';
 export * from './session-token.js';
 export * from './state.js';
 export * from './trace.js';
+export * from './message-domain.js';
+export * from './message-events.js';

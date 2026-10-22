@@ -108,6 +108,7 @@ export class SessionError extends Error {
   }
 }
 export interface SessionSnapshot extends DesktopRuntimeState {
+  readonly coreState?: RuntimeCoreSnapshot | null;
   readonly schemaVersion: 1;
   readonly sessionId: string;
   readonly runId: string | null;
@@ -151,4 +152,40 @@ export interface Session {
   subscribe(listener: (event: SessionEvent) => void): () => void;
   stop(): Promise<ShutdownResult>;
   dispose(): Promise<ShutdownResult>;
+}
+
+/** Bounded projection of the retained core store, not Session publication revision. */
+export interface RuntimeCoreSnapshot {
+  readonly schemaVersion: 1;
+  readonly runId: string;
+  readonly stateRevision: number | null;
+  readonly revisioned: boolean;
+  readonly clock: { readonly domain: 'bot'; readonly mode: 'realtime'; readonly nowMs: number };
+  readonly resources: readonly RuntimeResourceView[];
+  readonly totalResources: number;
+  readonly truncated: boolean;
+}
+
+/** Deliberately narrow display DTO. Arbitrary fixture fields never cross this boundary. */
+export interface RuntimeAuthorView {
+  readonly id: string;
+  readonly username?: string;
+  readonly global_name?: string | null;
+  readonly bot?: boolean;
+}
+export interface RuntimeResourceView {
+  readonly id: string;
+  readonly resourceType: 'guild' | 'channel' | 'user' | 'message';
+  readonly name?: string;
+  readonly username?: string;
+  readonly global_name?: string | null;
+  readonly bot?: boolean;
+  readonly guild_id?: string;
+  readonly channel_id?: string;
+  readonly type?: number;
+  readonly content?: string;
+  readonly flags?: number;
+  readonly timestamp?: string;
+  readonly edited_timestamp?: string | null;
+  readonly author?: RuntimeAuthorView;
 }

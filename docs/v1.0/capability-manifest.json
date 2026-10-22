@@ -321,7 +321,7 @@
       },
       "v1_acceptance": "not_established",
       "m0_slice_owners": {
-        "fufu": "F05 interaction lifecycle"
+        "interaction-lifecycle": "F05 interaction lifecycle"
       }
     },
     {
@@ -428,7 +428,7 @@
       },
       "v1_acceptance": "not_established",
       "m0_slice_owners": {
-        "miku": "F08 Gateway close-code baseline"
+        "baseline-and-gateway": "F08 Gateway close-code baseline"
       }
     },
     {
@@ -465,7 +465,7 @@
       },
       "v1_acceptance": "not_established",
       "m0_slice_owners": {
-        "miku": "F08 Gateway close-code baseline"
+        "baseline-and-gateway": "F08 Gateway close-code baseline"
       }
     },
     {
@@ -502,7 +502,7 @@
       },
       "v1_acceptance": "not_established",
       "m0_slice_owners": {
-        "kuro": "F04 result trust and F09 strict scenario validation"
+        "scenario-validation": "F04 result trust and F09 strict scenario validation"
       }
     },
     {
@@ -574,7 +574,7 @@
       },
       "v1_acceptance": "not_established",
       "m0_slice_owners": {
-        "kuro": "F04 result trust and F09 strict scenario validation"
+        "scenario-validation": "F04 result trust and F09 strict scenario validation"
       }
     },
     {
@@ -751,18 +751,21 @@
       },
       "v1_acceptance": "not_established",
       "m0_slice_owners": {
-        "miku": "M0-02 dependency/security baseline audit"
+        "baseline-and-gateway": "M0-02 dependency/security baseline audit"
       }
     }
   ],
   "m0_owners": {
-    "miku": [
+    "baseline-and-gateway": [
       "M0-01 capability baseline and shared contracts",
       "M0-02 baseline dependency/security audit",
       "M0-03 Gateway F08"
     ],
-    "fufu": ["M0-03 interaction lifecycle F05"],
-    "kuro": ["M0-03 scenario result trust F04", "M0-04 strict scenario validation F09"]
+    "interaction-lifecycle": ["M0-03 interaction lifecycle F05"],
+    "scenario-validation": [
+      "M0-03 scenario result trust F04",
+      "M0-04 strict scenario validation F09"
+    ]
   },
   "ownership_policy": "M0 assignments cover the listed slices only. Future v1 roles below remain proposals, not accepted full-requirement assignments."
 }

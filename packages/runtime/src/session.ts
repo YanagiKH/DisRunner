@@ -61,6 +61,7 @@ class RuntimeSession implements Session {
   public snapshot(): SessionSnapshot {
     return {
       ...this.#manager.snapshot(),
+      coreState: this.#manager.coreState(),
       schemaVersion: 1,
       sessionId: this.#sessionId,
       runId: this.#runId,
@@ -136,7 +137,7 @@ class RuntimeSession implements Session {
     this.#runId = randomUUID();
     this.#requests.clear();
     try {
-      const result = await this.#manager.start(options);
+      const result = await this.#manager.start({ ...options, runId: this.#runId });
       const cancelled = this.#disposed || this.#stopping !== null || options.signal?.aborted;
       // A startup failure classified before shutdown began stays the primary error; a stop
       // requested meanwhile does not relabel it as a cancellation.

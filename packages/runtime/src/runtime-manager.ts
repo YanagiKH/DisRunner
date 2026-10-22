@@ -1,4 +1,4 @@
-import { generateKeyPairSync, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, type KeyObject } from 'node:crypto';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -21,6 +21,8 @@ import {
   type RuntimeOutputEntry,
   type RuntimeRiskEntry,
   type RuntimeTraceEntry,
+  type RuntimeCoreSnapshot,
+  type RuntimeResourceView,
 } from './contracts.js';
 import {
   freezeResourceDependencies,
@@ -111,6 +113,7 @@ export class DesktopRuntimeManager {
   #unexpectedExit = false;
   #expectedStop = false;
   #generation = 0;
+  #coreOwner: RetainedCoreState | null = null;
 
   public get failure(): SessionError | null {
     return this.#failure;
@@ -124,7 +127,12 @@ export class DesktopRuntimeManager {
     ]);
   }
   public get hasResources(): boolean {
-    return this.#bot !== null || this.#rest !== null || this.#gatewayServer !== null;
+    return (
+      this.#bot !== null ||
+      this.#rest !== null ||
+      this.#gatewayServer !== null ||
+      this.#coreOwner !== null
+    );
   }
   public contexts(): InvocationContext[] {
     const resources = this.#configuration?.resources ?? [];
@@ -217,6 +225,10 @@ export class DesktopRuntimeManager {
     this.#dependencies = freezeResourceDependencies(dependencies);
   }
 
+  public coreState(): RuntimeCoreSnapshot | null {
+    return this.#coreOwner?.snapshot() ?? null;
+  }
+
   public snapshot(): DesktopRuntimeState {
     return structuredClone(this.#state);
   }
@@ -250,7 +262,7 @@ export class DesktopRuntimeManager {
   }
 
   public async start(
-    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+    options: { signal?: AbortSignal; timeoutMs?: number; runId?: string } = {},
   ): Promise<DesktopRuntimeState> {
     if (this.#startPromise !== null) return this.#startPromise;
     if (this.#stopPromise !== null) await this.#stopPromise;
@@ -265,6 +277,7 @@ export class DesktopRuntimeManager {
   }
 
   async #startInternal(options: {
+    runId?: string;
     signal?: AbortSignal;
     timeoutMs?: number;
   }): Promise<DesktopRuntimeState> {
@@ -352,6 +365,14 @@ export class DesktopRuntimeManager {
       const trace = new core.TraceCollector({ clock, random });
       const risks = new core.RiskCollector(clock);
       const state = new core.VirtualState(clock, snowflakes, configuration.resources);
+      const runId = options.runId ?? randomUUID();
+      const owner = new RetainedCoreState(runId, state, clock, this.#sanitizeForExport);
+      this.#coreOwner = owner;
+      owner.subscribe(() => {
+        if (generation !== this.#generation || this.#expectedStop || this.#coreOwner !== owner)
+          return;
+        this.#publish(this.#state);
+      });
       const interactions = new core.InteractionEngine({
         clock,
         random,
@@ -397,6 +418,7 @@ export class DesktopRuntimeManager {
       ]);
       const rest = new core.LocalRestEmulator({
         state,
+        messageDomain: { runId, clockDomain: 'realtime' },
         interactions,
         gateway,
         rateLimits,
@@ -580,7 +602,7 @@ export class DesktopRuntimeManager {
 
   async #stopInternal(): Promise<DesktopRuntimeState> {
     if (this.#state.phase === 'stopping') return this.snapshot();
-    const active = this.#bot !== null || this.#rest !== null || this.#gatewayServer !== null;
+    const active = this.hasResources;
     if (!active) {
       this.#publish({
         ...this.#state,
@@ -953,11 +975,20 @@ export class DesktopRuntimeManager {
         errors.push('Gateway closure could not be confirmed.');
       }
     }
+    if (errors.length === 0) {
+      try {
+        this.#coreOwner?.release();
+        this.#coreOwner = null;
+      } catch {
+        errors.push('Core state subscription closure could not be confirmed.');
+      }
+    }
     this.#cleanupIssues = errors.map((message) => ({
       code: 'cleanup',
       message: redactText(message),
     }));
     if (errors.length > 0) throw new Error(`Runtime resource cleanup failed: ${errors.join(' ')}`);
+    // Failed closure must retain the store, clock, and redaction context for retry.
     this.#sanitizeForExport = null;
   }
 
@@ -1293,4 +1324,150 @@ function operationFailure(
     fallback,
     fallback === 'transport' ? 'Bot interaction failed.' : 'Bot startup failed.',
   );
+}
+
+interface CoreSnapshotSource {
+  snapshot(): unknown;
+  revisionedSnapshot?: () => unknown;
+  subscribeCommits?: (listener: (commit: unknown) => void) => () => void;
+}
+
+/** Internal ownership adapter. Exported from this module only for contract tests. */
+export class RetainedCoreState {
+  #source: CoreSnapshotSource | null;
+  #clock: { now(): number; readonly mode: string } | null;
+  #unsubscribe: (() => void) | null = null;
+  #subscriptionGeneration = 0;
+  public constructor(
+    readonly runId: string,
+    source: unknown,
+    clock: unknown,
+    readonly sanitize: (value: unknown) => unknown,
+  ) {
+    if (
+      !isRecord(source) ||
+      typeof source['snapshot'] !== 'function' ||
+      !isRecord(clock) ||
+      typeof clock['now'] !== 'function' ||
+      clock['mode'] !== 'realtime'
+    )
+      throw new TypeError('Runtime requires an actual core store and realtime clock.');
+    this.#source = source as unknown as CoreSnapshotSource;
+    this.#clock = clock as unknown as { now(): number; readonly mode: string };
+  }
+  public subscribe(listener: () => void): void {
+    this.#detach();
+    const source = this.#source;
+    const generation = this.#subscriptionGeneration;
+    if (
+      typeof source?.revisionedSnapshot !== 'function' ||
+      typeof source.subscribeCommits !== 'function'
+    )
+      return;
+    this.#unsubscribe = source.subscribeCommits(() => {
+      if (this.#source !== source || generation !== this.#subscriptionGeneration) return;
+      try {
+        listener();
+      } catch {
+        /* Observers cannot change commit outcomes. */
+      }
+    });
+  }
+  public snapshot(): RuntimeCoreSnapshot | null {
+    const source = this.#source;
+    const clock = this.#clock;
+    if (source === null || clock === null) return null;
+    try {
+      const revisioned =
+        typeof source.revisionedSnapshot === 'function' &&
+        typeof source.subscribeCommits === 'function';
+      const pair = revisioned ? source.revisionedSnapshot?.() : null;
+      if (
+        revisioned &&
+        (!isRecord(pair) || !Number.isSafeInteger(pair['revision']) || Number(pair['revision']) < 0)
+      )
+        return null;
+      const raw = revisioned && isRecord(pair) ? pair['snapshot'] : source.snapshot();
+      if (!isRecord(raw) || !Array.isArray(raw['resources'])) return null;
+      const totalResources = raw['resources'].length;
+      // Bound the sanitized renderer projection independently of the core store capacity.
+      const resources: RuntimeResourceView[] = [];
+      let bytes = 2;
+      for (const resource of raw['resources'].slice(0, 1_000)) {
+        const view = projectResourceView(resource);
+        if (view === null) continue;
+        const sanitized = this.sanitize(view);
+        if (!isRecord(sanitized)) return null;
+        const encoded = JSON.stringify(sanitized);
+        if (bytes + Buffer.byteLength(encoded) + (resources.length > 0 ? 1 : 0) > 1_048_576) break;
+        bytes += Buffer.byteLength(encoded) + (resources.length > 0 ? 1 : 0);
+        resources.push(JSON.parse(encoded) as RuntimeResourceView);
+      }
+      const nowMs = clock.now();
+      if (!Number.isFinite(nowMs) || clock.mode !== 'realtime') return null;
+      return {
+        schemaVersion: 1,
+        runId: this.runId,
+        stateRevision: revisioned && isRecord(pair) ? Number(pair['revision']) : null,
+        revisioned,
+        clock: { domain: 'bot', mode: 'realtime', nowMs },
+        resources,
+        totalResources,
+        truncated: resources.length !== totalResources,
+      };
+    } catch {
+      return null;
+    } // No raw-state fallback when sanitization fails.
+  }
+  public release(): void {
+    this.#detach();
+    this.#source = null;
+    this.#clock = null;
+  }
+  #detach(): void {
+    this.#subscriptionGeneration += 1;
+    const unsubscribe = this.#unsubscribe;
+    unsubscribe?.();
+    this.#unsubscribe = null;
+  }
+}
+
+function projectResourceView(value: unknown): RuntimeResourceView | null {
+  if (
+    !isRecord(value) ||
+    typeof value['id'] !== 'string' ||
+    !['guild', 'channel', 'user', 'message'].includes(String(value['resourceType']))
+  )
+    return null;
+  const type = value['resourceType'] as RuntimeResourceView['resourceType'];
+  const result: Record<string, unknown> = { id: value['id'], resourceType: type };
+  const strings =
+    type === 'user'
+      ? ['username']
+      : type === 'guild'
+        ? ['name']
+        : type === 'channel'
+          ? ['name', 'guild_id']
+          : ['guild_id', 'channel_id', 'content', 'timestamp'];
+  for (const key of strings) if (typeof value[key] === 'string') result[key] = value[key];
+  if (type === 'user') copyAuthorFields(value, result);
+  if (type === 'channel' && Number.isSafeInteger(value['type'])) result['type'] = value['type'];
+  if (type === 'message') {
+    if (Number.isSafeInteger(value['flags'])) result['flags'] = value['flags'];
+    if (typeof value['edited_timestamp'] === 'string' || value['edited_timestamp'] === null)
+      result['edited_timestamp'] = value['edited_timestamp'];
+    const author = value['author'];
+    if (isRecord(author) && typeof author['id'] === 'string') {
+      const projectedAuthor: Record<string, unknown> = { id: author['id'] };
+      copyAuthorFields(author, projectedAuthor);
+      result['author'] = projectedAuthor;
+    }
+  }
+  return result as unknown as RuntimeResourceView;
+}
+function copyAuthorFields(source: Record<string, unknown>, target: Record<string, unknown>): void {
+  if (typeof source['username'] === 'string') target['username'] = source['username'];
+  if (typeof source['global_name'] === 'string' || source['global_name'] === null)
+    target['global_name'] = source['global_name'];
+  if (typeof source['bot'] === 'boolean') target['bot'] = source['bot'];
 }
