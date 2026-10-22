@@ -876,6 +876,14 @@ async function gui() {
       const composer = page.getByRole('textbox', { name: 'Message #2001', exact: true });
       await composer.fill('');
       assert.equal(await control('Send local event').isDisabled(), true);
+      // Diagnostic checks can leave focus inside the wide inspector. Compact resizing
+      // intentionally expands it to preserve that focus; establish this oracle's baseline
+      // through the visible disclosure before its single keyboard anchor below.
+      const collapse = control('Collapse inspector');
+      if ((await collapse.count()) === 1) {
+        assert.equal(await collapse.getAttribute('aria-expanded'), 'true');
+        await collapse.click();
+      }
       const disclosure = control('Expand inspector');
       assert.equal(await disclosure.getAttribute('aria-expanded'), 'false');
       const controlledId = await disclosure.getAttribute('aria-controls');
