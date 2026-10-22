@@ -229,13 +229,15 @@ describe('Gateway resume over real loopback WebSockets', () => {
         reason === 'wrong token' ? 'disrunner.offline.wrong-wire-token' : token,
       );
       expect(await next(replacement)).toEqual({ op: 9, d: false });
-      const closed = once(replacement.socket, 'close', { signal: AbortSignal.timeout(2000) });
+      const beforeHeartbeat = f.gateway.sessions();
       send(replacement, { op: 1, d: null });
-      const [code] = (await closed) as unknown[];
-      expect(code).toBe(4003);
+      expect(await next(replacement)).toEqual({ op: 11, d: null });
+      expect(f.gateway.sessions()).toEqual(beforeHeartbeat);
+      expect(replacement.socket.readyState).toBe(WebSocket.OPEN);
       expect(replacement.packets).toEqual([
         { op: 10, d: { heartbeat_interval: 41250 } },
         { op: 9, d: false },
+        { op: 11, d: null },
       ]);
       if (reason === 'wrong token' || reason === 'future sequence') {
         const valid = await f.connect(original.resumeUrl);

@@ -2,6 +2,7 @@ import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import stylesheet from './styles.css?raw';
 
 describe('DisRunner desktop shell', () => {
   it('starts the bot and executes an ephemeral slash command from the composer', async () => {
@@ -917,5 +918,296 @@ describe('runtime panel presentation regressions', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('New runtime failure.');
     expect(screen.getByRole('button', { name: 'Start bot' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Retry cleanup' })).toBeEnabled();
+  });
+});
+
+// DOM tests assert ownership and focus() attempts, not native disabled-button blur
+// or rendered geometry. Those observations belong to the packaged G1 harness.
+describe('responsive recovery ownership', () => {
+  const originalWidth = window.innerWidth;
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'disrunnerDesktop');
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+    vi.restoreAllMocks();
+  });
+  async function resize(width: number) {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    await act(() => window.dispatchEvent(new Event('resize')));
+  }
+  async function recovery(phase: 'error' | 'running' = 'error', shortcut = false) {
+    let current: DisRunnerRuntimeState = {
+      ...snapshot,
+      project,
+      phase,
+      error: phase === 'error' ? 'Owned child exited' : null,
+    };
+    let resolve!: (result: Awaited<ReturnType<DisRunnerDesktopBridge['stopRuntime']>>) => void;
+    let reject!: (error: Error) => void;
+    let listener!: (event: DisRunnerSessionEvent) => void;
+    let stopPromise!: Promise<Awaited<ReturnType<DisRunnerDesktopBridge['stopRuntime']>>>;
+    const stateReads: Promise<DisRunnerRuntimeState>[] = [];
+    const stop = vi.fn(() => {
+      stopPromise = new Promise((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      return stopPromise;
+    });
+    const invoke = vi.fn();
+    installBridge(invoke, {
+      getRuntimeState: () => {
+        const read = Promise.resolve(current);
+        stateReads.push(read);
+        return read;
+      },
+      stopRuntime: stop,
+      onRuntimeState: (value) => {
+        listener = value;
+        return () => {};
+      },
+    });
+    render(<App />);
+    const button = await screen.findByRole('button', {
+      name: phase === 'error' ? 'Retry cleanup' : 'Stop bot',
+    });
+    const user = userEvent.setup();
+    if (shortcut) {
+      screen.getByRole('textbox', { name: 'Message #2000' }).focus();
+      await user.keyboard('{Control>}b{/Control}');
+    } else await user.click(button);
+    const start = screen.getByRole('button', { name: 'Start bot' });
+    const close = screen.getByRole('button', { name: 'Close window' });
+    const startFocus = vi.spyOn(start, 'focus');
+    const retryFocus = vi.spyOn(button, 'focus');
+    const closeFocus = vi.spyOn(close, 'focus');
+    return {
+      user,
+      button,
+      start,
+      close,
+      stop,
+      invoke,
+      startFocus,
+      retryFocus,
+      closeFocus,
+      noRestore() {
+        expect(startFocus).not.toHaveBeenCalled();
+        expect(retryFocus).not.toHaveBeenCalled();
+        expect(closeFocus).not.toHaveBeenCalled();
+      },
+      async finish(ok = true, changes: Partial<DisRunnerRuntimeState> = {}) {
+        await act(async () => {
+          resolve({
+            ok,
+            errors: [],
+            snapshot: {
+              ...current,
+              phase: ok ? 'ready' : 'error',
+              error: ok ? null : 'Still owned',
+              revision: 2,
+              ...changes,
+            },
+          });
+          await stopPromise;
+        });
+      },
+      async reject() {
+        await act(async () => {
+          reject(new Error('IPC rejected'));
+          await stopPromise.catch(() => undefined);
+        });
+      },
+      async emit(changes: Partial<DisRunnerRuntimeState>, sequence = 2) {
+        current = { ...current, ...changes };
+        await act(async () => {
+          const previousReads = stateReads.length;
+          listener({
+            schemaVersion: 1,
+            kind: 'snapshot',
+            sessionId: current.sessionId,
+            runId: current.runId,
+            sequence,
+            snapshot: current,
+          });
+          for (const read of stateReads.slice(previousReads)) await read;
+        });
+      },
+    };
+  }
+  it('collapses compact inspector and keeps explicit expansion through runtime updates', async () => {
+    await resize(720);
+    const r = await recovery();
+    const disclosure = screen.getByRole('button', { name: 'Expand inspector' });
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    const panel = document.getElementById(disclosure.getAttribute('aria-controls')!);
+    expect(panel).toHaveAttribute('hidden');
+    expect(screen.queryByRole('tab', { name: 'Trace' })).not.toBeInTheDocument();
+    await r.user.click(disclosure);
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    expect(panel).not.toHaveAttribute('hidden');
+    await r.emit({ revision: 2 });
+    expect(screen.getByRole('tab', { name: 'Trace' })).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Message #2000' })).toBeInTheDocument();
+  });
+  it('preserves focused inspector on entry to compact and hands disclosure focus back on widening', async () => {
+    await resize(1400);
+    render(<App />);
+    const trace = screen.getByRole('tab', { name: 'Trace' });
+    trace.focus();
+    await resize(720);
+    expect(trace).toHaveFocus();
+    const disclosure = screen.getByRole('button', { name: 'Collapse inspector' });
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    disclosure.focus();
+    await resize(1400);
+    expect(trace).toHaveFocus();
+    expect(screen.queryByRole('button', { name: /inspector$/ })).not.toBeInTheDocument();
+  });
+  it('exposes one persistent atomic phase status without announcing output tails', async () => {
+    const r = await recovery();
+    const region = screen.getByRole('status', { name: 'Runtime phase' });
+    expect(region).toHaveAttribute('aria-live', 'polite');
+    expect(region).toHaveAttribute('aria-atomic', 'true');
+    for (const [index, phase] of (
+      ['idle', 'ready', 'starting', 'running', 'stopping', 'error'] as const
+    ).entries()) {
+      await r.emit(
+        {
+          phase,
+          revision: index + 2,
+          output: [{ stream: 'stdout', text: 'DISTINCTIVE_PRIVATE_OUTPUT', atMs: 1 }],
+        },
+        index + 2,
+      );
+      expect(screen.getByRole('status', { name: 'Runtime phase' })).toBe(region);
+      expect(region).toHaveTextContent(phase);
+      expect(region).not.toHaveTextContent('DISTINCTIVE_PRIVATE_OUTPUT');
+    }
+    expect(document.querySelector('.run-indicator')).not.toHaveAttribute('aria-live');
+  });
+  it.each(['success', 'failure', 'rejection'] as const)(
+    'restores focused accepted Retry after %s',
+    async (outcome) => {
+      const r = await recovery();
+      expect(r.button).toBeDisabled();
+      expect(r.start).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Send local event' })).toBeDisabled();
+      expect(screen.getByText('Checking runtime cleanup…')).toHaveAttribute('role', 'status');
+      await r.user.click(r.button);
+      expect(r.stop).toHaveBeenCalledTimes(1);
+      if (outcome === 'rejection') await r.reject();
+      else await r.finish(outcome === 'success');
+      expect(outcome === 'success' ? r.startFocus : r.retryFocus).toHaveBeenCalledTimes(1);
+      expect(outcome === 'success' ? r.start : r.button).toBeEnabled();
+    },
+  );
+  it.each(['pointermove', 'body-focus'] as const)(
+    'retains owned intent across incidental %s',
+    async (kind) => {
+      const r = await recovery();
+      if (kind === 'pointermove')
+        document.body.dispatchEvent(new Event('pointermove', { bubbles: true }));
+      else document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await r.finish();
+      expect(r.startFocus).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['tab', 'pointer', 'body-pointer', 'away-body', 'blur'] as const)(
+    'never restores after deliberate %s',
+    async (kind) => {
+      const r = await recovery();
+      if (kind === 'tab') await r.user.tab();
+      if (kind === 'pointer') r.close.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      if (kind === 'body-pointer')
+        document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      if (kind === 'away-body') {
+        r.close.focus();
+        r.close.blur();
+        expect(document.activeElement).toBe(document.body);
+        r.closeFocus.mockClear();
+        document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      }
+      if (kind === 'blur') window.dispatchEvent(new Event('blur'));
+      // Exclude the user's own native movement from attempted-restoration counts.
+      r.startFocus.mockClear();
+      r.retryFocus.mockClear();
+      r.closeFocus.mockClear();
+      await r.finish();
+      r.noRestore();
+    },
+  );
+  it('does not attach Retry focus recovery to ordinary Stop', async () => {
+    const r = await recovery('running');
+    await r.finish();
+    r.noRestore();
+  });
+  it('does not restore for a shortcut invoked in the composer', async () => {
+    const r = await recovery('error', true);
+    await r.finish();
+    r.noRestore();
+  });
+  it.each(['session', 'run', 'revision', 'resync'] as const)(
+    'rejects focus restoration after %s invalidation',
+    async (kind) => {
+      const r = await recovery();
+      if (kind === 'session') await r.emit({ sessionId: 'session-new', revision: 4 }, 4);
+      if (kind === 'run') await r.emit({ runId: 'run-new', revision: 4 }, 4);
+      if (kind === 'revision') await r.emit({ revision: 3, error: 'New failure' }, 2);
+      if (kind === 'resync') await r.emit({ revision: 4 }, 4);
+      await r.finish(true, {
+        sessionId: snapshot.sessionId,
+        runId: snapshot.runId,
+        ...(kind === 'resync' ? { revision: 5 } : {}),
+      });
+      r.noRestore();
+    },
+  );
+  it('does not restore on rejected IPC after newer same-run terminal evidence', async () => {
+    const r = await recovery();
+    await r.emit({ revision: 2, phase: 'error', error: 'Newer terminal diagnostic' }, 2);
+    await r.reject();
+    r.noRestore();
+    expect(screen.getByText('Newer terminal diagnostic')).toBeInTheDocument();
+    expect(r.start).toBeDisabled();
+  });
+  it.each(['disposed', 'no-project'] as const)(
+    'uses enabled Close fallback after %s cleanup',
+    async (kind) => {
+      const r = await recovery();
+      await r.finish(true, kind === 'disposed' ? { disposed: true } : { project: null });
+      expect(r.start).toBeDisabled();
+      expect(r.close).toBeEnabled();
+      expect(r.closeFocus).toHaveBeenCalledTimes(1);
+      expect(r.startFocus).not.toHaveBeenCalled();
+    },
+  );
+  it('scopes enabled runner gradients to contrast-safe endpoints without changing disabled opacity', () => {
+    function luminance(hex: string) {
+      const channels = [1, 3, 5].map((offset) => {
+        const value = Number.parseInt(hex.slice(offset, offset + 2), 16) / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
+    }
+    for (const button of ['start', 'stop']) {
+      for (const suffix of ['', ':not(:disabled):hover']) {
+        const selector = `.runner-controls .${button}-button${suffix}`;
+        const start = stylesheet.indexOf(`${selector} {`);
+        expect(start, selector).toBeGreaterThanOrEqual(0);
+        const rule = stylesheet.slice(start, stylesheet.indexOf('}', start));
+        const colors = rule.match(/#[0-9a-f]{6}/giu) ?? [];
+        expect(colors).toHaveLength(2);
+        for (const color of colors)
+          expect(1.05 / (luminance(color) + 0.05)).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    expect(stylesheet).toMatch(/button:disabled\s*\{[^}]*opacity:\s*0\.44/u);
+  });
+  it('keeps Enter invocation blocked during pending cleanup', async () => {
+    const r = await recovery();
+    await r.user.type(screen.getByRole('textbox', { name: 'Message #2000' }), '/ping{Enter}');
+    expect(r.invoke).not.toHaveBeenCalled();
+    expect(r.start).toBeDisabled();
+    await r.finish();
   });
 });

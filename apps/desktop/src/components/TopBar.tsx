@@ -1,3 +1,4 @@
+import type { Ref } from 'react';
 import {
   Bot,
   ChevronDown,
@@ -19,10 +20,22 @@ interface TopBarProps {
   readonly botStatus: BotStatus;
   readonly guildName: string;
   readonly onStart: () => void;
-  readonly onStop: () => void;
+  readonly onStop: (origin?: HTMLButtonElement) => void;
+  readonly startButtonRef?: Ref<HTMLButtonElement>;
+  readonly stopButtonRef?: Ref<HTMLButtonElement>;
+  readonly closeButtonRef?: Ref<HTMLButtonElement>;
 }
 
-export function TopBar({ botStatus, guildName, onStart, onStop, controls }: TopBarProps) {
+export function TopBar({
+  botStatus,
+  guildName,
+  onStart,
+  onStop,
+  controls,
+  startButtonRef,
+  stopButtonRef,
+  closeButtonRef,
+}: TopBarProps) {
   const desktop = window.disrunnerDesktop !== undefined;
   const controlWindow = (action: 'minimize' | 'maximize' | 'close') => {
     void window.disrunnerDesktop?.controlWindow(action);
@@ -52,7 +65,7 @@ export function TopBar({ botStatus, guildName, onStart, onStop, controls }: TopB
         <ChevronDown size={16} />
       </button>
       <div className="top-divider top-divider-soft" />
-      <div className={`run-indicator ${botStatus}`} aria-live="polite">
+      <div className={`run-indicator ${botStatus}`} aria-live={desktop ? undefined : 'polite'}>
         <span className="status-dot" />
         {statusLabel[botStatus]}
       </div>
@@ -77,6 +90,7 @@ export function TopBar({ botStatus, guildName, onStart, onStop, controls }: TopB
       <div className="runner-controls" aria-label="Bot process controls">
         <button
           className="start-button"
+          ref={startButtonRef}
           disabled={controls ? !controls.canStart : botStatus === 'running' || transitioning}
           aria-describedby={desktop ? 'runtime-recovery' : undefined}
           onClick={onStart}
@@ -87,11 +101,12 @@ export function TopBar({ botStatus, guildName, onStart, onStop, controls }: TopB
         </button>
         <button
           className="stop-button"
+          ref={stopButtonRef}
           disabled={
             controls ? !controls.canStop : !['running', 'starting', 'stopping'].includes(botStatus)
           }
           aria-describedby={desktop ? 'runtime-recovery' : undefined}
-          onClick={onStop}
+          onClick={(event) => onStop(event.currentTarget)}
           type="button"
         >
           <Square fill="currentColor" size={12} />
@@ -126,6 +141,7 @@ export function TopBar({ botStatus, guildName, onStart, onStop, controls }: TopB
         </button>
         <button
           aria-label="Close window"
+          ref={closeButtonRef}
           disabled={!desktop}
           onClick={() => controlWindow('close')}
           type="button"

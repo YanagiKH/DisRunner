@@ -18,6 +18,14 @@ The local WebSocket server exposes selected identify/heartbeat/resume behavior a
 
 Electron starts the local Gateway service, but it does not bootstrap the renderer's synthetic guilds, dispatch UI actions, or emit REST mutations over Gateway. A connected socket is therefore not proof of a complete virtual Discord session.
 
+## Bootstrap heartbeats before authentication
+
+After HELLO, a client may send a heartbeat before IDENTIFY or RESUME. The loopback transport accepts `d: null` or a nonnegative safe integer and responds with exactly `{ "op": 11, "d": null }`. A prior connection's sequence is not compared against any session before authentication. Malformed sequences close with 4002.
+
+This bootstrap ACK is transport-only: it does not authenticate, allocate or bind a session, emit dispatches, or reset/cancel the original identify timeout. Heartbeat-only connections still close with 4003 when that deadline expires. Rejected RESUME leaves the connection unauthenticated; subsequent valid bootstrap heartbeats may be ACKed without changing the rejection or granting session ownership. IDENTIFY token validation remains unchanged.
+
+After successful IDENTIFY or RESUME, heartbeats continue through the session engine, including sequence validation and heartbeat-ACK fault injection. The engine's disabled-ACK fault setting does not suppress transport-only bootstrap ACKs. These real-WebSocket regression guarantees address source-observed SDK ordering only; they are not proof of actual Python SDK execution, SDK certification, or G0/G1/G2 qualification.
+
 ## Local reconnect endpoint and backlog
 
 `LocalGatewayServer.start(0)` binds an ephemeral loopback port and sets the engine's advertised `READY.resume_gateway_url` to that actual endpoint before accepting IDENTIFY. Clients can reconnect using the READY URL alone. Custom transports can call `GatewayEmulator.bindTransportEndpoint(url)` before creating sessions; it applies the existing offline WebSocket URL policy. Rebinding the same canonical endpoint is harmless. Changing endpoints while any live or unexpired resumable session exists fails explicitly; callers must invalidate those sessions or wait for expiry. A failed server endpoint bind closes the newly opened listener and leaves no published server address.
