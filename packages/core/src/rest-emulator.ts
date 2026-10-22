@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
+import type { OrdinaryMessagePermissionProfile } from './ordinary-message-permissions.js';
 import { parseRestBootstrapProfile, type RestBootstrapProfile } from './bootstrap-profile.js';
 import type { SimulationMode } from './contracts.js';
 import type { GatewayEmulator } from './gateway.js';
@@ -31,6 +32,7 @@ export type {
 } from './bootstrap-profile.js';
 
 export interface RestEmulatorOptions {
+  readonly ordinaryMessagePermissions?: OrdinaryMessagePermissionProfile;
   readonly state: VirtualState;
   readonly messageDomain?: MessageDomainContext;
   readonly interactions: InteractionEngine;
@@ -74,6 +76,9 @@ export class LocalRestEmulator {
     this.#state = options.state;
     this.#messages = new MessageDomainService({
       state: options.state,
+      ...(options.ordinaryMessagePermissions === undefined
+        ? {}
+        : { ordinaryMessagePermissions: options.ordinaryMessagePermissions }),
       gateway: options.gateway,
       ...(this.#bootstrap === undefined ? {} : { author: this.#bootstrap.user }),
       ...(options.messageDomain === undefined ? {} : { context: options.messageDomain }),
@@ -296,10 +301,18 @@ export class LocalRestEmulator {
         return;
       }
       if (method === 'GET') {
+        const history = this.#messages.authorizeRead(channelId);
         const limit = parseMessageLimit(url.searchParams.get('limit'));
         const messages = this.#state
           .list('message')
-          .filter((message) => readableMessage(message, channel))
+          .filter(
+            (message) =>
+              history &&
+              readableMessage(message, channel) &&
+              (this.#messages.ordinaryMessagePermissions === 'legacy-unenforced' ||
+                channel['type'] === 1 ||
+                message['message_origin'] !== 'interaction'),
+          )
           .slice(-limit)
           .map(messageRepresentation);
         sendJson(response, 200, messages, rateLimit.headers);
@@ -311,6 +324,39 @@ export class LocalRestEmulator {
     if (messageMatch !== null) {
       const channelId = messageMatch[1] as string;
       const messageId = messageMatch[2] as string;
+      if (
+        this.#messages.ordinaryMessagePermissions === 'guild-text-own-messages-v1' &&
+        !isExplicitDirectMessageChannel(this.#state.require('channel', channelId))
+      ) {
+        const channel = this.#state.require('channel', channelId);
+        // Direct mutation service owns policy checks; object-body validation still precedes them.
+        if (method === 'PATCH') {
+          const result = this.#messages.update(channelId, messageId, requireObjectBody(body));
+          sendJson(
+            response,
+            200,
+            messageRepresentation(result.message),
+            mutationHeaders(rateLimit, result),
+          );
+          return;
+        }
+        if (method === 'DELETE') {
+          const result = this.#messages.delete(channelId, messageId);
+          sendEmpty(response, 204, mutationHeaders(rateLimit, result));
+          return;
+        }
+        if (method === 'GET') {
+          this.#messages.authorizeRead(channelId, true);
+          const message = this.#state.require('message', messageId);
+          if (
+            !readableMessage(message, channel) ||
+            (channel['type'] !== 1 && message['message_origin'] === 'interaction')
+          )
+            throw new ResourceNotFoundError('message', messageId);
+          sendJson(response, 200, messageRepresentation(message), rateLimit.headers);
+          return;
+        }
+      }
       const message = this.#state.require('message', messageId);
       if (message['channel_id'] !== channelId)
         throw new ResourceNotFoundError('message', messageId);
@@ -866,4 +912,8 @@ function readableMessage(
         channel['guild_id'] === undefined &&
         message['guild_id'] === undefined))
   );
+}
+
+function isExplicitDirectMessageChannel(channel: Readonly<Record<string, unknown>>): boolean {
+  return channel['type'] === 1 && channel['guild_id'] === undefined;
 }

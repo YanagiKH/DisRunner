@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
+import {
+  OrdinaryMessagePolicy,
+  missingOrdinaryMessagePermissions,
+  type OrdinaryMessagePermissionProfile,
+} from './ordinary-message-permissions.js';
 import type { BootstrapUser } from './bootstrap-profile.js';
 import type { ResourceRecord, SimulationMode } from './contracts.js';
 import type { GatewayEmulator } from './gateway.js';
@@ -40,6 +45,7 @@ export interface MessageMutationResult {
   readonly delivery: MessageDelivery;
 }
 export interface MessageDomainOptions {
+  readonly ordinaryMessagePermissions?: OrdinaryMessagePermissionProfile;
   readonly state: VirtualState;
   readonly gateway: GatewayEmulator;
   readonly author?: BootstrapUser;
@@ -50,6 +56,7 @@ export interface MessageDomainOptions {
 /** Ordinary channel messages only. No generic store-change or interaction-event bridge. */
 export class MessageDomainService {
   readonly #state: VirtualState;
+  readonly #permissions: OrdinaryMessagePolicy;
   readonly #gateway: GatewayEmulator;
   readonly #author: BootstrapUser | undefined;
   readonly #context: Required<MessageDomainContext>;
@@ -57,12 +64,29 @@ export class MessageDomainService {
 
   public constructor(options: MessageDomainOptions) {
     this.#state = options.state;
+    this.#permissions = new OrdinaryMessagePolicy(
+      options.state,
+      options.gateway.botUserId,
+      options.ordinaryMessagePermissions,
+      options.author === undefined ? undefined : structuredClone(options.author),
+    );
     this.#gateway = options.gateway;
     this.#author = options.author === undefined ? undefined : structuredClone(options.author);
     const runId = options.context?.runId ?? randomUUID();
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(runId)) throw new TypeError('Invalid message-domain runId.');
     this.#context = { runId, clockDomain: options.context?.clockDomain ?? 'virtual' };
     this.#mode = options.mode ?? 'strict';
+  }
+
+  public get ordinaryMessagePermissions(): OrdinaryMessagePermissionProfile {
+    return this.#permissions.profile;
+  }
+
+  public authorizeRead(channelId: string, item = false): boolean {
+    return this.#permissions.authorize(
+      this.#state.require('channel', channelId),
+      item ? 'get' : 'list',
+    ).history;
   }
 
   public evidence(): {
@@ -108,6 +132,10 @@ export class MessageDomainService {
       if (beforeRevision >= Number.MAX_SAFE_INTEGER)
         throw new DiscordApiError(503, 0, 'Message revision or sequence capacity exceeded.');
       const channel = this.#state.require('channel', channelId);
+      const permission = this.#permissions.authorize(
+        channel,
+        type === 'MESSAGE_CREATE' ? 'create' : type === 'MESSAGE_UPDATE' ? 'update' : 'delete',
+      );
       let guildId: string | undefined;
       if (channel['type'] === 0 && typeof channel['guild_id'] === 'string') {
         guildId = this.#state.require('guild', channel['guild_id']).id;
@@ -147,6 +175,8 @@ export class MessageDomainService {
             'Message visibility is not supported by this route.',
           );
       }
+      if (type === 'MESSAGE_CREATE' && payload['tts'] === true && !permission.tts)
+        missingOrdinaryMessagePermissions();
       const changes =
         type === 'MESSAGE_DELETE'
           ? {}

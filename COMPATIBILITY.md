@@ -66,3 +66,7 @@ The `bot.runtime` label in a raw-webhook project describes how to launch that we
 5. Framework support is promoted only after an adapter and pinned-version contract suite land.
 
 Report protocol drift with a minimal redacted fixture. Never attach a production token or private production data.
+
+## Opt-in ordinary message authorization
+
+The core-only `guild-text-own-messages-v1` profile enforces live guild/member/role/overwrite permissions for ordinary guild-text message reads and own-message mutations. The default remains **legacy-unenforced**; runtime/Desktop do not enable it. DMs retain legacy behavior. Own-only mutation, conservative timeout restrictions, ordinary-only history excluding interaction-origin messages, and uncertified richer composition permissions are deliberate boundaries, not Discord parity. See [Ordinary message permissions](docs/ordinary-message-permissions.md) for the API, required fixtures and exact scope.

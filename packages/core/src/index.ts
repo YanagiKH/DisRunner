@@ -33,3 +33,5 @@ export type {
   InteractionMessageCommand,
   InteractionMessageResult,
 } from './interaction-message-domain.js';
+
+export type { OrdinaryMessagePermissionProfile } from './ordinary-message-permissions.js';
