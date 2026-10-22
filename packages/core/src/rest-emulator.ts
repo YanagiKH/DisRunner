@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
+import { parseRestBootstrapProfile, type RestBootstrapProfile } from './bootstrap-profile.js';
 import type { SimulationMode } from './contracts.js';
 import type { GatewayEmulator } from './gateway.js';
 import {
@@ -15,6 +16,12 @@ import { ResourceNotFoundError, type VirtualState } from './state.js';
 import type { SpanHandle, TraceCollector } from './trace.js';
 import { assertSyntheticToken, timingSafeTokenEqual } from './session-token.js';
 
+export type {
+  BootstrapApplication,
+  BootstrapUser,
+  RestBootstrapProfile,
+} from './bootstrap-profile.js';
+
 export interface RestEmulatorOptions {
   readonly state: VirtualState;
   readonly interactions: InteractionEngine;
@@ -25,6 +32,11 @@ export interface RestEmulatorOptions {
   readonly mode?: SimulationMode;
   readonly maxBodyBytes?: number;
   readonly trace?: TraceCollector;
+  /**
+   * Opt-in synthetic identity for `GET /users/@me` and `GET /oauth2/applications/@me`.
+   * Validated strictly and deep-copied at construction; omitted means unconfigured.
+   */
+  readonly bootstrap?: RestBootstrapProfile | undefined;
 }
 
 export interface RestEmulatorAddress {
@@ -43,10 +55,13 @@ export class LocalRestEmulator {
   readonly #mode: SimulationMode;
   readonly #maxBodyBytes: number;
   readonly #trace: TraceCollector | undefined;
+  readonly #bootstrap: RestBootstrapProfile | undefined;
   #server: Server | undefined;
   #address: RestEmulatorAddress | undefined;
 
   public constructor(options: RestEmulatorOptions) {
+    const bootstrap = options.bootstrap;
+    this.#bootstrap = bootstrap === undefined ? undefined : parseRestBootstrapProfile(bootstrap);
     this.#state = options.state;
     this.#interactions = options.interactions;
     this.#rateLimits = options.rateLimits;
@@ -186,6 +201,14 @@ export class LocalRestEmulator {
         },
         rateLimit.headers,
       );
+      return;
+    }
+    if (method === 'GET' && path === '/users/@me' && this.#bootstrap !== undefined) {
+      sendJson(response, 200, this.#bootstrap.user, rateLimit.headers);
+      return;
+    }
+    if (method === 'GET' && path === '/oauth2/applications/@me' && this.#bootstrap !== undefined) {
+      sendJson(response, 200, this.#bootstrap.application, rateLimit.headers);
       return;
     }
     if (method === 'GET' && path === '/users/@me') {

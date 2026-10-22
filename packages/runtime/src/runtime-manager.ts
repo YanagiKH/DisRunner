@@ -318,6 +318,11 @@ export class DesktopRuntimeManager {
         configuration.adapter.type === 'raw-interaction-webhook'
           ? createInteractionCredentials()
           : null;
+      if (interactionCredentials === null) {
+        throw new Error(
+          'Shared runtime bootstrap requires raw-interaction-webhook signing credentials.',
+        );
+      }
       const interactionPeerSecret =
         interactionCredentials === null ? null : createWebhookPeerSecret();
       this.#sanitizeForExport = (value: unknown) =>
@@ -342,6 +347,8 @@ export class DesktopRuntimeManager {
         processId: (configuration.profile.seed >>> 5) & 31,
       });
       const applicationId = snowflakes.generate();
+      const botUserId = snowflakes.generate();
+      const ownerId = snowflakes.generate();
       const trace = new core.TraceCollector({ clock, random });
       const risks = new core.RiskCollector(clock);
       const state = new core.VirtualState(clock, snowflakes, configuration.resources);
@@ -364,6 +371,8 @@ export class DesktopRuntimeManager {
         snowflakes,
         fakeToken: sessionToken,
         resumeGatewayUrl: expectedGatewayUrl,
+        applicationId,
+        botUserId,
       });
       // Own the real resource before wrapping it: if wrapping throws, cleanup still reaches it.
       this.#gatewayServer = new GatewayServer({ gateway, trace });
@@ -393,6 +402,34 @@ export class DesktopRuntimeManager {
         rateLimits,
         fakeToken: sessionToken,
         gatewayUrl,
+        bootstrap: {
+          user: {
+            id: botUserId,
+            username: 'DisRunner Bot',
+            discriminator: '0',
+            avatar: null,
+            bot: true,
+          },
+          application: {
+            id: applicationId,
+            name: 'DisRunner Test Application',
+            description: 'Synthetic application profile for local tests.',
+            icon: null,
+            bot_public: false,
+            bot_require_code_grant: false,
+            owner: {
+              id: ownerId,
+              username: 'test-owner',
+              discriminator: '0',
+              avatar: null,
+              bot: false,
+            },
+            // Reuse the same ephemeral signing identity injected into this run's bot.
+            verify_key: interactionCredentials.publicKeyHex,
+            flags: 0,
+            team: null,
+          },
+        },
         mode: configuration.profile.mode,
         trace,
       });
