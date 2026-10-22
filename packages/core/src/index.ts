@@ -18,4 +18,18 @@ export * from './session-token.js';
 export * from './state.js';
 export * from './trace.js';
 export * from './message-domain.js';
-export * from './message-events.js';
+export {
+  isOrdinaryMessage,
+  mapMessageEvent,
+  projectMessageWire,
+  type MessageDomainEvent,
+  type MessageEventName,
+} from './message-events.js';
+export type {
+  InteractionMessageAuthorityOptions,
+  InteractionMessageProfile,
+  InteractionMessageSelection,
+  AuthoritativeInteractionFields,
+  InteractionMessageCommand,
+  InteractionMessageResult,
+} from './interaction-message-domain.js';

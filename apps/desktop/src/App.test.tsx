@@ -1430,3 +1430,80 @@ describe('live retained Desktop message feed', () => {
     expect(screen.queryByText('/secret failed locally')).not.toBeInTheDocument();
   });
 });
+
+describe('interaction responses in the live feed', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'disrunnerDesktop');
+  });
+
+  function responseSnapshot(): DisRunnerRuntimeState {
+    const base = liveSnapshot();
+    return {
+      ...base,
+      coreState: {
+        ...base.coreState!,
+        resources: [
+          {
+            id: 'original-1',
+            resourceType: 'message',
+            visibility: 'channel',
+            guild_id: '1000',
+            channel_id: '2000',
+            type: 20,
+            flags: 0,
+            content: 'Original public.',
+            timestamp: '2015-01-01T00:01:40.000Z',
+            author: { id: '333333333333333333', username: 'fixture-bot', bot: true },
+          },
+        ],
+      },
+    };
+  }
+
+  it('explains which interaction responses appear in the feed', async () => {
+    installBridge(vi.fn(), { getRuntimeState: () => Promise.resolve(liveSnapshot()) });
+    render(<App />);
+    const status = await screen.findByRole('status', { name: 'Live message feed status' });
+    expect(status).toHaveTextContent(
+      'Public interaction responses appear once posted; raw callback data, responses still loading and ephemeral responses are not shown.',
+    );
+    expect(status).not.toHaveTextContent(
+      'Interaction callbacks remain diagnostic evidence, not channel messages.',
+    );
+  });
+
+  it('renders a retained public response once and still keeps callback data out of the feed', async () => {
+    let finish!: (result: DisRunnerInvocationResult) => void;
+    const invoke = vi.fn(
+      (request: DisRunnerInvocationRequest) =>
+        new Promise<DisRunnerInvocationResult>((resolve) => {
+          expect(request.input).toBe('/ping');
+          finish = resolve;
+        }),
+    );
+    installBridge(invoke, { getRuntimeState: () => Promise.resolve(responseSnapshot()) });
+    const user = userEvent.setup();
+    render(<App />);
+    const main = screen.getByRole('main');
+    expect(await within(main).findByText('Original public.')).toBeVisible();
+    expect(within(main).getAllByText('Original public.')).toHaveLength(1);
+    await user.type(screen.getByRole('textbox', { name: 'Message #2000' }), '/ping{Enter}');
+    const request = invoke.mock.calls[0]?.[0] as unknown as DisRunnerInvocationRequest;
+    await act(async () => {
+      finish({
+        ...request,
+        ok: true,
+        command: 'ping',
+        interactionId: 'interaction-2',
+        durationMs: 3,
+        response: { type: 'message', data: { content: 'Raw callback only' } },
+        error: null,
+      });
+      await Promise.resolve();
+    });
+    expect(
+      within(screen.getByRole('main')).queryByText('Raw callback only'),
+    ).not.toBeInTheDocument();
+    expect(within(screen.getByRole('main')).getAllByText('Original public.')).toHaveLength(1);
+  });
+});

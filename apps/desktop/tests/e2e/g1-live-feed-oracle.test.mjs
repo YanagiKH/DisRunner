@@ -124,3 +124,28 @@ test('import is inert without starting a server or fetching bootstrap', async ()
     globalThis.fetch = originalFetch;
   }
 });
+
+test('callback diagnostic is explicitly ephemeral and ping stays a pong', async () => {
+  const module = await import('../fixtures/g1-parity/live-feed-bot.mjs?callback-body');
+  assert.equal(typeof module.interactionCallbackBody, 'function');
+  assert.deepEqual(module.interactionCallbackBody(false), {
+    type: 4,
+    data: { content: 'G1 callback diagnostic only.', flags: 64 },
+  });
+  assert.deepEqual(module.interactionCallbackBody(true), { type: 1 });
+});
+
+test('a public original reply uses a separate fixture path, never the diagnostic', async () => {
+  const module = await import('../fixtures/g1-parity/live-feed-bot.mjs?public-original');
+  assert.equal(typeof module.publicOriginalCallbackBody, 'function');
+  assert.equal(typeof module.interactionCallbackBody, 'function');
+  assert.notEqual(module.publicOriginalCallbackBody, module.interactionCallbackBody);
+  const original = module.publicOriginalCallbackBody();
+  assert.deepEqual(original, { type: 4, data: { content: 'G1 public original reply.' } });
+  assert.equal(Object.hasOwn(original.data, 'flags'), false);
+  assert.deepEqual(module.interactionCallbackBody(false), {
+    type: 4,
+    data: { content: 'G1 callback diagnostic only.', flags: 64 },
+  });
+  assert.deepEqual(module.interactionCallbackBody(true), { type: 1 });
+});

@@ -18,6 +18,16 @@ function requireId(value) {
   return value;
 }
 
+/** Readiness PING gets a pong; every command gets the ephemeral diagnostic, never a feed row. */
+export function interactionCallbackBody(isPing) {
+  return isPing ? { type: 1 } : { type: 4, data: { content: diagnostic, flags: 64 } };
+}
+
+/** A separate public original body; the command handling below never sends it. */
+export function publicOriginalCallbackBody() {
+  return { type: 4, data: { content: 'G1 public original reply.' } };
+}
+
 export function commandOperation(command, messageId = null) {
   if (command === 'feed-create') {
     if (messageId !== null) throw Error('A fixture message already exists.');
@@ -255,9 +265,7 @@ async function main() {
             busy = false;
           }
         } else trace('readiness', { authenticatedRequest: true, applicationId });
-        const body = Buffer.from(
-          JSON.stringify(ping ? { type: 1 } : { type: 4, data: { content: diagnostic } }),
-        );
+        const body = Buffer.from(JSON.stringify(interactionCallbackBody(ping)));
         const authentication = signWebhookResponseAuthentication({
           peerSecretHex,
           timestamp,

@@ -125,3 +125,58 @@ describe('read-only live ordinary message selector', () => {
     ).toEqual(['Edited']);
   });
 });
+
+describe('interaction response rows in the live selector', () => {
+  const original = {
+    ...ordinary,
+    id: 'original-1',
+    type: 20,
+    content: 'Original public.',
+    timestamp: '2015-01-01T00:01:40.000Z',
+    author: { id: '333333333333333333', username: 'fixture-bot', bot: true },
+  };
+  it('accepts a public type 20 response with each supported flag value', () => {
+    for (const flags of [0, 4, 4096, 4100]) {
+      expect(
+        selectLiveMessages(snapshot([{ ...original, flags }]), context).messages.map(
+          (row) => row.id,
+        ),
+      ).toEqual(['original-1']);
+    }
+  });
+  it('rejects other message types and ephemeral or loading flags for type 0 and 20', () => {
+    const rejected = [
+      { ...original, type: 19 },
+      { ...original, type: 21 },
+      { ...original, type: '20' },
+      ...[0, 20].flatMap((type) => [64, 128, 192].map((flags) => ({ ...original, type, flags }))),
+    ];
+    expect(selectLiveMessages(snapshot(rejected), context).messages).toEqual([]);
+  });
+  it('renders a public original as one bot row with its literal fields', () => {
+    expect(selectLiveMessages(snapshot([original]), context)).toEqual({
+      status: 'available',
+      messages: [
+        {
+          id: 'original-1',
+          author: 'fixture-bot',
+          authorRole: 'bot',
+          content: 'Original public.',
+          time: '2015-01-01T00:01:40.000Z',
+        },
+      ],
+    });
+  });
+  it('shows no response row for stale, unavailable or foreign-context snapshots', () => {
+    const current = snapshot([original]);
+    for (const value of [
+      { ...current, coreState: null },
+      { ...current, runId: 'new' },
+      { ...current, disposed: true },
+      { ...current, contexts: [] },
+    ]) {
+      expect(selectLiveMessages(value, context)).toEqual({ status: 'unavailable', messages: [] });
+    }
+    expect(selectLiveMessages(current, { ...context, channelId: 'other' }).messages).toEqual([]);
+  });
+});

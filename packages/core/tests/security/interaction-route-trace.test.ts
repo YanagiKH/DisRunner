@@ -84,6 +84,62 @@ const cases = [
     404,
     10015,
   ],
+  [
+    'original read with wrong application',
+    'GET',
+    `/webhooks/222/${ENCODED_TOKEN}/messages/@original`,
+    WEBHOOK_TEMPLATE,
+    404,
+    10015,
+  ],
+  [
+    'original edit with wrong application',
+    'PATCH',
+    `/webhooks/222/${ENCODED_TOKEN}/messages/@original`,
+    WEBHOOK_TEMPLATE,
+    404,
+    10015,
+  ],
+  [
+    'original delete with wrong application',
+    'DELETE',
+    `/webhooks/222/${ENCODED_TOKEN}/messages/@original`,
+    WEBHOOK_TEMPLATE,
+    404,
+    10015,
+  ],
+  [
+    'followup read with wrong application',
+    'GET',
+    `/webhooks/222/${ENCODED_TOKEN}/messages/333`,
+    WEBHOOK_TEMPLATE,
+    404,
+    10015,
+  ],
+  [
+    'followup edit with wrong application',
+    'PATCH',
+    `/webhooks/222/${ENCODED_TOKEN}/messages/333`,
+    WEBHOOK_TEMPLATE,
+    404,
+    10015,
+  ],
+  [
+    'followup delete with wrong application',
+    'DELETE',
+    `/webhooks/222/${ENCODED_TOKEN}/messages/333`,
+    WEBHOOK_TEMPLATE,
+    404,
+    10015,
+  ],
+  [
+    'malformed URI in original route',
+    'GET',
+    '/webhooks/111/%e0%a4%a/messages/@original',
+    WEBHOOK_TEMPLATE,
+    400,
+    50035,
+  ],
 ] as const;
 
 describe('sensitive interaction route trace templates', () => {
@@ -116,7 +172,7 @@ describe('sensitive interaction route trace templates', () => {
         const before = rateLimits.buckets();
         const response = await fetch(`${address.apiBaseUrl}${path}`, {
           method,
-          ...(method === 'POST' ? { body: '{invalid-json' } : {}),
+          ...(method === 'POST' || method === 'PATCH' ? { body: '{invalid-json' } : {}),
         });
         const body: unknown = await response.json();
         expect(response.status).toBe(status);

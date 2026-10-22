@@ -830,7 +830,8 @@ export default function App() {
                 : liveMessages.status === 'truncated'
                   ? 'Live messages · truncated retained snapshot. Missing messages are not evidence of deletion.'
                   : 'Live messages · retained snapshot. Missing messages are not evidence of deletion.'}{' '}
-              Interaction callbacks remain diagnostic evidence, not channel messages.
+              Public interaction responses appear once posted; raw callback data, responses still
+              loading and ephemeral responses are not shown.
             </p>
             <label className="runtime-actor">
               <span>Actor</span>

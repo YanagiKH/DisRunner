@@ -179,7 +179,9 @@ test(
         JSON.stringify({ content: 'bound followup' }),
       );
       assert.equal(valid.status, 200);
-      assert.equal((await valid.json()).data.content, 'bound followup');
+      const followup = await valid.json();
+      assert.equal(followup.content, 'bound followup');
+      assert.equal(followup.data, undefined);
       const exhausted = await request(
         first,
         pathFor(firstApplication),
