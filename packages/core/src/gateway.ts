@@ -86,6 +86,15 @@ const MAX_DISPATCH_JSON_NODES = 100_000;
 const MAX_DISPATCH_EVENT_NAME_BYTES = 256;
 const DISPATCH_PACKET_PREFIX_BYTES = Buffer.byteLength('{"op":0,"t":');
 
+export interface GatewayBroadcastResult {
+  /** Packets retained for connected delivery or disconnected resume, not delivery receipts. */
+  readonly accepted: number;
+  readonly filtered: number;
+  readonly failed: number;
+  /** Synchronous transport-listener failures; asynchronous socket delivery is not acknowledged. */
+  readonly transportFailed: number;
+}
+
 export interface GatewayEmulatorOptions {
   readonly clock: VirtualClock;
   readonly random: SeededRandom;
@@ -128,6 +137,7 @@ export class GatewayEmulator {
   readonly #maxReplayBytesPerSession: number;
   readonly #maxTotalReplayBytes: number;
   readonly #sessions = new Map<string, MutableSession>();
+  readonly #broadcastListeners = new Set<(sessionId: string, packet: GatewayDispatch) => void>();
   #totalReplayBytes = 0;
   #identifyWindowStartedAtMs: number;
   #identifyCount = 0;
@@ -178,6 +188,11 @@ export class GatewayEmulator {
       throw new RangeError('maxDispatchBytes cannot exceed maxTotalReplayBytes.');
     }
     this.#identifyWindowStartedAtMs = this.#clock.now();
+  }
+
+  /** Identity advertised by this Gateway in READY. */
+  public get botUserId(): string {
+    return this.#botUserId;
   }
 
   /** The per-instance synthetic credential to inject into a contained bot process. */
@@ -244,21 +259,85 @@ export class GatewayEmulator {
     // Expired and invalid sessions are swept; disconnected sessions retain the same
     // filtering, sequence, and bounded history rules as connected sessions.
     const session = this.#requireSession(sessionId);
-    const sequence = session.sequence + 1;
-    if (!Number.isSafeInteger(sequence)) {
-      throw new GatewayProtocolError(4002, 'Gateway sequence exceeds the safe integer range.');
+    const packet = this.#prepareDispatch(session, eventName, data);
+    if (packet === undefined) return undefined;
+    return this.#appendDispatch(session, eventName, packet.packet.d);
+  }
+
+  /** Validate the whole fan-out without sweeping sessions or changing retained state. */
+  public preflightBroadcast(eventName: string, data: unknown): void {
+    // Invalid packets must fail even when there are currently no subscribers.
+    const boundedData = normalizeDispatchData(eventName, 1, data, this.#maxDispatchBytes).data;
+    const sessions = [...this.#sessions.values()].filter(
+      (session) => session.state !== 'invalid' && !this.#sessionExpired(session),
+    );
+    let totalBytes = sessions.reduce((total, session) => total + session.historyBytes, 0);
+    for (const session of sessions) {
+      const dispatch = this.#prepareDispatch(session, eventName, boundedData);
+      if (dispatch === undefined) continue;
+      const { retainedBytes } = this.#retentionPlan(session, dispatch.bytes);
+      totalBytes += retainedBytes - session.historyBytes;
+      if (totalBytes > this.#maxTotalReplayBytes) {
+        throw new GatewayProtocolError(4008, 'Gateway replay history capacity exceeded.');
+      }
     }
-    const boundedData = normalizeDispatchData(
-      eventName,
-      sequence,
-      data,
-      this.#maxDispatchBytes,
-    ).data;
-    const filtered = filterGatewayEvent(eventName, boundedData, session.intents, {
-      botUserId: this.#botUserId,
-    });
-    if (!filtered.delivered) return undefined;
-    return this.#appendDispatch(session, eventName, filtered.data);
+  }
+
+  /**
+   * Retain independently for the current live session set, not the earlier preflight audience.
+   * Preflight is advisory, not a reservation. Transport failures never roll back retained packets.
+   */
+  public broadcast(eventName: string, data: unknown): GatewayBroadcastResult {
+    this.#sweepSessions();
+    const result = { accepted: 0, filtered: 0, failed: 0, transportFailed: 0 };
+    let boundedData: unknown;
+    try {
+      boundedData = normalizeDispatchData(eventName, 1, data, this.#maxDispatchBytes).data;
+    } catch {
+      result.failed = Math.max(1, this.#sessions.size);
+      return result;
+    }
+    const listeners = [...this.#broadcastListeners];
+    for (const sessionId of [...this.#sessions.keys()]) {
+      let packet: GatewayDispatch | undefined;
+      try {
+        packet = this.dispatch(sessionId, eventName, boundedData);
+      } catch {
+        result.failed += 1;
+        continue;
+      }
+      if (packet === undefined) {
+        result.filtered += 1;
+        continue;
+      }
+      result.accepted += 1;
+      for (const listener of listeners) {
+        try {
+          listener(sessionId, cloneDispatch(packet));
+        } catch {
+          result.transportFailed += 1;
+        }
+      }
+    }
+    return result;
+  }
+
+  /** Only broadcast packets are published here; direct dispatch remains caller-owned. */
+  public subscribeBroadcast(
+    listener: (sessionId: string, packet: GatewayDispatch) => void,
+  ): () => void {
+    if (typeof listener !== 'function')
+      throw new TypeError('Broadcast listener must be a function.');
+    if (this.#broadcastListeners.size >= 100) {
+      throw new RangeError('Gateway broadcast listener capacity exceeded.');
+    }
+    // Each subscription owns its own identity, even for the same callback.
+    const subscription = (sessionId: string, packet: GatewayDispatch): void =>
+      listener(sessionId, packet);
+    this.#broadcastListeners.add(subscription);
+    return () => {
+      this.#broadcastListeners.delete(subscription);
+    };
   }
 
   public heartbeat(sessionId: string, sequence: number | null): GatewayPacket<null> | undefined {
@@ -390,17 +469,7 @@ export class GatewayEmulator {
       this.#maxDispatchBytes,
     );
 
-    let evictCount = 0;
-    let retainedBytes = session.historyBytes + bytes;
-    while (
-      session.history.length - evictCount + 1 > this.#replayLimit ||
-      retainedBytes > this.#maxReplayBytesPerSession
-    ) {
-      const evicted = session.history[evictCount];
-      if (evicted === undefined) break;
-      retainedBytes -= evicted.bytes;
-      evictCount += 1;
-    }
+    const { evictCount, retainedBytes } = this.#retentionPlan(session, bytes);
     const evictedBytes = session.historyBytes + bytes - retainedBytes;
     if (this.#totalReplayBytes - evictedBytes + bytes > this.#maxTotalReplayBytes) {
       throw new GatewayProtocolError(4008, 'Gateway replay history capacity exceeded.');
@@ -412,6 +481,42 @@ export class GatewayEmulator {
     session.historyBytes = retainedBytes;
     this.#totalReplayBytes += bytes - evictedBytes;
     return cloneDispatch(packet);
+  }
+
+  #prepareDispatch(
+    session: MutableSession,
+    eventName: string,
+    data: unknown,
+  ): StoredDispatch | undefined {
+    const sequence = session.sequence + 1;
+    if (!Number.isSafeInteger(sequence)) {
+      throw new GatewayProtocolError(4002, 'Gateway sequence exceeds the safe integer range.');
+    }
+    const normalized = normalizeDispatchData(eventName, sequence, data, this.#maxDispatchBytes);
+    const filtered = filterGatewayEvent(eventName, normalized.data, session.intents, {
+      botUserId: this.#botUserId,
+    });
+    return filtered.delivered
+      ? createStoredDispatch(eventName, sequence, filtered.data, this.#maxDispatchBytes)
+      : undefined;
+  }
+
+  #retentionPlan(
+    session: MutableSession,
+    bytes: number,
+  ): { evictCount: number; retainedBytes: number } {
+    let evictCount = 0;
+    let retainedBytes = session.historyBytes + bytes;
+    while (
+      session.history.length - evictCount + 1 > this.#replayLimit ||
+      retainedBytes > this.#maxReplayBytesPerSession
+    ) {
+      const evicted = session.history[evictCount];
+      if (evicted === undefined) break;
+      retainedBytes -= evicted.bytes;
+      evictCount += 1;
+    }
+    return { evictCount, retainedBytes };
   }
 
   #requireSession(sessionId: string): MutableSession {

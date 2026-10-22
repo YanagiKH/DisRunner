@@ -9,9 +9,14 @@ import {
   type InteractionResponseType,
 } from './interactions.js';
 import { assertOfflineGatewayUrl, isLoopbackHostname } from './network-policy.js';
-import { assertValidMessagePayload } from './protocol-limits.js';
+import {
+  MessageDomainService,
+  type MessageDomainContext,
+  type MessageMutationResult,
+} from './message-domain.js';
 import type { RateLimitEngine, RateLimitResult } from './rate-limits.js';
 import { redactString } from './redaction.js';
+import { isOrdinaryMessage, projectMessageWire } from './message-events.js';
 import { ResourceNotFoundError, type VirtualState } from './state.js';
 import type { SpanHandle, TraceCollector } from './trace.js';
 import { assertSyntheticToken, timingSafeTokenEqual } from './session-token.js';
@@ -24,6 +29,7 @@ export type {
 
 export interface RestEmulatorOptions {
   readonly state: VirtualState;
+  readonly messageDomain?: MessageDomainContext;
   readonly interactions: InteractionEngine;
   readonly gateway: GatewayEmulator;
   readonly rateLimits: RateLimitEngine;
@@ -48,11 +54,11 @@ export interface RestEmulatorAddress {
 
 export class LocalRestEmulator {
   readonly #state: VirtualState;
+  readonly #messages: MessageDomainService;
   readonly #interactions: InteractionEngine;
   readonly #rateLimits: RateLimitEngine;
   readonly #fakeToken: string;
   readonly #gatewayUrl: string;
-  readonly #mode: SimulationMode;
   readonly #maxBodyBytes: number;
   readonly #trace: TraceCollector | undefined;
   readonly #bootstrap: RestBootstrapProfile | undefined;
@@ -63,13 +69,23 @@ export class LocalRestEmulator {
     const bootstrap = options.bootstrap;
     this.#bootstrap = bootstrap === undefined ? undefined : parseRestBootstrapProfile(bootstrap);
     this.#state = options.state;
+    this.#messages = new MessageDomainService({
+      state: options.state,
+      gateway: options.gateway,
+      ...(this.#bootstrap === undefined ? {} : { author: this.#bootstrap.user }),
+      ...(options.messageDomain === undefined ? {} : { context: options.messageDomain }),
+      ...(options.mode === undefined ? {} : { mode: options.mode }),
+    });
     this.#interactions = options.interactions;
     this.#rateLimits = options.rateLimits;
     this.#fakeToken = assertSyntheticToken(options.fakeToken ?? options.gateway.sessionToken);
     this.#gatewayUrl = assertOfflineGatewayUrl(options.gatewayUrl ?? 'ws://127.0.0.1/gateway').href;
-    this.#mode = options.mode ?? 'strict';
     this.#maxBodyBytes = boundedSizeLimit(options.maxBodyBytes ?? 1_048_576, 'maxBodyBytes');
     this.#trace = options.trace;
+  }
+
+  public messageEvidence(): ReturnType<MessageDomainService['evidence']> {
+    return this.#messages.evidence();
   }
 
   public get address(): RestEmulatorAddress | undefined {
@@ -164,7 +180,17 @@ export class LocalRestEmulator {
       }
       const body = await readJsonBody(request, this.#maxBodyBytes);
       this.#route(method, routePath, url, body, response, rateLimit);
-      if (span !== undefined) this.#trace?.end(span, 'ok', { status: response.statusCode });
+      if (span !== undefined)
+        this.#trace?.end(span, 'ok', {
+          status: response.statusCode,
+          ...(response.hasHeader('X-DisRunner-Event-Id')
+            ? {
+                eventId: response.getHeader('X-DisRunner-Event-Id'),
+                stateRevision: response.getHeader('X-DisRunner-State-Revision'),
+                delivery: response.getHeader('X-DisRunner-Delivery'),
+              }
+            : {}),
+        });
     } catch (error) {
       const apiError = normalizeError(error);
       sendJson(response, apiError.status, apiError.toJSON());
@@ -255,25 +281,24 @@ export class LocalRestEmulator {
     const messagesMatch = /^\/channels\/(\d+)\/messages$/.exec(path);
     if (messagesMatch !== null) {
       const channelId = messagesMatch[1] as string;
-      this.#state.require('channel', channelId);
+      const channel = this.#state.require('channel', channelId);
       if (method === 'POST') {
-        const data = requireObjectBody(body);
-        validateMessage(data, this.#mode);
-        const message = this.#state.create('message', {
-          ...data,
-          channel_id: channelId,
-          timestamp: new Date(this.#state.now()).toISOString(),
-        });
-        sendJson(response, 200, stripResourceType(message), rateLimit.headers);
+        const result = this.#messages.create(channelId, requireObjectBody(body));
+        sendJson(
+          response,
+          200,
+          messageRepresentation(result.message),
+          mutationHeaders(rateLimit, result),
+        );
         return;
       }
       if (method === 'GET') {
         const limit = parseMessageLimit(url.searchParams.get('limit'));
         const messages = this.#state
           .list('message')
-          .filter((message) => message['channel_id'] === channelId)
+          .filter((message) => readableMessage(message, channel))
           .slice(-limit)
-          .map(stripResourceType);
+          .map(messageRepresentation);
         sendJson(response, 200, messages, rateLimit.headers);
         return;
       }
@@ -287,28 +312,25 @@ export class LocalRestEmulator {
       if (message['channel_id'] !== channelId)
         throw new ResourceNotFoundError('message', messageId);
       if (method === 'GET') {
-        sendJson(response, 200, stripResourceType(message), rateLimit.headers);
+        const channel = this.#state.require('channel', channelId);
+        if (!readableMessage(message, channel))
+          throw new ResourceNotFoundError('message', messageId);
+        sendJson(response, 200, messageRepresentation(message), rateLimit.headers);
         return;
       }
       if (method === 'PATCH') {
-        const changes = requireObjectBody(body);
-        validateMessage(changes, this.#mode, true);
+        const result = this.#messages.update(channelId, messageId, requireObjectBody(body));
         sendJson(
           response,
           200,
-          stripResourceType(
-            this.#state.update('message', messageId, {
-              ...changes,
-              edited_timestamp: new Date(this.#state.now()).toISOString(),
-            }),
-          ),
-          rateLimit.headers,
+          messageRepresentation(result.message),
+          mutationHeaders(rateLimit, result),
         );
         return;
       }
       if (method === 'DELETE') {
-        this.#state.delete('message', messageId);
-        sendEmpty(response, 204, rateLimit.headers);
+        const result = this.#messages.delete(channelId, messageId);
+        sendEmpty(response, 204, mutationHeaders(rateLimit, result));
         return;
       }
     }
@@ -495,29 +517,6 @@ function objectOrEmpty(value: unknown): Readonly<Record<string, unknown>> {
     : {};
 }
 
-function validateMessage(
-  data: Readonly<Record<string, unknown>>,
-  mode: SimulationMode,
-  partial = false,
-): void {
-  const content = data['content'];
-  if (
-    !partial &&
-    mode === 'strict' &&
-    content === undefined &&
-    data['embeds'] === undefined &&
-    data['components'] === undefined
-  ) {
-    throw new DiscordApiError(400, 50006, 'Cannot send an empty message.');
-  }
-  try {
-    assertValidMessagePayload(data, mode);
-  } catch (error) {
-    if (error instanceof Error) throw new DiscordApiError(400, 50035, error.message);
-    throw error;
-  }
-}
-
 function callbackTypeName(value: unknown): InteractionResponseType {
   const mapping: Readonly<Record<number, InteractionResponseType>> = {
     4: 'message',
@@ -584,4 +583,41 @@ function boundedSizeLimit(value: number, name: string): number {
     throw new RangeError(`${name} must be a positive safe integer no greater than 64 MiB.`);
   }
   return value;
+}
+
+/** Local diagnostic extensions, not Discord wire contract fields. */
+function mutationHeaders(
+  rateLimit: RateLimitResult,
+  result: MessageMutationResult,
+): Readonly<Record<string, string>> {
+  return {
+    ...rateLimit.headers,
+    'X-DisRunner-State-Revision': String(result.stateRevision),
+    'X-DisRunner-Delivery': result.delivery.status,
+    'X-DisRunner-Delivery-Failures': String(
+      result.delivery.failed + result.delivery.transportFailed,
+    ),
+    ...(result.eventId === null ? {} : { 'X-DisRunner-Event-Id': result.eventId }),
+  };
+}
+function messageRepresentation(
+  message: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return projectMessageWire(message);
+}
+
+function readableMessage(
+  message: Readonly<Record<string, unknown>>,
+  channel: Readonly<Record<string, unknown>>,
+): boolean {
+  return (
+    isOrdinaryMessage(message) &&
+    message['channel_id'] === channel['id'] &&
+    ((channel['type'] === 0 &&
+      typeof channel['guild_id'] === 'string' &&
+      message['guild_id'] === channel['guild_id']) ||
+      (channel['type'] === 1 &&
+        channel['guild_id'] === undefined &&
+        message['guild_id'] === undefined))
+  );
 }

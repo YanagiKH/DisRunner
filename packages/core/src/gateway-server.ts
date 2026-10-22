@@ -39,6 +39,7 @@ export class LocalGatewayServer {
   readonly #identifyTimeoutMs: number;
   readonly #connections = new Map<WebSocket, ConnectionState>();
   readonly #sessionConnections = new Map<string, WebSocket>();
+  #unsubscribeBroadcast: (() => void) | undefined;
   #server: WebSocketServer | undefined;
   #address: LocalGatewayAddress | undefined;
 
@@ -88,6 +89,8 @@ export class LocalGatewayServer {
       } catch {
         // A listen failure can leave no underlying HTTP server to close.
       }
+      this.#unsubscribeBroadcast?.();
+      this.#unsubscribeBroadcast = undefined;
       this.#server = undefined;
       this.#address = undefined;
       throw error;
@@ -105,6 +108,11 @@ export class LocalGatewayServer {
     };
     try {
       this.#gateway.bindTransportEndpoint(boundAddress.url);
+      this.#unsubscribeBroadcast = this.#gateway.subscribeBroadcast((sessionId, packet) => {
+        const socket = this.#sessionConnections.get(sessionId);
+        if (socket !== undefined && socket.readyState === WebSocket.OPEN)
+          this.#send(socket, packet);
+      });
     } catch (error) {
       await this.stop();
       throw error;
@@ -113,7 +121,7 @@ export class LocalGatewayServer {
     return boundAddress;
   }
 
-  /** True only when delivered to an open socket; buffered or filtered dispatches return false. */
+  /** True when queued on an open socket, not a peer receipt; buffered/filtered packets return false. */
   public dispatch(sessionId: string, eventName: string, data: unknown): boolean {
     const packet = this.#gateway.dispatch(sessionId, eventName, data);
     if (packet === undefined) return false;
@@ -146,6 +154,8 @@ export class LocalGatewayServer {
     await new Promise<void>((resolvePromise, reject) =>
       server.close((error) => (error === undefined ? resolvePromise() : reject(error))),
     );
+    this.#unsubscribeBroadcast?.();
+    this.#unsubscribeBroadcast = undefined;
     this.#server = undefined;
     this.#address = undefined;
   }

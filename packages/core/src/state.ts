@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { types } from 'node:util';
 
 import type { DiscordResourceType, ResourceRecord, StateDiff, StateSnapshot } from './contracts.js';
 import type { VirtualClock } from './clock.js';
@@ -18,6 +19,7 @@ export interface VirtualStateOptions {
   readonly maxResourceBytes?: number;
   readonly maxStateBytes?: number;
   readonly maxHistoryBytes?: number;
+  readonly maxCommitSubscribers?: number;
 }
 
 export interface StateMutationSummary {
@@ -25,6 +27,51 @@ export interface StateMutationSummary {
   readonly atMs: number;
   readonly diff: StateDiff;
 }
+
+export interface StateCommit {
+  readonly schemaVersion: 1;
+  readonly revision: number;
+  readonly previousRevision: number;
+  readonly operation:
+    | 'create'
+    | 'update'
+    | 'delete'
+    | 'transaction'
+    | 'undo'
+    | 'redo'
+    | 'restore'
+    | 'reset'
+    | 'import';
+  readonly label: string;
+  readonly atMs: number;
+  readonly diff: StateDiff;
+}
+
+export interface RevisionedStateSnapshot {
+  readonly revision: number;
+  readonly snapshot: StateSnapshot;
+}
+
+type StateCommitListener = (commit: StateCommit) => void;
+
+interface CommitSubscription {
+  readonly listener: StateCommitListener;
+  active: boolean;
+}
+
+interface HistoryPlan {
+  readonly history: HistoryEntry[];
+  readonly position: number;
+  readonly bytes: number;
+}
+
+interface PendingCommit {
+  readonly history: HistoryPlan | undefined;
+  readonly commit: StateCommit | undefined;
+}
+
+/** Maximum objects visited while resolving then; shadowed prototype nodes are not visited. */
+const MAX_THENABLE_PROTO_DEPTH = 64;
 
 export class VirtualState {
   readonly #clock: VirtualClock;
@@ -35,6 +82,7 @@ export class VirtualState {
   readonly #maxResourceBytes: number;
   readonly #maxStateBytes: number;
   readonly #maxHistoryBytes: number;
+  readonly #maxCommitSubscribers: number;
   readonly #resourceSizes = new Map<string, number>();
   #totalResourceBytes = 0;
   #historyBytes = 0;
@@ -42,6 +90,9 @@ export class VirtualState {
   #history: HistoryEntry[] = [];
   #historyPosition = 0;
   #transactionDepth = 0;
+  #revision = 0;
+  #subscriptions: CommitSubscription[] = [];
+  #notifying = false;
 
   public constructor(
     clock: VirtualClock,
@@ -72,6 +123,10 @@ export class VirtualState {
       options.maxHistoryBytes ?? 32 * 1_048_576,
       'maxHistoryBytes',
     );
+    this.#maxCommitSubscribers = positiveSafeLimit(
+      options.maxCommitSubscribers ?? 100,
+      'maxCommitSubscribers',
+    );
     if (initial.length > this.#maxResources) {
       throw new StateCapacityError(`Initial state exceeds ${this.#maxResources} resources.`);
     }
@@ -82,6 +137,7 @@ export class VirtualState {
     resourceType: DiscordResourceType,
     data: T,
   ): T & ResourceRecord {
+    this.#assertMutationAllowed();
     const clonedData = cloneBoundedStateValue(data, this.#maxResourceBytes) as T;
     const rawId = clonedData['id'];
     if (rawId !== undefined && typeof rawId !== 'string') {
@@ -99,15 +155,14 @@ export class VirtualState {
     ) as T & ResourceRecord;
     const resourceBytes = resourceByteLength(resource);
     this.#assertStateByteCapacity(resourceBytes);
+    const diff: StateDiff = { added: [deepClone(resource)], updated: [], deleted: [] };
+    const pending = this.#prepareCommit('create', `create:${resourceType}/${id}`, diff, diff);
+    const created = deepClone(resource);
     this.#resources.set(key, resource);
     this.#resourceSizes.set(key, resourceBytes);
     this.#totalResourceBytes += resourceBytes;
-    this.#recordDiff(`create:${resourceType}/${id}`, {
-      added: [deepClone(resource)],
-      updated: [],
-      deleted: [],
-    });
-    return deepClone(resource);
+    this.#completeCommit(pending);
+    return created;
   }
 
   public get<T extends ResourceRecord = ResourceRecord>(
@@ -145,6 +200,7 @@ export class VirtualState {
     id: string,
     changes: Readonly<Record<string, unknown>>,
   ): T {
+    this.#assertMutationAllowed();
     const key = resourceKey(resourceType, id);
     const current = this.#resources.get(key);
     if (current === undefined) throw new ResourceNotFoundError(resourceType, id);
@@ -167,10 +223,7 @@ export class VirtualState {
     const currentBytes = this.#resourceSizes.get(key) ?? resourceByteLength(current);
     const updatedBytes = resourceByteLength(updated);
     this.#assertStateByteCapacity(updatedBytes - currentBytes);
-    this.#resources.set(key, updated);
-    this.#resourceSizes.set(key, updatedBytes);
-    this.#totalResourceBytes += updatedBytes - currentBytes;
-    this.#recordDiff(`update:${resourceType}/${id}`, {
+    const diff: StateDiff = {
       added: [],
       updated: [
         {
@@ -180,72 +233,99 @@ export class VirtualState {
         },
       ],
       deleted: [],
-    });
-    return deepClone(updated);
+    };
+    const pending = this.#prepareCommit('update', `update:${resourceType}/${id}`, diff, diff);
+    const result = deepClone(updated);
+    this.#resources.set(key, updated);
+    this.#resourceSizes.set(key, updatedBytes);
+    this.#totalResourceBytes += updatedBytes - currentBytes;
+    this.#completeCommit(pending);
+    return result;
   }
 
   public delete<T extends ResourceRecord = ResourceRecord>(
     resourceType: DiscordResourceType,
     id: string,
   ): T {
+    this.#assertMutationAllowed();
     const key = resourceKey(resourceType, id);
     const current = this.#resources.get(key);
     if (current === undefined) throw new ResourceNotFoundError(resourceType, id);
+    const currentBytes = this.#resourceSizes.get(key) ?? resourceByteLength(current);
+    const diff: StateDiff = { added: [], updated: [], deleted: [deepClone(current)] };
+    const pending = this.#prepareCommit('delete', `delete:${resourceType}/${id}`, diff, diff);
+    const deleted = deepClone(current) as T;
     this.#resources.delete(key);
-    this.#totalResourceBytes -= this.#resourceSizes.get(key) ?? resourceByteLength(current);
+    this.#totalResourceBytes -= currentBytes;
     this.#resourceSizes.delete(key);
-    this.#recordDiff(`delete:${resourceType}/${id}`, {
-      added: [],
-      updated: [],
-      deleted: [deepClone(current)],
-    });
-    return deepClone(current) as T;
+    this.#completeCommit(pending);
+    return deleted;
+  }
+
+  /** True while a transaction callback on this instance is running, including nested ones. */
+  public get transactionActive(): boolean {
+    return this.#transactionDepth > 0;
   }
 
   public transaction<T>(label: string, operation: () => T): T {
+    this.#assertMutationAllowed();
     const before = this.#copyResources();
     const beforeSizes = new Map(this.#resourceSizes);
     const beforeTotalBytes = this.#totalResourceBytes;
-    const historyLength = this.#history.length;
+    // History arrays are replaced, never edited in place, so keeping the reference keeps the
+    // complete entry list, including entries a later trim or redo-branch overwrite would drop.
+    const history = this.#history;
     const historyPosition = this.#historyPosition;
     const historyBytes = this.#historyBytes;
-    this.#transactionDepth += 1;
-    try {
-      const result = operation();
-      this.#transactionDepth -= 1;
-      if (this.#transactionDepth === 0 && !mapsEqual(before, this.#resources)) {
-        this.#pushHistory(label, diffMaps(before, this.#resources));
-      }
-      return result;
-    } catch (error) {
-      this.#transactionDepth -= 1;
+    const rollback = (): void => {
       this.#resources = before;
-      this.#resourceSizes.clear();
-      for (const [key, bytes] of beforeSizes) this.#resourceSizes.set(key, bytes);
-      this.#totalResourceBytes = beforeTotalBytes;
-      this.#history = this.#history.slice(0, historyLength);
+      this.#replaceResourceUsage(beforeSizes, beforeTotalBytes);
+      this.#history = history;
       this.#historyPosition = historyPosition;
       this.#historyBytes = historyBytes;
+    };
+    this.#transactionDepth += 1;
+    let result: T;
+    try {
+      result = operation();
+      if (isUnsafeTransactionResult(result)) {
+        throw new TypeError(
+          'Transaction operations must be synchronous and cannot return a thenable or Proxy.',
+        );
+      }
+    } catch (error) {
+      this.#transactionDepth -= 1;
+      rollback();
       throw error;
     }
+    this.#transactionDepth -= 1;
+    if (this.#transactionDepth > 0 || mapsEqual(before, this.#resources)) return result;
+    let pending: PendingCommit | undefined;
+    try {
+      const diff = diffMaps(before, this.#resources);
+      pending = this.#prepareCommit('transaction', label, diff, diff);
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+    this.#completeCommit(pending);
+    return result;
   }
 
   public undo(): boolean {
+    this.#assertMutationAllowed();
     if (this.#historyPosition === 0) return false;
     const entry = this.#history[this.#historyPosition - 1];
     if (entry === undefined) return false;
-    applyStateDiff(this.#resources, entry.diff, 'undo');
-    this.#recalculateResourceUsage();
-    this.#historyPosition -= 1;
+    this.#applyHistoryEntry(entry, 'undo', this.#historyPosition - 1);
     return true;
   }
 
   public redo(): boolean {
+    this.#assertMutationAllowed();
     const entry = this.#history[this.#historyPosition];
     if (entry === undefined) return false;
-    applyStateDiff(this.#resources, entry.diff, 'redo');
-    this.#recalculateResourceUsage();
-    this.#historyPosition += 1;
+    this.#applyHistoryEntry(entry, 'redo', this.#historyPosition + 1);
     return true;
   }
 
@@ -267,7 +347,35 @@ export class VirtualState {
     };
   }
 
+  /** Monotonic count of committed net data changes on this instance; starts at 0. */
+  public get revision(): number {
+    return this.#revision;
+  }
+
+  public revisionedSnapshot(): RevisionedStateSnapshot {
+    return { revision: this.#revision, snapshot: this.snapshot() };
+  }
+
+  public subscribeCommits(listener: (commit: StateCommit) => void): () => void {
+    if (typeof listener !== 'function') {
+      throw new TypeError('A commit listener must be a function.');
+    }
+    if (this.#subscriptions.length >= this.#maxCommitSubscribers) {
+      throw new StateCapacityError(
+        `State cannot exceed ${this.#maxCommitSubscribers} commit subscribers.`,
+      );
+    }
+    const subscription: CommitSubscription = { listener, active: true };
+    this.#subscriptions = [...this.#subscriptions, subscription];
+    return () => {
+      if (!subscription.active) return;
+      subscription.active = false;
+      this.#subscriptions = this.#subscriptions.filter((entry) => entry !== subscription);
+    };
+  }
+
   public restore(snapshot: StateSnapshot): void {
+    this.#assertMutationAllowed();
     if (snapshot.version !== 1)
       throw new RangeError(`Unsupported state snapshot version: ${String(snapshot.version)}`);
     if (!Array.isArray(snapshot.resources) || snapshot.resources.length > this.#maxResources) {
@@ -293,17 +401,19 @@ export class VirtualState {
       throw new StateConflictError('State snapshot hash does not match its resources.');
     }
     const diff = diffMaps(this.#resources, replacement);
+    const pending = this.#prepareCommit('restore', 'restore-snapshot', diff, diff);
     this.#resources = replacement;
     this.#replaceResourceUsage(replacementSizes, replacementBytes);
-    this.#recordDiff('restore-snapshot', diff);
+    this.#completeCommit(pending);
   }
 
   public reset(): void {
+    this.#assertMutationAllowed();
     const diff = diffMaps(this.#resources, new Map());
-    this.#resources.clear();
-    this.#resourceSizes.clear();
-    this.#totalResourceBytes = 0;
-    this.#recordDiff('reset', diff);
+    const pending = this.#prepareCommit('reset', 'reset', diff, diff);
+    this.#resources = new Map();
+    this.#replaceResourceUsage(new Map(), 0);
+    this.#completeCommit(pending);
   }
 
   public clone(): VirtualState {
@@ -314,6 +424,7 @@ export class VirtualState {
       maxResourceBytes: this.#maxResourceBytes,
       maxStateBytes: this.#maxStateBytes,
       maxHistoryBytes: this.#maxHistoryBytes,
+      maxCommitSubscribers: this.#maxCommitSubscribers,
     });
   }
 
@@ -327,6 +438,7 @@ export class VirtualState {
   }
 
   public importFixture(input: string | { readonly resources: readonly ResourceRecord[] }): void {
+    this.#assertMutationAllowed();
     if (typeof input === 'string' && Buffer.byteLength(input) > this.#maxFixtureBytes) {
       throw new StateCapacityError(`Fixture exceeds ${this.#maxFixtureBytes} bytes.`);
     }
@@ -353,9 +465,10 @@ export class VirtualState {
       replacementSizes.set(key, bytes);
     }
     const diff = diffMaps(this.#resources, replacement);
+    const pending = this.#prepareCommit('import', 'import-fixture', diff, diff);
     this.#resources = replacement;
     this.#replaceResourceUsage(replacementSizes, replacementBytes);
-    this.#recordDiff('import-fixture', diff);
+    this.#completeCommit(pending);
   }
 
   #setResource(resource: ResourceRecord, rejectDuplicates: boolean): void {
@@ -373,36 +486,113 @@ export class VirtualState {
     this.#totalResourceBytes += bytes - previousBytes;
   }
 
-  #recordDiff(label: string, diff: StateDiff): void {
-    if (this.#transactionDepth > 0 || diffIsEmpty(diff)) return;
-    this.#pushHistory(label, diff);
+  #assertMutationAllowed(): void {
+    if (this.#notifying) {
+      throw new StateConflictError('State cannot be mutated while commit listeners are running.');
+    }
+    if (this.#revision >= Number.MAX_SAFE_INTEGER) {
+      throw new StateCapacityError('State revision cannot exceed Number.MAX_SAFE_INTEGER.');
+    }
   }
 
-  #pushHistory(label: string, diff: StateDiff): void {
-    for (const removed of this.#history.slice(this.#historyPosition)) {
-      this.#historyBytes -= removed.bytes;
+  /**
+   * Computes the history change and commit for one mutation without changing any field. Inside a
+   * transaction nothing is recorded; the outermost transaction records its net change instead.
+   */
+  #prepareCommit(
+    operation: StateCommit['operation'],
+    label: string,
+    historyDiff: StateDiff | undefined,
+    commitDiff: StateDiff,
+  ): PendingCommit | undefined {
+    if (this.#transactionDepth > 0) return undefined;
+    let history: HistoryPlan | undefined;
+    if (historyDiff !== undefined && !diffIsEmpty(historyDiff)) {
+      history = this.#planHistory(label, historyDiff);
     }
-    this.#history = this.#history.slice(0, this.#historyPosition);
+    if (!diffHasNetChange(commitDiff)) return { history, commit: undefined };
+    const commit: StateCommit = {
+      schemaVersion: 1,
+      revision: this.#revision + 1,
+      previousRevision: this.#revision,
+      operation,
+      label,
+      atMs: this.#clock.now(),
+      diff: deepClone(commitDiff),
+    };
+    return { history, commit };
+  }
+
+  /** Applies a prepared commit with plain assignments, then notifies listeners. */
+  #completeCommit(pending: PendingCommit | undefined): void {
+    if (pending === undefined) return;
+    if (pending.history !== undefined) {
+      this.#history = pending.history.history;
+      this.#historyPosition = pending.history.position;
+      this.#historyBytes = pending.history.bytes;
+    }
+    if (pending.commit === undefined) return;
+    this.#revision = pending.commit.revision;
+    this.#notify(pending.commit);
+  }
+
+  #notify(commit: StateCommit): void {
+    const subscriptions = this.#subscriptions;
+    this.#notifying = true;
+    try {
+      for (const subscription of subscriptions) {
+        if (!subscription.active) continue;
+        try {
+          subscription.listener(deepClone(commit));
+        } catch {
+          // Listener failures are isolated: they cannot undo the commit or block other listeners.
+        }
+      }
+    } finally {
+      this.#notifying = false;
+    }
+  }
+
+  #applyHistoryEntry(entry: HistoryEntry, direction: 'undo' | 'redo', position: number): void {
+    const next = new Map(this.#resources);
+    applyStateDiff(next, entry.diff, direction);
+    if (next.size > this.#maxResources) {
+      throw new StateCapacityError(`State cannot exceed ${this.#maxResources} resources.`);
+    }
+    const usage = this.#measureResources(next);
+    // The stored entry can differ from the live state, for example after an undo inside a
+    // transaction, so the commit describes the resources actually present before and after.
+    const diff = diffMaps(this.#resources, next);
+    const pending = this.#prepareCommit(direction, entry.label, undefined, diff);
+    this.#resources = next;
+    this.#replaceResourceUsage(usage.sizes, usage.total);
+    this.#historyPosition = position;
+    this.#completeCommit(pending);
+  }
+
+  /** Returns the history after recording one entry, without changing the current history. */
+  #planHistory(label: string, diff: StateDiff): HistoryPlan {
+    let bytes = this.#historyBytes;
+    for (const removed of this.#history.slice(this.#historyPosition)) bytes -= removed.bytes;
+    const retained = this.#history.slice(0, this.#historyPosition);
     const cloned = deepClone(diff);
-    const bytes = Buffer.byteLength(stableStringify(cloned));
-    if (bytes > this.#maxHistoryBytes) {
+    const entryBytes = Buffer.byteLength(stableStringify(cloned));
+    if (entryBytes > this.#maxHistoryBytes) {
       // A mutation that cannot be retained is an undo barrier. Keeping older entries would
       // apply their inverse to an incompatible state and could overwrite the newer mutation.
-      this.#history = [];
-      this.#historyPosition = 0;
-      this.#historyBytes = 0;
-      return;
+      return { history: [], position: 0, bytes: 0 };
     }
-    this.#history.push({ label, atMs: this.#clock.now(), diff: cloned, bytes });
-    this.#historyBytes += bytes;
-    while (
-      this.#history.length > this.#maxHistoryEntries ||
-      this.#historyBytes > this.#maxHistoryBytes
-    ) {
-      const removed = this.#history.shift();
-      if (removed !== undefined) this.#historyBytes -= removed.bytes;
+    retained.push({ label, atMs: this.#clock.now(), diff: cloned, bytes: entryBytes });
+    bytes += entryBytes;
+    let start = 0;
+    while (retained.length - start > this.#maxHistoryEntries || bytes > this.#maxHistoryBytes) {
+      const removed = retained[start];
+      if (removed === undefined) break;
+      bytes -= removed.bytes;
+      start += 1;
     }
-    this.#historyPosition = this.#history.length;
+    const history = start === 0 ? retained : retained.slice(start);
+    return { history, position: history.length, bytes };
   }
 
   #copyResources(): Map<string, ResourceRecord> {
@@ -427,10 +617,13 @@ export class VirtualState {
     this.#totalResourceBytes = total;
   }
 
-  #recalculateResourceUsage(): void {
+  #measureResources(resources: Map<string, ResourceRecord>): {
+    readonly sizes: Map<string, number>;
+    readonly total: number;
+  } {
     const sizes = new Map<string, number>();
     let total = 0;
-    for (const [key, resource] of this.#resources) {
+    for (const [key, resource] of resources) {
       const bytes = resourceByteLength(resource);
       total += bytes;
       if (total > this.#maxStateBytes) {
@@ -438,7 +631,7 @@ export class VirtualState {
       }
       sizes.set(key, bytes);
     }
-    this.#replaceResourceUsage(sizes, total);
+    return { sizes, total };
   }
 }
 
@@ -519,6 +712,48 @@ function diffMaps(
 
 function diffIsEmpty(diff: StateDiff): boolean {
   return diff.added.length === 0 && diff.updated.length === 0 && diff.deleted.length === 0;
+}
+
+/** An update whose before and after are identical is kept in history but is not a change. */
+function diffHasNetChange(diff: StateDiff): boolean {
+  return (
+    diff.added.length > 0 ||
+    diff.deleted.length > 0 ||
+    diff.updated.some((change) => change.changedFields.length > 0)
+  );
+}
+
+/**
+ * Classifies a transaction result without running caller code: no getter, setter, `then`, or
+ * Proxy trap is invoked. A Proxy on any object the `then` lookup visits, from the result up to and
+ * including the object where the lookup stops, a native Promise result, an accessor or function
+ * `then` property, an overly deep prototype chain, and any unexpected failure while inspecting
+ * are all treated as unsafe. The lookup stops at the first object that owns a `then` data
+ * property whose value is not a function.
+ */
+function isUnsafeTransactionResult(result: unknown): boolean {
+  if (result === null || (typeof result !== 'object' && typeof result !== 'function')) {
+    return false;
+  }
+  try {
+    let current: object | null = result;
+    let depth = 0;
+    while (current !== null) {
+      depth += 1;
+      if (depth > MAX_THENABLE_PROTO_DEPTH) return true;
+      if (types.isProxy(current)) return true;
+      if (depth === 1 && types.isPromise(current)) return true;
+      const descriptor = Object.getOwnPropertyDescriptor(current, 'then');
+      if (descriptor !== undefined) {
+        if (!Object.hasOwn(descriptor, 'value')) return true;
+        return typeof descriptor.value === 'function';
+      }
+      current = Object.getPrototypeOf(current) as object | null;
+    }
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 function applyStateDiff(

@@ -30,6 +30,7 @@ describe('LocalRestEmulator', () => {
       snowflakes,
       fakeToken: 'disrunner.offline.test-only-token-x',
     });
+    state.create('user', { id: gateway.botUserId, username: 'DisRunner Bot', bot: true });
     const rateLimits = new RateLimitEngine(clock, [
       {
         id: 'message-create',
@@ -134,6 +135,7 @@ describe('LocalRestEmulator', () => {
     const random = new SeededRandom(10);
     const snowflakes = new SnowflakeGenerator(clock);
     const state = new VirtualState(clock, snowflakes);
+    state.create('guild', { id: '1000', name: 'Lab' });
     state.create('channel', { id: '2000', guild_id: '1000', name: 'bot-testing', type: 0 });
     const interactions = new InteractionEngine({
       clock,
@@ -145,6 +147,7 @@ describe('LocalRestEmulator', () => {
     interactions.respond(interaction.id, 'message', { content: 'initial' });
     const token = 'disrunner.offline.test-only-token-x';
     const gateway = new GatewayEmulator({ clock, random, snowflakes, fakeToken: token });
+    state.create('user', { id: gateway.botUserId, username: 'DisRunner Bot', bot: true });
     const rateLimits = new RateLimitEngine(clock, [
       {
         id: 'protected-user',
