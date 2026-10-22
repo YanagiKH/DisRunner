@@ -21,6 +21,7 @@ import type { InspectorTab, InteractionTrace, TraceStep } from '../types';
 interface InspectorProps {
   readonly activeTab: InspectorTab;
   readonly trace: InteractionTrace;
+  readonly emptyMessage?: string | undefined;
   readonly onSelectTab: (tab: InspectorTab) => void;
 }
 
@@ -326,7 +327,7 @@ function RisksView({ trace }: { readonly trace: InteractionTrace }) {
   );
 }
 
-export function Inspector({ activeTab, trace, onSelectTab }: InspectorProps) {
+export function Inspector({ activeTab, trace, onSelectTab, emptyMessage }: InspectorProps) {
   return (
     <section className="inspector" aria-label="Interaction inspector">
       <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
@@ -345,18 +346,24 @@ export function Inspector({ activeTab, trace, onSelectTab }: InspectorProps) {
         <div className="inspector-tab-spacer" />
         <span className="inspector-preview">Visual preview · sample panels</span>
       </div>
-      {activeTab === 'Trace' && (
-        <div className="trace-view" role="tabpanel">
-          <TraceDetails trace={trace} onOpenPayload={() => onSelectTab('Payload')} />
-          <Waterfall trace={trace} />
-          <Outcome trace={trace} />
-        </div>
+      {emptyMessage ? (
+        <p role="tabpanel">{emptyMessage}</p>
+      ) : (
+        <>
+          {activeTab === 'Trace' && (
+            <div className="trace-view" role="tabpanel">
+              <TraceDetails trace={trace} onOpenPayload={() => onSelectTab('Payload')} />
+              <Waterfall trace={trace} />
+              <Outcome trace={trace} />
+            </div>
+          )}
+          {activeTab === 'Payload' && <PayloadView trace={trace} />}
+          {activeTab === 'State Diff' && <StateDiffView />}
+          {activeTab === 'Permissions' && <PermissionsView />}
+          {activeTab === 'Rate Limits' && <RateLimitsView />}
+          {activeTab === 'Risks' && <RisksView trace={trace} />}
+        </>
       )}
-      {activeTab === 'Payload' && <PayloadView trace={trace} />}
-      {activeTab === 'State Diff' && <StateDiffView />}
-      {activeTab === 'Permissions' && <PermissionsView />}
-      {activeTab === 'Rate Limits' && <RateLimitsView />}
-      {activeTab === 'Risks' && <RisksView trace={trace} />}
     </section>
   );
 }

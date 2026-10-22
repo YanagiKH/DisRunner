@@ -73,7 +73,7 @@ describe('simulationReducer', () => {
     expect(state.interaction.outcome).toBe('Timed out');
   });
 
-  it('renders the callback returned by the real desktop runtime without fixture substitution', () => {
+  it('retains runtime callbacks as diagnostics without appending channel messages', () => {
     const state = simulationReducer(runningState(), {
       type: 'execute-runtime',
       input: '/ping',
@@ -89,10 +89,8 @@ describe('simulationReducer', () => {
         error: null,
       },
     });
-    expect((state.messages['2100'] ?? []).at(-1)).toMatchObject({
-      content: 'Actual bot response',
-      responseState: 'ephemeral',
-    });
+    expect(state.messages['2100']).toBeUndefined();
+    expect(state.interaction.details).toBe('Actual bot response');
     expect(state.interaction).toMatchObject({ interactionId: '1234567890', durationMs: 37 });
     expect(state.inspectorTab).toBe('Payload');
   });
@@ -108,10 +106,8 @@ describe('simulationReducer', () => {
       },
       error: 'Bot interaction timed out after 3000 ms.',
     });
-    expect((state.messages['2100'] ?? []).at(-1)).toMatchObject({
-      content: 'Bot interaction timed out after 3000 ms.',
-      responseState: 'timeout',
-    });
+    expect(state.messages['2100']).toBeUndefined();
+    expect(state.interaction.details).toBe('Bot interaction timed out after 3000 ms.');
     expect(state.interaction.outcome).toBe('Timed out');
   });
 });

@@ -22,9 +22,21 @@ export interface InteractionFollowup {
   readonly deleted: boolean;
 }
 
+/**
+ * Fixed provenance of an interaction (who sent it, and where). It is recorded, copied, and
+ * returned as-is; it is not a role or permission decision.
+ */
+export interface InteractionContext {
+  readonly actorId: string;
+  readonly channelId: string;
+  readonly guildId?: string;
+}
+
 export interface SimulatedInteraction {
   readonly id: string;
   readonly token: string;
+  readonly applicationId?: string;
+  readonly context?: InteractionContext;
   readonly type: string;
   readonly data: Readonly<Record<string, unknown>>;
   readonly createdAtMs: number;
@@ -39,6 +51,8 @@ export interface SimulatedInteraction {
 interface MutableInteraction {
   id: string;
   token: string;
+  applicationId?: string;
+  context?: InteractionContext;
   type: string;
   data: Readonly<Record<string, unknown>>;
   createdAtMs: number;
@@ -63,6 +77,8 @@ export interface InteractionEngineOptions {
   readonly maxPayloadBytes?: number;
   readonly maxRetainedBytesPerInteraction?: number;
   readonly maxRetainedBytes?: number;
+  /** Application every created interaction is bound to; required by the token HTTP routes. */
+  readonly applicationId?: string;
 }
 
 export class InteractionEngine {
@@ -78,6 +94,7 @@ export class InteractionEngine {
   readonly #maxPayloadBytes: number;
   readonly #maxRetainedBytesPerInteraction: number;
   readonly #maxRetainedBytes: number;
+  readonly #applicationId: string | undefined;
   #retainedBytes = 0;
 
   public constructor(options: InteractionEngineOptions) {
@@ -100,6 +117,10 @@ export class InteractionEngine {
       options.maxRetainedBytes ?? 67_108_864,
       'maxRetainedBytes',
     );
+    this.#applicationId =
+      options.applicationId === undefined
+        ? undefined
+        : requireCanonicalId(options.applicationId, 'applicationId');
   }
 
   public create(
@@ -108,8 +129,11 @@ export class InteractionEngine {
       readonly token?: string;
       readonly type?: string;
       readonly data?: Readonly<Record<string, unknown>>;
+      readonly context?: InteractionContext;
     } = {},
   ): SimulatedInteraction {
+    // The application ID always comes from the engine; same-name input or data fields are ignored.
+    const context = input.context === undefined ? undefined : copyContext(input.context);
     const data = cloneBoundedPayload(input.data ?? {}, this.#maxPayloadBytes, 'Interaction data');
     const type = boundedText(input.type ?? 'command', 'Interaction type', 64);
     const suppliedToken = input.token === undefined ? undefined : assertSyntheticToken(input.token);
@@ -127,6 +151,8 @@ export class InteractionEngine {
     const interaction: MutableInteraction = {
       id,
       token,
+      ...(this.#applicationId === undefined ? {} : { applicationId: this.#applicationId }),
+      ...(context === undefined ? {} : { context }),
       type,
       data,
       createdAtMs,
@@ -718,6 +744,39 @@ function assertDenseDataArray(value: readonly unknown[], label: string, maxLengt
   }
 }
 
+// Same rule and bound as the bootstrap profile ID validation (bootstrap-profile.ts).
+const MAX_SNOWFLAKE = 18_446_744_073_709_551_615n;
+const SNOWFLAKE_PATTERN = /^[1-9][0-9]{0,19}$/;
+
+function requireCanonicalId(value: unknown, path: string): string {
+  if (
+    typeof value !== 'string' ||
+    !SNOWFLAKE_PATTERN.test(value) ||
+    BigInt(value) > MAX_SNOWFLAKE
+  ) {
+    throw new TypeError(`${path} must be a canonical positive decimal unsigned 64-bit ID string.`);
+  }
+  return value;
+}
+
+function copyContext(value: unknown): InteractionContext {
+  if (!isPlainObject(value)) throw new TypeError('Interaction context must be a plain object.');
+  const field = (name: string): unknown => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, name);
+    if (descriptor === undefined) return undefined;
+    if (!('value' in descriptor)) {
+      throw new TypeError(`context.${name} must be a data property.`);
+    }
+    return descriptor.value as unknown;
+  };
+  const actorId = requireCanonicalId(field('actorId'), 'context.actorId');
+  const channelId = requireCanonicalId(field('channelId'), 'context.channelId');
+  const rawGuildId = field('guildId');
+  const guildId =
+    rawGuildId === undefined ? undefined : requireCanonicalId(rawGuildId, 'context.guildId');
+  return guildId === undefined ? { actorId, channelId } : { actorId, channelId, guildId };
+}
+
 function boundedText(value: string, label: string, maxBytes: number): string {
   if (value.length === 0 || Buffer.byteLength(value) > maxBytes) {
     throw new TypeError(`${label} must contain 1 to ${maxBytes} UTF-8 bytes.`);
@@ -764,6 +823,10 @@ function serializableInteraction(interaction: MutableInteraction): SimulatedInte
   return {
     id: interaction.id,
     token: interaction.token,
+    ...(interaction.applicationId === undefined
+      ? {}
+      : { applicationId: interaction.applicationId }),
+    ...(interaction.context === undefined ? {} : { context: interaction.context }),
     type: interaction.type,
     data: interaction.data,
     createdAtMs: interaction.createdAtMs,

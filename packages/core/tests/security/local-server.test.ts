@@ -21,6 +21,7 @@ describe('local REST boundary', () => {
     const random = new SeededRandom(1);
     const snowflakes = new SnowflakeGenerator(clock);
     const interactions = new InteractionEngine({
+      applicationId: '1',
       clock,
       random,
       snowflakes,

@@ -337,17 +337,7 @@ function executeRuntime(
   const input = rawInput.trim();
   if (!input) return state;
   const executionId = state.executionCount + 1;
-  const existing = state.messages[result.context.channelId] ?? [];
   const command = `/${result.command}`;
-  const commandMessage: ChatMessage = {
-    id: `runtime-cmd-${executionId}`,
-    author: result.context.actorId,
-    authorRole: 'developer',
-    content: input,
-    command,
-    time: timeFor(executionId),
-    metadata: `Real local interaction · ${result.interactionId ?? 'not dispatched'}`,
-  };
   const callbackContent = result.response?.data['content'];
   const responseType = result.response?.type;
   const callbackFlags = result.response?.data['flags'];
@@ -368,19 +358,6 @@ function executeRuntime(
     : /timed out/iu.test(content)
       ? 'timeout'
       : 'system';
-  const replyMessage: ChatMessage = {
-    id: `runtime-bot-${executionId}`,
-    author: 'TestBot',
-    authorRole: 'bot',
-    content,
-    responseState,
-    metadata: result.ok
-      ? `Signed local callback · ${ephemeral ? 'ephemeral · ' : ''}${responseType ?? 'unknown'} · ${result.durationMs}ms`
-      : `Local invocation rejected · ${result.durationMs}ms`,
-    time: timeFor(executionId),
-    parentId: commandMessage.id,
-  };
-
   const interaction: InteractionTrace = {
     command,
     user: result.context.actorId,
@@ -413,10 +390,6 @@ function executeRuntime(
   };
   return {
     ...state,
-    messages: {
-      ...state.messages,
-      [result.context.channelId]: [...existing, commandMessage, replyMessage],
-    },
     interaction,
     inspectorTab: ephemeral ? 'Payload' : 'Trace',
     executionCount: executionId,

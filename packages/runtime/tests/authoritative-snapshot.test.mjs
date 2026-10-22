@@ -4,6 +4,22 @@ import { RetainedCoreState } from '../dist/runtime-manager.js';
 
 // This contract double isolates ownership behavior; pipeline tests use actual VirtualState.
 function fixture(resources = [{ id: '1', resourceType: 'message', content: 'hello' }]) {
+  resources = resources.map((r) =>
+    r.resourceType === 'message'
+      ? {
+          visibility: 'channel',
+          flags: 0,
+          type: 0,
+          guild_id: 'g',
+          channel_id: 'c',
+          ...r,
+        }
+      : r,
+  );
+  if (!resources.some((r) => r.resourceType === 'guild' && r.id === 'g'))
+    resources.push({ id: 'g', resourceType: 'guild' });
+  if (!resources.some((r) => r.resourceType === 'channel' && r.id === 'c'))
+    resources.push({ id: 'c', resourceType: 'channel', guild_id: 'g', type: 0 });
   let revision = 7;
   let listener;
   let detached = 0;
@@ -117,7 +133,7 @@ test('legacy core exposes actual snapshot with explicit unavailable revision, no
   assert.equal(snapshot.revisioned, false);
   assert.equal(snapshot.stateRevision, null);
   f.resources.push({ id: '2', resourceType: 'message', content: 'new' });
-  assert.equal(f.owner.snapshot().totalResources, 2);
+  assert.equal(f.owner.snapshot().totalResources, 4);
 });
 
 test('sanitization is fail-closed and projection is count/byte bounded', () => {
@@ -134,7 +150,7 @@ test('sanitization is fail-closed and projection is count/byte bounded', () => {
   }));
   const snapshot = owner.snapshot();
   assert.equal(snapshot.resources.length, 1000);
-  assert.equal(snapshot.totalResources, 1001);
+  assert.equal(snapshot.totalResources, 1003);
   assert.equal(snapshot.truncated, true);
   assert.equal(JSON.stringify(snapshot).includes('secret'), false);
   const unavailable = new RetainedCoreState('run', f.source, f.clock, () => {
@@ -219,6 +235,17 @@ test('nested display fields cannot smuggle records in place of primitives', () =
     },
   ]);
   assert.deepEqual(f.owner.snapshot().resources, [
-    { id: 'm', resourceType: 'message', author: { id: 'u' } },
+    {
+      id: 'm',
+      resourceType: 'message',
+      guild_id: 'g',
+      channel_id: 'c',
+      visibility: 'channel',
+      type: 0,
+      flags: 0,
+      author: { id: 'u' },
+    },
+    { id: 'g', resourceType: 'guild' },
+    { id: 'c', resourceType: 'channel', guild_id: 'g', type: 0 },
   ]);
 });

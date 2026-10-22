@@ -135,24 +135,11 @@ export class DesktopRuntimeManager {
     );
   }
   public contexts(): InvocationContext[] {
-    const resources = this.#configuration?.resources ?? [];
-    return resources
-      .filter((r) => r['resourceType'] === 'user')
-      .flatMap((user) =>
-        resources
-          .filter(
-            (r) =>
-              r['resourceType'] === 'channel' &&
-              r['type'] === 0 &&
-              resources.some((g) => g['resourceType'] === 'guild' && g['id'] === r['guild_id']),
-          )
-          .map((channel) => ({
-            actorId: String(user['id']),
-            guildId: String(channel['guild_id']),
-            channelId: String(channel['id']),
-          })),
-      );
+    return this.#coreOwner !== null
+      ? this.#coreOwner.contexts()
+      : contextsFromResources(this.#configuration?.resources ?? []);
   }
+
   public validateContext(context: InvocationContext): InvocationContext {
     if (
       context === null ||
@@ -173,7 +160,7 @@ export class DesktopRuntimeManager {
     ) {
       throw new SessionError(
         'invalid',
-        'Invocation context must identify an existing fixture user, guild and guild text channel.',
+        'Invocation context must identify an existing user, guild and supported guild text channel.',
       );
     }
     return { actorId: context.actorId, guildId: context.guildId, channelId: context.channelId };
@@ -374,6 +361,7 @@ export class DesktopRuntimeManager {
         this.#publish(this.#state);
       });
       const interactions = new core.InteractionEngine({
+        applicationId,
         clock,
         random,
         snowflakes,
@@ -700,14 +688,19 @@ export class DesktopRuntimeManager {
       signal.throwIfAborted();
       this.assertLive();
       const selectedContext = context === undefined ? undefined : this.validateContext(context);
-      const actor = this.#configuration?.resources.find(
-        (r) => r['resourceType'] === 'user' && r['id'] === selectedContext?.actorId,
-      );
+      const actor =
+        selectedContext === undefined ? undefined : this.#coreOwner?.actor(selectedContext.actorId);
+      if (selectedContext !== undefined && actor === undefined)
+        throw new SessionError(
+          'invalid',
+          'Invocation actor is unavailable in the current live state.',
+        );
       const actorUser = Object.fromEntries(
         Object.entries(actor ?? {}).filter(([key]) => key !== 'resourceType'),
       );
       const argumentText = normalized.slice(commandToken.length).trim();
       const created = this.#interactions.create({
+        ...(selectedContext === undefined ? {} : { context: selectedContext }),
         type: 'command',
         data: {
           name: commandName,
@@ -764,6 +757,7 @@ export class DesktopRuntimeManager {
       );
       signal.throwIfAborted();
       this.assertLive();
+      if (selectedContext !== undefined) this.validateContext(selectedContext);
       const normalizedCallback = normalizeInteractionCallback(callback);
       const result: RuntimeInvocationResult = {
         ok: true,
@@ -1373,6 +1367,24 @@ export class RetainedCoreState {
       }
     });
   }
+  // Authorization reads the retained store, never the bounded renderer projection.
+  #resources(): readonly Record<string, unknown>[] {
+    try {
+      const raw = this.#source?.snapshot();
+      return isRecord(raw) && Array.isArray(raw['resources'])
+        ? raw['resources'].filter(isRecord)
+        : [];
+    } catch {
+      return [];
+    }
+  }
+  public contexts(): InvocationContext[] {
+    return contextsFromResources(this.#resources());
+  }
+  public actor(id: string): Readonly<Record<string, unknown>> | undefined {
+    const actor = this.#resources().find((r) => r['resourceType'] === 'user' && r['id'] === id);
+    return actor === undefined ? undefined : structuredClone(actor);
+  }
   public snapshot(): RuntimeCoreSnapshot | null {
     const source = this.#source;
     const clock = this.#clock;
@@ -1394,6 +1406,12 @@ export class RetainedCoreState {
       const resources: RuntimeResourceView[] = [];
       let bytes = 2;
       for (const resource of raw['resources'].slice(0, 1_000)) {
+        if (
+          isRecord(resource) &&
+          resource['resourceType'] === 'message' &&
+          !isPublicOrdinaryMessage(resource, raw['resources'])
+        )
+          continue;
         const view = projectResourceView(resource);
         if (view === null) continue;
         const sanitized = this.sanitize(view);
@@ -1453,6 +1471,8 @@ function projectResourceView(value: unknown): RuntimeResourceView | null {
   if (type === 'user') copyAuthorFields(value, result);
   if (type === 'channel' && Number.isSafeInteger(value['type'])) result['type'] = value['type'];
   if (type === 'message') {
+    result['visibility'] = 'channel';
+    result['type'] = 0;
     if (Number.isSafeInteger(value['flags'])) result['flags'] = value['flags'];
     if (typeof value['edited_timestamp'] === 'string' || value['edited_timestamp'] === null)
       result['edited_timestamp'] = value['edited_timestamp'];
@@ -1470,4 +1490,55 @@ function copyAuthorFields(source: Record<string, unknown>, target: Record<string
   if (typeof source['global_name'] === 'string' || source['global_name'] === null)
     target['global_name'] = source['global_name'];
   if (typeof source['bot'] === 'boolean') target['bot'] = source['bot'];
+}
+
+function contextsFromResources(
+  resources: readonly Readonly<Record<string, unknown>>[],
+): InvocationContext[] {
+  const guilds = new Set(
+    resources.filter((r) => r['resourceType'] === 'guild').map((r) => r['id']),
+  );
+  const channels = resources.filter(
+    (r) =>
+      r['resourceType'] === 'channel' &&
+      r['type'] === 0 &&
+      typeof r['id'] === 'string' &&
+      typeof r['guild_id'] === 'string' &&
+      guilds.has(r['guild_id']),
+  );
+  return resources
+    .filter((r) => r['resourceType'] === 'user' && typeof r['id'] === 'string')
+    .flatMap((user) =>
+      channels.map((channel) => ({
+        actorId: String(user['id']),
+        guildId: String(channel['guild_id']),
+        channelId: String(channel['id']),
+      })),
+    );
+}
+
+function isPublicOrdinaryMessage(
+  message: Record<string, unknown>,
+  resources: readonly unknown[],
+): boolean {
+  if (
+    message['visibility'] !== 'channel' ||
+    message['type'] !== 0 ||
+    typeof message['flags'] !== 'number' ||
+    !Number.isSafeInteger(message['flags']) ||
+    ![0, 4, 4096, 4100].includes(message['flags'])
+  )
+    return false;
+  const channel = resources.find(
+    (r) => isRecord(r) && r['resourceType'] === 'channel' && r['id'] === message['channel_id'],
+  );
+  return (
+    isRecord(channel) &&
+    channel['type'] === 0 &&
+    typeof channel['guild_id'] === 'string' &&
+    channel['guild_id'] === message['guild_id'] &&
+    resources.some(
+      (r) => isRecord(r) && r['resourceType'] === 'guild' && r['id'] === channel['guild_id'],
+    )
+  );
 }

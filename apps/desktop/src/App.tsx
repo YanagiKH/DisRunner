@@ -18,6 +18,7 @@ import { TopBar } from './components/TopBar';
 import { WorkspaceRail } from './components/WorkspaceRail';
 import { FeatureSurface } from './features/FeatureSurface';
 import { createInitialState, simulationReducer } from './state/simulation';
+import { selectLiveMessages } from './state/live-messages';
 import type { Channel, Guild, Surface } from './types';
 import {
   confirmsCleanup,
@@ -60,6 +61,11 @@ export default function App() {
   const desktop = desktopBridge !== undefined;
   const [state, dispatch] = useReducer(simulationReducer, createInitialState(!desktop));
   const [actorId, setActorId] = useState('');
+  const [diagnosticIdentity, setDiagnosticIdentity] = useState<{
+    sessionId: string;
+    runId: string;
+    context: DisRunnerInvocationContext;
+  } | null>(null);
   const [invocationError, setInvocationError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [shutdownError, setShutdownError] = useState<string | null>(null);
@@ -217,6 +223,21 @@ export default function App() {
     runtimeState.contexts.find((context) => context.channelId === state.channelId) ??
     runtimeState.contexts.find((context) => context.actorId === actorId) ??
     runtimeState.contexts[0];
+  const selectedRuntimeContext = useRef(runtimeContext);
+  useLayoutEffect(() => {
+    selectedRuntimeContext.current = runtimeContext;
+  }, [runtimeContext]);
+  const contextEpoch = useRef(0);
+  useLayoutEffect(() => {
+    contextEpoch.current += 1;
+    setDiagnosticIdentity(null);
+  }, [
+    runtimeContext?.actorId,
+    runtimeContext?.guildId,
+    runtimeContext?.channelId,
+    runtimeState.sessionId,
+    runtimeState.runId,
+  ]);
   const canInvoke =
     runtimeState.phase === 'running' &&
     !runtimeState.disposed &&
@@ -309,7 +330,17 @@ export default function App() {
     },
     [observeStartupIdentity],
   );
-  const messages = state.messages[channel.id] ?? [];
+  const liveMessages = selectLiveMessages(runtimeState, resyncing ? undefined : runtimeContext);
+  const messages = desktop ? liveMessages.messages : (state.messages[channel.id] ?? []);
+  const diagnosticMatches =
+    !desktop ||
+    (diagnosticIdentity?.sessionId === runtimeState.sessionId &&
+      diagnosticIdentity.runId === runtimeState.runId &&
+      runtimeState.phase === 'running' &&
+      !resyncing &&
+      diagnosticIdentity.context.actorId === runtimeContext?.actorId &&
+      diagnosticIdentity.context.guildId === runtimeContext?.guildId &&
+      diagnosticIdentity.context.channelId === runtimeContext?.channelId);
   const detailMode = state.surface !== 'simulator';
 
   useEffect(() => {
@@ -637,11 +668,18 @@ export default function App() {
       };
       setInvocationError(null);
       const epoch = responseEpoch.current;
+      const sessionId = runtimeState.sessionId;
+      const submittedContextEpoch = contextEpoch.current;
       void desktopBridge
         .invokeCommand(request)
         .then((result) => {
           if (
             epoch !== responseEpoch.current ||
+            submittedContextEpoch !== contextEpoch.current ||
+            selectedRuntimeContext.current?.actorId !== request.context.actorId ||
+            selectedRuntimeContext.current?.guildId !== request.context.guildId ||
+            selectedRuntimeContext.current?.channelId !== request.context.channelId ||
+            latestRuntime.current.sessionId !== sessionId ||
             latestRuntime.current.runId !== request.runId ||
             latestRuntime.current.phase !== 'running'
           )
@@ -654,15 +692,22 @@ export default function App() {
             result.context.channelId !== request.context.channelId
           )
             throw new Error('Runtime response identity does not match the submitted invocation.');
+          setDiagnosticIdentity({ sessionId, runId: request.runId, context: request.context });
           dispatch({ type: 'execute-runtime', input, result });
         })
         .catch((error: unknown) => {
           if (
             epoch !== responseEpoch.current ||
+            submittedContextEpoch !== contextEpoch.current ||
+            selectedRuntimeContext.current?.actorId !== request.context.actorId ||
+            selectedRuntimeContext.current?.guildId !== request.context.guildId ||
+            selectedRuntimeContext.current?.channelId !== request.context.channelId ||
+            latestRuntime.current.sessionId !== sessionId ||
             latestRuntime.current.runId !== request.runId ||
             latestRuntime.current.phase !== 'running'
           )
             return;
+          setDiagnosticIdentity({ sessionId, runId: request.runId, context: request.context });
           dispatch({
             type: 'runtime-failed',
             request,
@@ -776,7 +821,16 @@ export default function App() {
         {desktop && (
           <section className="runtime-context" aria-label="Runtime invocation context">
             <p className="runtime-context-note">
-              Real project runtime · preview panels are sample data
+              Real project runtime · channel messages are read-only retained state · other preview
+              panels are sample data
+            </p>
+            <p role="status" aria-label="Live message feed status">
+              {liveMessages.status === 'unavailable'
+                ? 'Live messages unavailable. No retained message state is confirmed for this context.'
+                : liveMessages.status === 'truncated'
+                  ? 'Live messages · truncated retained snapshot. Missing messages are not evidence of deletion.'
+                  : 'Live messages · retained snapshot. Missing messages are not evidence of deletion.'}{' '}
+              Interaction callbacks remain diagnostic evidence, not channel messages.
             </p>
             <label className="runtime-actor">
               <span>Actor</span>
@@ -790,7 +844,11 @@ export default function App() {
                 {[
                   ...new Set(
                     runtimeState.contexts
-                      .filter((context) => context.channelId === runtimeContext?.channelId)
+                      .filter(
+                        (context) =>
+                          context.guildId === runtimeContext?.guildId &&
+                          context.channelId === runtimeContext?.channelId,
+                      )
                       .map((context) => context.actorId),
                   ),
                 ].map((id) => (
@@ -865,6 +923,11 @@ export default function App() {
                   activeTab={state.inspectorTab}
                   onSelectTab={(tab) => dispatch({ type: 'select-inspector-tab', tab })}
                   trace={state.interaction}
+                  emptyMessage={
+                    desktop && !diagnosticMatches
+                      ? 'No invocation diagnostics for this context.'
+                      : undefined
+                  }
                 />
               </div>
             </div>
