@@ -1,6 +1,8 @@
 import { open, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
+import type { OrdinaryMessagePermissionProfile } from '@disrunner/core';
+
 import type { ProjectSummary } from './contracts.js';
 
 const CONFIG_NAME = 'discord-simulator.config.json';
@@ -19,6 +21,7 @@ interface ResolvedAdapter {
 }
 
 interface ResolvedProfile {
+  readonly ordinaryMessagePermissions: OrdinaryMessagePermissionProfile;
   readonly mode: 'strict' | 'lenient';
   readonly seed: number;
   readonly intents: readonly string[];
@@ -27,6 +30,7 @@ interface ResolvedProfile {
 }
 
 export interface ResolvedProjectConfiguration {
+  readonly botUserId?: string;
   readonly summary: ProjectSummary;
   readonly environment: Readonly<Record<string, string>>;
   readonly adapter: ResolvedAdapter;
@@ -137,7 +141,19 @@ export async function loadProjectConfiguration(
   }
 
   const profileRaw = requireRecord(config['profile'], 'profile');
-  assertKeys(profileRaw, ['mode', 'seed', 'intents', 'networkPolicy', 'hotReload'], 'profile');
+  assertKeys(
+    profileRaw,
+    ['mode', 'seed', 'intents', 'networkPolicy', 'hotReload', 'ordinaryMessagePermissions'],
+    'profile',
+  );
+  const ordinaryMessagePermissions =
+    profileRaw['ordinaryMessagePermissions'] === undefined
+      ? 'legacy-unenforced'
+      : requireEnum(
+          profileRaw['ordinaryMessagePermissions'],
+          ['legacy-unenforced', 'guild-text-own-messages-v1'] as const,
+          'profile.ordinaryMessagePermissions',
+        );
   const mode = requireEnum(profileRaw['mode'], ['strict', 'lenient'] as const, 'profile.mode');
   const seed = profileRaw['seed'];
   if (typeof seed !== 'number' || !Number.isInteger(seed) || seed < 0 || seed > 0xffff_ffff) {
@@ -152,8 +168,13 @@ export async function loadProjectConfiguration(
   const hotReload = profileRaw['hotReload'] ?? false;
   if (typeof hotReload !== 'boolean') throw new TypeError('profile.hotReload must be a boolean.');
 
-  const resources = await loadFixtures(root, config['fixtures']);
+  const resources = await loadFixtures(root, config['fixtures'], ordinaryMessagePermissions);
+  const botUserId =
+    ordinaryMessagePermissions === 'guild-text-own-messages-v1'
+      ? (resources.at(-1)?.['id'] as string)
+      : undefined;
   return {
+    ...(botUserId === undefined ? {} : { botUserId }),
     summary: {
       root,
       configPath,
@@ -168,7 +189,14 @@ export async function loadProjectConfiguration(
     },
     environment,
     adapter,
-    profile: { mode, seed, intents, networkPolicy: 'offline', hotReload },
+    profile: {
+      mode,
+      seed,
+      intents,
+      networkPolicy: 'offline',
+      hotReload,
+      ordinaryMessagePermissions,
+    },
     resources,
   };
 }
@@ -176,12 +204,18 @@ export async function loadProjectConfiguration(
 async function loadFixtures(
   root: string,
   input: unknown,
+  profile: OrdinaryMessagePermissionProfile,
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
-  if (input === undefined) return [];
+  const strict = profile === 'guild-text-own-messages-v1';
+  if (input === undefined && !strict) return [];
   const fixtures = requireRecord(input, 'fixtures');
-  assertKeys(fixtures, ['guild', 'user'], 'fixtures');
+  assertKeys(fixtures, ['guild', 'user', 'bot'], 'fixtures');
+  if (strict && fixtures['bot'] === undefined)
+    throw new TypeError('fixtures.bot is required for guild-text-own-messages-v1.');
+  if (!strict && fixtures['bot'] !== undefined)
+    throw new TypeError('fixtures.bot requires guild-text-own-messages-v1.');
   const resources: Readonly<Record<string, unknown>>[] = [];
-  for (const kind of ['guild', 'user'] as const) {
+  for (const kind of ['guild', 'user', 'bot'] as const) {
     const configuredPath = fixtures[kind];
     if (configuredPath === undefined) continue;
     const fixturePath = await canonicalWorkspaceFile(
@@ -194,22 +228,66 @@ async function loadFixtures(
       `fixtures.${kind}`,
     );
     if (fixture['version'] !== 1) throw new TypeError(`${kind} fixture version must be 1.`);
-    if (kind === 'user') {
-      resources.push(toResource(requireRecord(fixture['user'], 'user fixture user'), 'user'));
+    if (kind === 'user' || kind === 'bot') {
+      const user = toResource(requireRecord(fixture['user'], `${kind} fixture user`), 'user');
+      if (kind === 'bot') {
+        const id = user['id'];
+        if (
+          typeof id !== 'string' ||
+          !/^[1-9][0-9]{0,19}$/.test(id) ||
+          BigInt(id) > 18_446_744_073_709_551_615n
+        )
+          throw new TypeError(
+            'bot fixture user.id must be a canonical positive decimal unsigned 64-bit string.',
+          );
+        if (user['bot'] !== true) throw new TypeError('bot fixture user.bot must be true.');
+      }
+      resources.push(user);
       continue;
     }
     const guild = requireRecord(fixture['guild'], 'guild fixture guild');
-    const { roles, channels, ...guildFields } = guild;
+    const { roles, channels, ...legacyFields } = guild;
+    const { members, ...strictFields } = legacyFields;
+    const guildFields = strict ? strictFields : legacyFields;
     const guildResource = toResource(guildFields, 'guild');
     resources.push(guildResource);
     for (const role of requireOptionalRecordArray(roles, 'guild fixture roles')) {
-      resources.push(toResource({ guild_id: guildResource['id'], ...role }, 'role'));
+      resources.push(toResource(nestedResource(role, guildResource['id'], strict, 'role'), 'role'));
     }
     for (const channel of requireOptionalRecordArray(channels, 'guild fixture channels')) {
-      resources.push(toResource({ guild_id: guildResource['id'], ...channel }, 'channel'));
+      resources.push(
+        toResource(nestedResource(channel, guildResource['id'], strict, 'channel'), 'channel'),
+      );
+    }
+    if (strict) {
+      for (const member of requireOptionalRecordArray(members, 'guild fixture members')) {
+        resources.push(
+          toResource(nestedResource(member, guildResource['id'], true, 'member'), 'member'),
+        );
+      }
+    }
+  }
+  if (strict) {
+    const keys = new Set<string>();
+    for (const resource of resources) {
+      const key = JSON.stringify([resource['resourceType'], resource['id']]);
+      if (keys.has(key)) throw new TypeError('Duplicate fixture resource key (resourceType, id).');
+      keys.add(key);
     }
   }
   return resources;
+}
+
+function nestedResource(
+  value: Readonly<Record<string, unknown>>,
+  guildId: unknown,
+  strict: boolean,
+  kind: string,
+): Readonly<Record<string, unknown>> {
+  if (strict && Object.hasOwn(value, 'guild_id') && value['guild_id'] !== guildId) {
+    throw new TypeError(`guild fixture ${kind}.guild_id must match its parent guild id.`);
+  }
+  return { guild_id: guildId, ...value };
 }
 
 function toResource(

@@ -21,6 +21,40 @@
     "profile": { "$ref": "#/$defs/profile" },
     "fixtures": { "$ref": "#/$defs/fixtures" }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "profile": {
+            "required": ["ordinaryMessagePermissions"],
+            "properties": {
+              "ordinaryMessagePermissions": {
+                "const": "guild-text-own-messages-v1"
+              }
+            }
+          }
+        },
+        "required": ["profile"]
+      },
+      "then": {
+        "required": ["fixtures"],
+        "properties": {
+          "fixtures": {
+            "required": ["bot"]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "fixtures": {
+            "not": {
+              "required": ["bot"]
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "relativePath": {
       "type": "string",
@@ -72,7 +106,12 @@
           "default": []
         },
         "networkPolicy": { "const": "offline" },
-        "hotReload": { "type": "boolean", "default": false }
+        "hotReload": { "type": "boolean", "default": false },
+        "ordinaryMessagePermissions": {
+          "enum": ["legacy-unenforced", "guild-text-own-messages-v1"],
+          "default": "legacy-unenforced",
+          "description": "Explicit ordinary guild-text own-message permission profile; independent of payload mode."
+        }
       }
     },
     "fixtures": {
@@ -80,7 +119,8 @@
       "additionalProperties": false,
       "properties": {
         "guild": { "$ref": "#/$defs/relativePath" },
-        "user": { "$ref": "#/$defs/relativePath" }
+        "user": { "$ref": "#/$defs/relativePath" },
+        "bot": { "$ref": "#/$defs/relativePath" }
       }
     }
   }

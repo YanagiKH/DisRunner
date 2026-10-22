@@ -6,7 +6,7 @@ All notable changes to DisRunner are documented here. The format follows [Keep a
 
 ### Added
 
-- Add an explicit core-only ordinary guild-text message permission profile backed by live state, with own-message mutation and revocation checks. Legacy behavior remains the default; DM, runtime/Desktop activation and full Discord permission parity are not claimed. See [the profile contract](docs/ordinary-message-permissions.md).
+- Add an explicit ordinary guild-text message permission profile backed by live state, with own-message mutation and revocation checks. The core API and shared runtime support opt-in; project configuration pairs the enforcing profile with a version-1 bot fixture and explicit guild membership. CLI `bot-test` and Desktop share that configuration. Legacy behavior remains the default; DM authorization, viewer-filtered Desktop state and full Discord/SDK permission parity are not claimed. See [the profile contract](docs/ordinary-message-permissions.md).
 
 ### Fixed
 

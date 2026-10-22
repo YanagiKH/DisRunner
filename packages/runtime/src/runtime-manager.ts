@@ -137,7 +137,7 @@ export class DesktopRuntimeManager {
   public contexts(): InvocationContext[] {
     return this.#coreOwner !== null
       ? this.#coreOwner.contexts()
-      : contextsFromResources(this.#configuration?.resources ?? []);
+      : contextsFromResources(this.#configuration?.resources ?? [], this.#configuration?.botUserId);
   }
 
   public validateContext(context: InvocationContext): InvocationContext {
@@ -347,14 +347,33 @@ export class DesktopRuntimeManager {
         workerId: configuration.profile.seed & 31,
         processId: (configuration.profile.seed >>> 5) & 31,
       });
-      const applicationId = snowflakes.generate();
-      const botUserId = snowflakes.generate();
-      const ownerId = snowflakes.generate();
+      const reservedUserIds = new Set(
+        configuration.resources
+          .filter((resource) => resource['resourceType'] === 'user')
+          .map((resource) => resource['id']),
+      );
+      const nextIdentity = (): string => {
+        let id = snowflakes.generate();
+        while (reservedUserIds.has(id)) id = snowflakes.generate();
+        reservedUserIds.add(id);
+        return id;
+      };
+      const applicationId =
+        configuration.botUserId === undefined ? snowflakes.generate() : nextIdentity();
+      const botUserId = configuration.botUserId ?? snowflakes.generate();
+      const ownerId =
+        configuration.botUserId === undefined ? snowflakes.generate() : nextIdentity();
       const trace = new core.TraceCollector({ clock, random });
       const risks = new core.RiskCollector(clock);
       const state = new core.VirtualState(clock, snowflakes, configuration.resources);
       const runId = options.runId ?? randomUUID();
-      const owner = new RetainedCoreState(runId, state, clock, this.#sanitizeForExport);
+      const owner = new RetainedCoreState(
+        runId,
+        state,
+        clock,
+        this.#sanitizeForExport,
+        configuration.botUserId,
+      );
       this.#coreOwner = owner;
       owner.subscribe(() => {
         if (generation !== this.#generation || this.#expectedStop || this.#coreOwner !== owner)
@@ -422,6 +441,7 @@ export class DesktopRuntimeManager {
       ]);
       const rest = new core.LocalRestEmulator({
         state,
+        ordinaryMessagePermissions: configuration.profile.ordinaryMessagePermissions,
         messageDomain: { runId, clockDomain: 'realtime' },
         interactions,
         gateway,
@@ -1373,6 +1393,7 @@ export class RetainedCoreState {
     source: unknown,
     clock: unknown,
     readonly sanitize: (value: unknown) => unknown,
+    readonly excludedActorId?: string,
   ) {
     if (
       !isRecord(source) ||
@@ -1415,7 +1436,7 @@ export class RetainedCoreState {
     }
   }
   public contexts(): InvocationContext[] {
-    return contextsFromResources(this.#resources());
+    return contextsFromResources(this.#resources(), this.excludedActorId);
   }
   public actor(id: string): Readonly<Record<string, unknown>> | undefined {
     const actor = this.#resources().find((r) => r['resourceType'] === 'user' && r['id'] === id);
@@ -1531,6 +1552,7 @@ function copyAuthorFields(source: Record<string, unknown>, target: Record<string
 
 function contextsFromResources(
   resources: readonly Readonly<Record<string, unknown>>[],
+  excludedActorId?: string,
 ): InvocationContext[] {
   const guilds = new Set(
     resources.filter((r) => r['resourceType'] === 'guild').map((r) => r['id']),
@@ -1544,7 +1566,10 @@ function contextsFromResources(
       guilds.has(r['guild_id']),
   );
   return resources
-    .filter((r) => r['resourceType'] === 'user' && typeof r['id'] === 'string')
+    .filter(
+      (r) =>
+        r['resourceType'] === 'user' && typeof r['id'] === 'string' && r['id'] !== excludedActorId,
+    )
     .flatMap((user) =>
       channels.map((channel) => ({
         actorId: String(user['id']),

@@ -11,6 +11,13 @@ DisRunner v0.1 is a Preview testing foundation, not Discord and not proof that p
 - Guild Editor/Scenario Lab/Settings changes and Risk Center exports are not persisted.
 - Desktop interactions do not cover context commands, autocomplete, components, modals, real follow-up observation, or a controllable 15-minute token clock.
 
+## Ordinary message permission boundary
+
+- `profile.ordinaryMessagePermissions: "guild-text-own-messages-v1"` is a shared-runtime opt-in paired with an explicit bot fixture. The default is `legacy-unenforced`; no membership or permission grants are generated. See [configuration](project-configuration.md#ordinary-message-permission-opt-in).
+- Enforcement covers ordinary guild-text reads and own-message mutations only. DMs remain unenforced; threads, moderator mutation parity, richer composition permissions and Gateway viewer filtering are outside this profile. Interaction-token routes retain their existing authorization.
+- Desktop channel/message projections are diagnostic state, not a guarantee of what a selected viewer or bot may see. Role/member resources and raw permission context are not exposed in renderer snapshots. No role editor, permission toggle, SDK certification or full GUI permission support is added.
+- The configured bot ID and `bot: true` are authoritative across runtime protocol surfaces; usernames, avatars and other presentation fields can remain synthetic.
+
 ## Protocol and service drift
 
 - Discord can change payloads, limits, errors, API versions, and rollout behavior independently.

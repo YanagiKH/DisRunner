@@ -116,6 +116,8 @@ Electron ──> validated raw-webhook project ──> signed request + HMAC-aut
 
 The core contains additional REST, Gateway, permission, intent, and rate-limit primitives. In v0.1 they are primarily exercised directly by core/CLI tests; their presence does not mean every desktop or imported-bot path is wired end to end.
 
+The shared runtime also supports an explicit [ordinary-message permission opt-in](docs/project-configuration.md#ordinary-message-permission-opt-in) for CLI `bot-test` and Desktop projects. It requires a separate bot fixture and explicit guild membership; existing projects stay `legacy-unenforced`. This covers ordinary guild-text reads and own-message mutations, not full SDK permissions or viewer-filtered Desktop state.
+
 ## Limits
 
 - Discord can change independently of this project.

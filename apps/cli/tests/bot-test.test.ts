@@ -1098,3 +1098,112 @@ describe.sequential(
     }, 10000);
   },
 );
+
+describe('shared-config ordinary permission consumer', () => {
+  for (const strict of [true, false]) {
+    it(`real bot-test child observes ${strict ? 'strict 403' : 'legacy 200'} without changing human actor`, async () => {
+      const projectPath = await project();
+      const configPath = join(projectPath, 'discord-simulator.config.json');
+      const config = JSON.parse(await readFile(configPath, 'utf8')) as {
+        profile: Record<string, unknown>;
+        fixtures: Record<string, string>;
+      };
+      if (strict) {
+        config.profile['ordinaryMessagePermissions'] = 'guild-text-own-messages-v1';
+        config.fixtures['bot'] = 'bot.json';
+        await writeFile(
+          join(projectPath, 'bot.json'),
+          JSON.stringify({
+            version: 1,
+            user: { id: '5000', bot: true },
+          }),
+        );
+      }
+      await writeFile(configPath, JSON.stringify(config));
+      await writeFile(
+        join(projectPath, 'guild.json'),
+        JSON.stringify({
+          version: 1,
+          guild: {
+            id: '1000',
+            owner_id: '9000',
+            roles: [
+              { id: '1000', permissions: '0' },
+              { id: '1100', permissions: '0' },
+            ],
+            channels: [{ id: '2000', type: 0, permission_overwrites: [] }],
+            members: [{ id: '5100', user_id: '5000', roles: ['1100'] }],
+          },
+        }),
+      );
+      await writeFile(
+        join(projectPath, 'user.json'),
+        JSON.stringify({
+          version: 1,
+          user: { id: '3000', username: 'Human', bot: false },
+        }),
+      );
+      // Instrument only the private copy, preserving signature and peer-auth gates.
+      const serverPath = join(projectPath, 'server.mjs');
+      let server = await readFile(serverPath, 'utf8');
+      const anchor = '      const content =';
+      expect(server.split(anchor)).toHaveLength(2);
+      server = server.replace("request.on('end', () => {", "request.on('end', async () => {");
+      server = server.replace(
+        anchor,
+        `      let permissionObservation;
+      if (!ping) {
+        const rest = await fetch('http://127.0.0.1:' + process.env.DISRUNNER_REST_PORT + '/api/v10/channels/2000/messages', {
+          method: 'POST',
+          headers: { authorization: 'Bot ' + process.env.DISRUNNER_FAKE_TOKEN, 'content-type': 'application/json' },
+          body: JSON.stringify({ content: 'consumer ordinary message' }),
+        });
+        const payload = await rest.json();
+        permissionObservation = JSON.stringify({
+          status: rest.status,
+          result: rest.status === 403 ? payload : { content: payload.content, bot: payload.author?.bot },
+          actorId: interaction.member?.user?.id,
+          hasInventedRoles: Object.hasOwn(interaction.member ?? {}, 'roles'),
+        });
+      }
+      const content = permissionObservation ? permissionObservation :`,
+      );
+      await writeFile(serverPath, server);
+      const expected = JSON.stringify({
+        status: strict ? 403 : 200,
+        result: strict
+          ? { code: 50013, message: 'Missing Permissions' }
+          : { content: 'consumer ordinary message', bot: true },
+        actorId: '3000',
+        hasInventedRoles: false,
+      });
+      const casePath = await caseFile(projectPath, (value) => {
+        value['steps'] = [
+          {
+            requestId: 'permissions-1',
+            input: '/ping',
+            expect: { responseType: 'message', content: expected },
+          },
+        ];
+      });
+      const observed = observation();
+      const result = await runBotTest(
+        { casePath, projectDirectory: projectPath, timeoutMs: 5000 },
+        { createSession: observed.factory },
+      );
+      await assertCleanup(observed, projectPath);
+      expect(result.exitCode).toBe(0);
+      expect(result.report.status).toBe('passed');
+      expect(result.report.context).toEqual(context);
+      expect(result.report.assertions[0]?.actual).toEqual({
+        type: 'message',
+        data: { content: expected },
+      });
+      expect((await traceFile(projectPath)).find((row) => row.event === 'command')).toMatchObject({
+        actorId: '3000',
+        actorName: 'Human',
+        hasInventedRoles: false,
+      });
+    }, 10000);
+  }
+});
