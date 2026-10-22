@@ -4,6 +4,10 @@ All notable changes to DisRunner are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- Add an explicit core-only ordinary guild-text message permission profile backed by live state, with own-message mutation and revocation checks. Legacy behavior remains the default; DM, runtime/Desktop activation and full Discord permission parity are not claimed. See [the profile contract](docs/ordinary-message-permissions.md).
+
 ### Fixed
 
 - Reject permission expectation mismatches and unasserted scheduled operation failures instead of reporting false success in model scenarios.
