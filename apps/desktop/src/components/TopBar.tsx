@@ -13,13 +13,16 @@ import { BrandMark } from './BrandMark';
 import type { BotStatus } from '../types';
 
 interface TopBarProps {
+  readonly controls?:
+    | { readonly canStart: boolean; readonly canStop: boolean; readonly recovery: boolean }
+    | undefined;
   readonly botStatus: BotStatus;
   readonly guildName: string;
   readonly onStart: () => void;
   readonly onStop: () => void;
 }
 
-export function TopBar({ botStatus, guildName, onStart, onStop }: TopBarProps) {
+export function TopBar({ botStatus, guildName, onStart, onStop, controls }: TopBarProps) {
   const desktop = window.disrunnerDesktop !== undefined;
   const controlWindow = (action: 'minimize' | 'maximize' | 'close') => {
     void window.disrunnerDesktop?.controlWindow(action);
@@ -74,7 +77,8 @@ export function TopBar({ botStatus, guildName, onStart, onStop }: TopBarProps) {
       <div className="runner-controls" aria-label="Bot process controls">
         <button
           className="start-button"
-          disabled={botStatus === 'running' || transitioning}
+          disabled={controls ? !controls.canStart : botStatus === 'running' || transitioning}
+          aria-describedby={desktop ? 'runtime-recovery' : undefined}
           onClick={onStart}
           type="button"
         >
@@ -83,12 +87,15 @@ export function TopBar({ botStatus, guildName, onStart, onStop }: TopBarProps) {
         </button>
         <button
           className="stop-button"
-          disabled={!['running', 'starting', 'stopping'].includes(botStatus)}
+          disabled={
+            controls ? !controls.canStop : !['running', 'starting', 'stopping'].includes(botStatus)
+          }
+          aria-describedby={desktop ? 'runtime-recovery' : undefined}
           onClick={onStop}
           type="button"
         >
           <Square fill="currentColor" size={12} />
-          Stop bot
+          {controls?.recovery ? 'Retry cleanup' : 'Stop bot'}
         </button>
       </div>
       <button

@@ -102,6 +102,74 @@ In `normal` mode, these commands are available:
 | L10 stubborn-tree         | A parent and grandchild that both ignore `SIGTERM` are both confirmed dead after `stop`. Otherwise `stop` returns `ok:false` with a `cleanup` issue.                                                                                                                                                                                                                                                                                                                                                                   |
 | L11 / L12 / L13           | Twenty success cycles (start, invoke, stop), twenty failure cycles (`exit-startup-1`) and twenty cancel cycles (abort during a held PING) on one session, then `dispose`. Each cycle records its tree PIDs with `pgid` and start time, its error code or abort time, and its ports. Every PID is checked dead and every port closed, handles return to baseline, and the last cycle's ports are reused. After the failure cycles, `dispose` reports only the last run's `child-exited` issue, with no `cleanup` issue. |
 
+## Runtime cleanup failures (`packages/runtime/tests/cleanup-failures.test.mjs`)
+
+The runtime manager owns three resources per run: the bot process (`BotRunner`), the local REST
+emulator and the local Gateway server. Cleanup behaves as follows when one of them cannot be
+confirmed closed:
+
+- **Every resource is attempted.** Cleanup withdraws published endpoints and per-run interaction
+  secrets first, then stops the bot, REST and Gateway in that order, awaiting each one. A failure
+  does not skip later resources. Each unconfirmed resource adds one `cleanup` issue to
+  `ShutdownResult.errors` that names the resource. The thrown error text is never copied into
+  issues, events or snapshots.
+- **Unconfirmed resources stay owned.** A resource is released only when its own `stop()`
+  resolves (for the bot, with a terminal status). While anything is still owned, `start` and
+  `selectProject` reject with `invalid` and read nothing, `invoke` rejects with `not-running`,
+  endpoints stay `null`, and the phase is `error`. The legacy `RuntimeManager.selectProject`
+  rejects the same way, before reading or replacing the project configuration, and leaves the
+  state, ownership and recorded failures unchanged.
+- **`pid: null` is not proof of exit.** After a failed cleanup the snapshot no longer publishes an
+  active PID, but the process may still be running. Judge the outcome from `ok: false`, the
+  `cleanup` issues and independent process evidence. A possibly stale PID is never published
+  again.
+- **Retry is caller-driven.** A later `stop()` or `dispose()` calls `stop()` again only on the
+  resources still owned. Resources already released are not closed a second time. There is no
+  timer, background or automatic retry. Each further attempt goes through the resource's own
+  existing `stop()`, so `BotRunner`'s idempotent stop and its Windows timeout latch decide the
+  outcome, and the runtime never resets ownership on its own.
+- **Concurrent calls coalesce.** Concurrent `stop()` and `dispose()` calls share one cleanup
+  attempt. A `stop()` requested while `start()` is failing waits for the startup cleanup and then
+  makes one further attempt on whatever is still owned. `start()` still rejects with the original
+  startup error.
+- **Issues are kept apart.** A successful retry clears `cleanup` issues but keeps an unexpected
+  `child-exited` issue from the same run until the next `start()`. A startup failure combined
+  with a cleanup failure reports both parts in the state error, and `start()` rejects with the
+  startup error. After an unexpected exit whose cleanup failed, the state error keeps the cleanup
+  message next to the exit message.
+- **A failed dispose stays disposed.** Later `dispose()` or `stop()` calls may retry cleanup, but
+  `start`, `invoke` and `selectProject` remain rejected.
+
+The tests inject failures through an internal, instance-scoped dependency seam. The optional third
+`RuntimeManager` constructor argument and the internal `createSessionWithDependencies` factory in
+`session.ts` accept `wrapBot`, `wrapRest` and `wrapGateway`. The legacy `RuntimeManager` remains
+exported, with an additive optional constructor argument. The internal factory and standalone
+dependency symbols are not exported from the package entry point. The callbacks are copied when
+the session is constructed. Each real resource is
+assigned to its owned field before it is wrapped, so a throwing wrapper still leaves the original
+owned for cleanup. Production `createSession()` uses identity defaults. There is no CLI, IPC,
+configuration or environment fault switch.
+
+Test-owned wrappers keep two append-only logs. A journal records `{resource, operation, attempt,
+phase}` for every wrapper call. A delegation log records only the calls that actually reach the
+real resource. A failure injected before delegation (the real method never ran) is distinguished
+from delegate-then-reject (the real method ran) only by where it was injected. Real effects are
+checked independently, using `/proc` identity for fixture-reported PIDs, closed and reusable
+ports, handle counts, and a control process that must survive.
+
+| Group   | What is checked                                                                                                                                                                                                                             |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C01–C05 | Bot, REST or Gateway stop fails before delegation, singly or together. Every resource is attempted, siblings truly close, failed ones stay alive or listening and owned, `pid` is `null`, and a healthy retry stops only the retained ones. |
+| R01–R13 | Blocked `start` and `selectProject`, coalesced stop/stop and stop/dispose, failed dispose and its retry, unexpected exit plus cleanup failure, manager `selectProject`, and stop during a failing start (exactly two bot stop calls).       |
+| A01–A11 | Wrapper creation and each start boundary fail (before and after delegation), plus cancellation and the startup deadline at every boundary. Every acquired original is cleaned exactly once and the startup error stays primary.             |
+| U01–U04 | Delegate-then-reject at stop retains ownership with no automatic retry until a caller stop. A mocked latched helper timeout launches its helper once. Unknown liveness is `transport`, not `child-exited`.                                  |
+| V01–V04 | Endpoints are withdrawn before the first close settles, `invoke` is blocked, nothing is republished, and a later run gets a new run ID.                                                                                                     |
+| S01–S10 | The seam copies callbacks, passes only the real instance, keeps the receiver and the live `address` getter, is absent from the public entry point and is scoped per session. A disposed session stays unusable.                             |
+
+The mocked latched-timeout case is control-flow evidence only, not a Windows process-tree test.
+Per-run key and peer-secret destruction is checked by code review: cleanup drops the references
+and each start creates new material. It is not observed dynamically.
+
 Core-level oracles live in `packages/core/tests/integration/bot-runner-lifecycle.test.ts`, with
 fixtures in `packages/core/tests/fixtures/bot-runner-lifecycle/`. They cover:
 
@@ -139,5 +207,6 @@ fixtures in `packages/core/tests/fixtures/bot-runner-lifecycle/`. They cover:
   the retained ownership are covered by code review only.
 - **D3 real Windows `taskkill`**, and macOS process-tree behaviour. These are pending until
   executed on those systems; mocked command/child events do not qualify a real Windows tree.
-- **L04's "close every resource even if one fails"** and **L05's "failed cleanup is retried"**.
-  Both need root-owned failure injection; monkey-patching is not allowed here.
+- **L04's "close every resource even if one fails"** and **L05's "failed cleanup is retried"**
+  are not covered by real-process failures. They are covered by the injected cases in
+  `cleanup-failures.test.mjs` (see above), which use the internal dependency seam.

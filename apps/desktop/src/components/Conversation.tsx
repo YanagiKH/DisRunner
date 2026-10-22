@@ -8,10 +8,17 @@ interface ConversationProps {
   readonly channel: Channel;
   readonly messages: readonly ChatMessage[];
   readonly botRunning: boolean;
+  readonly invocationBlockReason?: string | undefined;
   readonly onSubmit: (value: string) => void;
 }
 
-export function Conversation({ channel, messages, botRunning, onSubmit }: ConversationProps) {
+export function Conversation({
+  channel,
+  messages,
+  botRunning,
+  onSubmit,
+  invocationBlockReason,
+}: ConversationProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const filteredMessages = useMemo(
@@ -80,7 +87,12 @@ export function Conversation({ channel, messages, botRunning, onSubmit }: Conver
       {query && (
         <div className="search-result-count">{filteredMessages.length} matching events</div>
       )}
-      <Composer botRunning={botRunning} channelName={channel.name} onSubmit={onSubmit} />
+      <Composer
+        botRunning={botRunning}
+        channelName={channel.name}
+        onSubmit={onSubmit}
+        invocationBlockReason={invocationBlockReason}
+      />
     </main>
   );
 }

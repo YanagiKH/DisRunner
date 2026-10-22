@@ -18,6 +18,16 @@ The local WebSocket server exposes selected identify/heartbeat/resume behavior a
 
 Electron starts the local Gateway service, but it does not bootstrap the renderer's synthetic guilds, dispatch UI actions, or emit REST mutations over Gateway. A connected socket is therefore not proof of a complete virtual Discord session.
 
+## Local reconnect endpoint and backlog
+
+`LocalGatewayServer.start(0)` binds an ephemeral loopback port and sets the engine's advertised `READY.resume_gateway_url` to that actual endpoint before accepting IDENTIFY. Clients can reconnect using the READY URL alone. Custom transports can call `GatewayEmulator.bindTransportEndpoint(url)` before creating sessions; it applies the existing offline WebSocket URL policy. Rebinding the same canonical endpoint is harmless. Changing endpoints while any live or unexpired resumable session exists fails explicitly; callers must invalidate those sessions or wait for expiry. A failed server endpoint bind closes the newly opened listener and leaves no published server address.
+
+A disconnected, unexpired session can accumulate dispatches using the same intent/content filters and replay limits as a connected session. Filtered events consume no sequence number. Buffering does not extend session expiry. Invalid or expired sessions still reject dispatch. Oversized packets and global replay-budget failures leave sequence and retained history unchanged.
+
+`LocalGatewayServer.dispatch(...)` returns `true` only when it sends the packet to an open socket. It returns `false` both for filtered events and accepted buffered events; it is not a backlog-admission acknowledgment. RESUME replays retained packets after the supplied sequence, then emits RESUMED. Expired/invalid sessions, wrong credentials, future sequences, or missing replay history reject without partial replay. Duplicate session ownership is rejected rather than stealing a live socket.
+
+These are core real-WebSocket regression guarantees, not SDK certification, a complete imported-bot reconnect workflow, or milestone acceptance. READY still does not bootstrap populated guild caches.
+
 ## Replay capacity
 
 Replay retention is bounded by packet count and encoded size. Defaults allow at most 1,000 retained packets and 16 MiB per session, 1 MiB for one UTF-8 JSON dispatch packet, and 64 MiB across all sessions. Callers can lower those limits with `replayLimit`, `maxDispatchBytes`, `maxReplayBytesPerSession`, and `maxTotalReplayBytes`.

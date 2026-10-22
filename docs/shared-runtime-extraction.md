@@ -1,4 +1,16 @@
-# Shared runtime extraction (M1-01)
+# Shared runtime extraction (M1-01 historical checkpoint)
+
+## Current-state correction
+
+The sections below describe the original extraction checkpoint, not the current
+combined M1 API or acceptance status. Current source exports `createSession`,
+explicit invocation contexts, subscription snapshots, cancellation and `dispose`;
+Electron routes its real bridge through Session and the executable CLI provides
+`bot-test`. Those later changes do not themselves prove real renderer/CLI parity.
+See [G1 acceptance](g1-acceptance.md) for the bounded parity harness and its
+explicitly pending GUI execution. No SDK or all-platform qualification follows.
+
+## Historical extraction scope
 
 `@disrunner/runtime` is a private, Node-only ESM workspace package. Its only production dependency is `@disrunner/core`; it has no Electron or React dependency. CLI and Desktop use its shared `createSession()` API rather than separate child-process launchers.
 

@@ -5,10 +5,16 @@ import { COMMANDS } from '../data';
 interface ComposerProps {
   readonly channelName: string;
   readonly botRunning: boolean;
+  readonly invocationBlockReason?: string | undefined;
   readonly onSubmit: (value: string) => void;
 }
 
-export function Composer({ channelName, botRunning, onSubmit }: ComposerProps) {
+export function Composer({
+  channelName,
+  botRunning,
+  onSubmit,
+  invocationBlockReason,
+}: ComposerProps) {
   const [value, setValue] = useState('');
   const [focusedCommand, setFocusedCommand] = useState(0);
   const matchingCommands = useMemo(() => {
@@ -18,7 +24,7 @@ export function Composer({ channelName, botRunning, onSubmit }: ComposerProps) {
   }, [value]);
 
   const submit = () => {
-    if (!value.trim()) return;
+    if (!value.trim() || invocationBlockReason !== undefined) return;
     onSubmit(value);
     setValue('');
     setFocusedCommand(0);
@@ -57,6 +63,7 @@ export function Composer({ channelName, botRunning, onSubmit }: ComposerProps) {
           ))}
         </div>
       )}
+      {invocationBlockReason && <p id="invocation-unavailable">{invocationBlockReason}</p>}
       <div className={`composer ${botRunning ? '' : 'bot-offline'}`}>
         <button
           aria-label="Attach local fixture"
@@ -67,6 +74,7 @@ export function Composer({ channelName, botRunning, onSubmit }: ComposerProps) {
         </button>
         <input
           aria-label={`Message #${channelName}`}
+          aria-describedby={invocationBlockReason ? 'invocation-unavailable' : undefined}
           onChange={(event) => {
             setValue(event.target.value);
             setFocusedCommand(0);
@@ -91,9 +99,10 @@ export function Composer({ channelName, botRunning, onSubmit }: ComposerProps) {
             }
           }}
           placeholder={
-            botRunning
+            invocationBlockReason ??
+            (botRunning
               ? `Message #${channelName}  ·  try /ping`
-              : 'Start TestBot to invoke local commands'
+              : 'Start TestBot to invoke local commands')
           }
           value={value}
         />
@@ -114,7 +123,8 @@ export function Composer({ channelName, botRunning, onSubmit }: ComposerProps) {
         <button
           aria-label="Send local event"
           className="send-button"
-          disabled={!value.trim()}
+          disabled={!value.trim() || invocationBlockReason !== undefined}
+          aria-describedby={invocationBlockReason ? 'invocation-unavailable' : undefined}
           onClick={submit}
           type="button"
         >

@@ -46,6 +46,8 @@ interface FeatureSurfaceProps {
   readonly onBack: () => void;
   readonly onInvoke: (command: string) => void;
   readonly onSelectProject: () => Promise<void>;
+  readonly canSelectProject: boolean;
+  readonly canInvoke: boolean;
   readonly runtime: DisRunnerRuntimeState;
 }
 
@@ -441,8 +443,8 @@ function ScenarioLab({ onBack }: Pick<FeatureSurfaceProps, 'onBack'>) {
 function CommandExplorer({
   onBack,
   onInvoke,
-  runtime,
-}: Pick<FeatureSurfaceProps, 'onBack' | 'onInvoke' | 'runtime'>) {
+  canInvoke,
+}: Pick<FeatureSurfaceProps, 'onBack' | 'onInvoke' | 'canInvoke'>) {
   const [selectedName, setSelectedName] = useState('/slow');
   const selected = COMMANDS.find((command) => command.name === selectedName) ?? COMMANDS[0];
   const desktop = window.disrunnerDesktop !== undefined;
@@ -452,7 +454,8 @@ function CommandExplorer({
         actions={
           <button
             className="primary-action"
-            disabled={!desktop || runtime.phase !== 'running'}
+            disabled={!desktop || !canInvoke}
+            aria-describedby="runtime-recovery"
             onClick={() => selected && onInvoke(selected.name)}
             type="button"
           >
@@ -797,8 +800,9 @@ function ToggleSetting({
 function SettingsSurface({
   onBack,
   onSelectProject,
+  canSelectProject,
   runtime,
-}: Pick<FeatureSurfaceProps, 'onBack' | 'onSelectProject' | 'runtime'>) {
+}: Pick<FeatureSurfaceProps, 'onBack' | 'onSelectProject' | 'canSelectProject' | 'runtime'>) {
   const [section, setSection] = useState('Security');
   const desktop = window.disrunnerDesktop !== undefined;
   const projectPath =
@@ -806,8 +810,8 @@ function SettingsSurface({
     (desktop
       ? 'No validated project selected'
       : 'Browser preview · folder picker available in Electron');
-  const runtimeActive = ['starting', 'running', 'stopping'].includes(runtime.phase);
-  const projectConfigured = runtime.project !== null && runtime.error === null;
+  const runtimeActive = runtime.disposed || !['idle', 'ready'].includes(runtime.phase);
+  const projectConfigured = runtime.project !== null;
   const sections = [
     'Appearance',
     'Runtime paths',
@@ -867,25 +871,18 @@ function SettingsSurface({
             </p>
           </div>
           <div
-            className={`config-diagnostic ${runtime.error !== null ? 'invalid' : projectConfigured ? 'valid' : 'neutral'}`}
+            className={`config-diagnostic ${projectConfigured ? 'valid' : 'neutral'}`}
             role="status"
           >
-            {runtime.error !== null ? (
-              <TriangleAlert size={15} />
-            ) : projectConfigured ? (
-              <Check size={15} />
-            ) : (
-              <Info size={15} />
-            )}
+            {projectConfigured ? <Check size={15} /> : <Info size={15} />}
             <span>
               <strong>
                 {runtime.project === null
                   ? 'Project configuration not loaded'
-                  : `Configuration ${runtime.phase}`}
+                  : 'Project configuration loaded'}
               </strong>
               <small>
-                {runtime.error ??
-                  runtime.project?.configPath ??
+                {runtime.project?.configPath ??
                   'Select a folder containing discord-simulator.config.json.'}
               </small>
             </span>
@@ -984,7 +981,10 @@ function SettingsSurface({
                     <input readOnly value={projectPath} />
                   </label>
                   <button
-                    disabled={!desktop || runtimeActive || section !== 'Runtime paths'}
+                    disabled={
+                      !desktop || !canSelectProject || runtimeActive || section !== 'Runtime paths'
+                    }
+                    aria-describedby="runtime-recovery"
                     onClick={() => {
                       void onSelectProject();
                     }}
@@ -1054,6 +1054,8 @@ export function FeatureSurface({
   onBack,
   onInvoke,
   onSelectProject,
+  canSelectProject,
+  canInvoke,
   runtime,
 }: FeatureSurfaceProps) {
   switch (surface) {
@@ -1062,12 +1064,17 @@ export function FeatureSurface({
     case 'scenario-lab':
       return <ScenarioLab onBack={onBack} />;
     case 'command-explorer':
-      return <CommandExplorer onBack={onBack} onInvoke={onInvoke} runtime={runtime} />;
+      return <CommandExplorer onBack={onBack} onInvoke={onInvoke} canInvoke={canInvoke} />;
     case 'risk-center':
       return <RiskCenter onBack={onBack} runtime={runtime} />;
     case 'settings':
       return (
-        <SettingsSurface onBack={onBack} onSelectProject={onSelectProject} runtime={runtime} />
+        <SettingsSurface
+          onBack={onBack}
+          onSelectProject={onSelectProject}
+          canSelectProject={canSelectProject}
+          runtime={runtime}
+        />
       );
   }
 }

@@ -98,14 +98,22 @@ export class LocalGatewayServer {
       throw new Error('Gateway server did not bind a TCP port.');
     }
     const address = rawAddress;
-    this.#address = {
+    const boundAddress: LocalGatewayAddress = {
       host: '127.0.0.1',
       port: address.port,
       url: `ws://127.0.0.1:${address.port}/gateway`,
     };
-    return this.#address;
+    try {
+      this.#gateway.bindTransportEndpoint(boundAddress.url);
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
+    this.#address = boundAddress;
+    return boundAddress;
   }
 
+  /** True only when delivered to an open socket; buffered or filtered dispatches return false. */
   public dispatch(sessionId: string, eventName: string, data: unknown): boolean {
     const packet = this.#gateway.dispatch(sessionId, eventName, data);
     if (packet === undefined) return false;

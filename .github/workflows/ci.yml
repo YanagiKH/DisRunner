@@ -147,6 +147,30 @@ jobs:
       - name: Smoke packaged Electron on Linux
         if: runner.os == 'Linux'
         run: xvfb-run -a pnpm --filter @disrunner/desktop run test:package-smoke
+      # G1 is currently a Linux x64 candidate, not Windows/macOS qualification.
+      - name: Build CLI for packaged G1 parity
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/cli run build
+      - name: Check packaged G1 parity on Linux
+        id: g1_parity
+        if: runner.os == 'Linux'
+        timeout-minutes: 6
+        env:
+          G1_PACKAGED_EXECUTABLE: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/disrunner
+          G1_EVIDENCE_DIR: ${{ github.workspace }}/apps/desktop/g1-evidence
+        run: xvfb-run -a pnpm --filter @disrunner/desktop run test:g1-parity
+      - name: Upload packaged G1 evidence
+        if: always() && runner.os == 'Linux' && (steps.g1_parity.outcome == 'success' || steps.g1_parity.outcome == 'failure')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g1-parity-${{ matrix.artifact }}-${{ github.sha }}
+          path: |
+            apps/desktop/g1-evidence/*.json
+            apps/desktop/g1-evidence/*.html
+            apps/desktop/g1-evidence/*.png
+            apps/desktop/g1-evidence/**/child-trace.jsonl
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
