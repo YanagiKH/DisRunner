@@ -3870,3 +3870,74 @@ select {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* Runner labels are normal-size white text. Keep preview primary actions separate. */
+.runner-controls .start-button {
+  background: linear-gradient(180deg, #5263df, #4352bd);
+}
+.runner-controls .start-button:not(:disabled):hover {
+  background: linear-gradient(180deg, #5565e0, #4756c2);
+}
+.runner-controls .stop-button {
+  background: linear-gradient(180deg, #b93649, #9f283b);
+}
+.runner-controls .stop-button:not(:disabled):hover {
+  background: linear-gradient(180deg, #c43c50, #a92e41);
+}
+
+.inspector-dock,
+.inspector-disclosure-content {
+  display: contents;
+}
+.inspector-disclosure-content[hidden] {
+  display: none;
+}
+.runtime-panel {
+  scroll-padding-top: calc(var(--runtime-strip-height) + 8px);
+}
+.runtime-recovery button,
+.runtime-actor select {
+  scroll-margin-top: calc(var(--runtime-strip-height) + 8px);
+}
+
+@media (max-width: 850px) {
+  .app-main.compact-inspector:not(.detail-mode) {
+    grid-template-rows: minmax(264px, 1fr) auto;
+    overflow-y: auto;
+  }
+  .inspector-dock {
+    display: block;
+    grid-column: 2;
+    grid-row: 2;
+    min-width: 0;
+  }
+  .inspector-disclosure {
+    align-items: center;
+    background: #202631;
+    border-top: 1px solid var(--line);
+    color: #e2e8f3;
+    display: flex;
+    height: 38px;
+    padding: 0 14px;
+    width: 100%;
+  }
+  .inspector-disclosure-content:not([hidden]) {
+    display: block;
+    height: 250px;
+    min-width: 0;
+  }
+  .inspector-disclosure-content .inspector {
+    height: 100%;
+    margin: 0;
+  }
+  .runtime-strip {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+}
+@media (max-width: 680px) {
+  .inspector-dock {
+    grid-column: 1;
+  }
+}
