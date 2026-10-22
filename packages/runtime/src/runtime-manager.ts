@@ -147,10 +147,16 @@ export class DesktopRuntimeManager {
       ![context.actorId, context.guildId, context.channelId].every(
         (id) =>
           typeof id === 'string' &&
-          id.length > 0 &&
-          Buffer.byteLength(id) <= 128 &&
-          !id.includes('\0'),
-      ) ||
+          /^[1-9][0-9]{0,19}$/.test(id) &&
+          BigInt(id) <= 18_446_744_073_709_551_615n,
+      )
+    ) {
+      throw new SessionError(
+        'invalid',
+        'Invocation context IDs must be canonical positive decimal unsigned 64-bit strings.',
+      );
+    }
+    if (
       !this.contexts().some(
         (candidate) =>
           candidate.actorId === context.actorId &&
