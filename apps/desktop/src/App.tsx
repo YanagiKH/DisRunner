@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 import { CheckCircle2, Info, TriangleAlert } from 'lucide-react';
 import { GUILDS } from './data';
 import { Conversation } from './components/Conversation';
@@ -61,6 +69,96 @@ export default function App() {
   );
   const operation = useRef<'start' | 'stop' | 'select' | null>(null);
   const operationSequence = useRef(0);
+  const startButton = useRef<HTMLButtonElement>(null);
+  const stopButton = useRef<HTMLButtonElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const recoveryFocus = useRef<{
+    operationId: number;
+    sessionId: string;
+    runId: string | null;
+    origin: HTMLButtonElement;
+    outcome?: 'success' | 'failure';
+    revision?: number;
+  } | null>(null);
+  const [compactInspector, setCompactInspector] = useState(() => window.innerWidth <= 850);
+  const [inspectorExpanded, setInspectorExpanded] = useState(false);
+  const inspectorContent = useRef<HTMLDivElement>(null);
+  const inspectorDisclosure = useRef<HTMLButtonElement>(null);
+  const focusExpandedInspector = useRef(false);
+
+  useEffect(() => {
+    const resize = () => {
+      const compact = window.innerWidth <= 850;
+      focusExpandedInspector.current =
+        !compact && document.activeElement === inspectorDisclosure.current;
+      if (compact && inspectorContent.current?.contains(document.activeElement))
+        setInspectorExpanded(true);
+      setCompactInspector(compact);
+    };
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!compactInspector && focusExpandedInspector.current) {
+      focusExpandedInspector.current = false;
+      if (
+        document.activeElement !== document.body &&
+        document.activeElement !== inspectorDisclosure.current
+      )
+        return;
+      inspectorContent.current
+        ?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]:not(:disabled)')
+        ?.focus();
+    }
+  }, [compactInspector]);
+
+  useEffect(() => {
+    const cancel = () => {
+      recoveryFocus.current = null;
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (
+        [
+          'Tab',
+          'ArrowLeft',
+          'ArrowRight',
+          'ArrowUp',
+          'ArrowDown',
+          'Home',
+          'End',
+          'PageUp',
+          'PageDown',
+          'Escape',
+        ].includes(event.key) ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey
+      )
+        cancel();
+    };
+    const pointerdown = (event: PointerEvent) => {
+      if (event.target !== recoveryFocus.current?.origin) cancel();
+    };
+    const focusin = (event: FocusEvent) => {
+      // Native disabling can move focus to body. This preserves existing ownership,
+      // never creates it and never revives an intent cancelled by deliberate movement.
+      if (event.target !== document.body && event.target !== recoveryFocus.current?.origin)
+        cancel();
+    };
+    document.addEventListener('keydown', keydown, true);
+    document.addEventListener('pointerdown', pointerdown, true);
+    document.addEventListener('focusin', focusin, true);
+    window.addEventListener('blur', cancel);
+    return () => {
+      cancel();
+      document.removeEventListener('keydown', keydown, true);
+      document.removeEventListener('pointerdown', pointerdown, true);
+      document.removeEventListener('focusin', focusin, true);
+      window.removeEventListener('blur', cancel);
+    };
+  }, []);
+
   const pendingStart = useRef<{
     sessionId: string;
     previousRunId: string | null;
@@ -86,6 +184,24 @@ export default function App() {
     resyncing ? 'sync' : operationPending,
     shutdownError !== null || actionError !== null,
   );
+  useLayoutEffect(() => {
+    const intent = recoveryFocus.current;
+    if (!intent?.outcome || operationPending !== null) return;
+    recoveryFocus.current = null;
+    const latest = latestRuntime.current;
+    if (
+      resyncPending.current ||
+      intent.operationId !== operationSequence.current ||
+      latest.sessionId !== intent.sessionId ||
+      latest.runId !== intent.runId ||
+      latest.revision !== intent.revision ||
+      (document.activeElement !== document.body && document.activeElement !== intent.origin)
+    )
+      return;
+    const preferred = intent.outcome === 'success' ? startButton.current : stopButton.current;
+    const target = preferred && !preferred.disabled ? preferred : closeButton.current;
+    if (target && !target.disabled) target.focus();
+  }, [operationPending, runtimeState]);
   const pendingTimers = useRef<Set<number>>(new Set());
   const displayedBotStatus = desktop ? runtimeState.phase : state.botStatus;
   const runtimeContext =
@@ -176,6 +292,8 @@ export default function App() {
     (next: DisRunnerRuntimeState) => {
       const previous = latestRuntime.current;
       if (next.sessionId === previous.sessionId && next.revision < previous.revision) return;
+      if (next.sessionId !== previous.sessionId || next.runId !== previous.runId)
+        recoveryFocus.current = null;
       observeStartupIdentity(next);
       resyncPending.current = false;
       setResyncing(false);
@@ -207,6 +325,7 @@ export default function App() {
         event.runId !== previous.runId ||
         event.sequence > previous.revision + 1
       ) {
+        recoveryFocus.current = null;
         const epoch = ++responseEpoch.current;
         resyncPending.current = true;
         setResyncing(true);
@@ -278,6 +397,7 @@ export default function App() {
       invalidated: false,
       stopped: false,
     };
+    recoveryFocus.current = null;
     pendingStart.current = attempt;
     setStartupHistory(null);
     operation.current = 'start';
@@ -321,61 +441,93 @@ export default function App() {
       });
   }, [desktopBridge, applyRuntimeState, controls.canStart]);
 
-  const stopBot = useCallback(() => {
-    if (desktopBridge === undefined) {
-      dispatch({ type: 'set-bot', status: 'stopped' });
-      return;
-    }
-    if (
-      (operation.current !== null && operation.current !== 'start') ||
-      resyncPending.current ||
-      !controls.canStop
-    )
-      return;
-    const started = latestRuntime.current;
-    if (operation.current === 'start' && pendingStart.current !== null)
-      pendingStart.current.stopped = true;
-    operation.current = 'stop';
-    const operationId = ++operationSequence.current;
-    setOperationPending('stop');
-    setRuntimeNotice('Checking runtime cleanup…');
-    void desktopBridge
-      .stopRuntime()
-      .then((result) => {
-        if (!currentStopResult(started, latestRuntime.current, result)) {
+  const stopBot = useCallback(
+    (origin?: HTMLButtonElement) => {
+      if (desktopBridge === undefined) {
+        dispatch({ type: 'set-bot', status: 'stopped' });
+        return;
+      }
+      if (
+        (operation.current !== null && operation.current !== 'start') ||
+        resyncPending.current ||
+        !controls.canStop
+      )
+        return;
+      const started = latestRuntime.current;
+      if (operation.current === 'start' && pendingStart.current !== null)
+        pendingStart.current.stopped = true;
+      operation.current = 'stop';
+      const operationId = ++operationSequence.current;
+      recoveryFocus.current =
+        controls.recovery &&
+        origin === stopButton.current &&
+        document.activeElement === origin &&
+        origin !== undefined
+          ? { operationId, sessionId: started.sessionId, runId: started.runId, origin }
+          : null;
+      setOperationPending('stop');
+      setRuntimeNotice('Checking runtime cleanup…');
+      void desktopBridge
+        .stopRuntime()
+        .then((result) => {
+          if (!currentStopResult(started, latestRuntime.current, result)) {
+            recoveryFocus.current = null;
+            setRuntimeNotice(null);
+            return;
+          }
+          applyRuntimeState(result.snapshot);
+          const intent = recoveryFocus.current;
+          if (
+            intent?.operationId === operationId &&
+            operationId === operationSequence.current &&
+            !resyncPending.current
+          ) {
+            intent.outcome = confirmsCleanup(result) ? 'success' : 'failure';
+            intent.revision = result.snapshot.revision;
+          }
+          if (confirmsCleanup(result)) {
+            setShutdownError(null);
+            setActionError(null);
+            setRuntimeNotice(
+              result.errors.length > 0
+                ? 'Runtime cleanup completed. The bot had exited unexpectedly.'
+                : 'Runtime cleanup completed.',
+            );
+          } else {
+            setShutdownError(shutdownDetails(result));
+            setRuntimeNotice(null);
+          }
+        })
+        .catch(() => {
+          if (
+            latestRuntime.current.sessionId !== started.sessionId ||
+            latestRuntime.current.runId !== started.runId
+          )
+            return;
+          // A rejection has no completion snapshot. Conservatively decline focus
+          // after any revision advance, including benign intermediate updates.
+          const intent = recoveryFocus.current;
+          if (
+            intent?.operationId === operationId &&
+            operationId === operationSequence.current &&
+            !resyncPending.current &&
+            latestRuntime.current.revision === started.revision
+          ) {
+            intent.outcome = 'failure';
+            intent.revision = latestRuntime.current.revision;
+          }
+          setShutdownError('Runtime shutdown could not be confirmed.');
           setRuntimeNotice(null);
-          return;
-        }
-        applyRuntimeState(result.snapshot);
-        if (confirmsCleanup(result)) {
-          setShutdownError(null);
-          setActionError(null);
-          setRuntimeNotice(
-            result.errors.length > 0
-              ? 'Runtime cleanup completed. The bot had exited unexpectedly.'
-              : 'Runtime cleanup completed.',
-          );
-        } else {
-          setShutdownError(shutdownDetails(result));
-          setRuntimeNotice(null);
-        }
-      })
-      .catch(() => {
-        if (
-          latestRuntime.current.sessionId !== started.sessionId ||
-          latestRuntime.current.runId !== started.runId
-        )
-          return;
-        setShutdownError('Runtime shutdown could not be confirmed.');
-        setRuntimeNotice(null);
-      })
-      .finally(() => {
-        if (operationId === operationSequence.current) {
-          operation.current = null;
-          setOperationPending(null);
-        }
-      });
-  }, [desktopBridge, applyRuntimeState, controls.canStop]);
+        })
+        .finally(() => {
+          if (operationId === operationSequence.current) {
+            operation.current = null;
+            setOperationPending(null);
+          }
+        });
+    },
+    [desktopBridge, applyRuntimeState, controls.canStop, controls.recovery],
+  );
 
   const selectProject = async (): Promise<void> => {
     if (
@@ -385,6 +537,7 @@ export default function App() {
       !controls.canSelect
     )
       return;
+    recoveryFocus.current = null;
     operation.current = 'select';
     setOperationPending('select');
     setRuntimeNotice(null);
@@ -569,6 +722,9 @@ export default function App() {
         guildName={guild.name}
         onStart={startBot}
         onStop={stopBot}
+        startButtonRef={startButton}
+        stopButtonRef={stopButton}
+        closeButtonRef={closeButton}
         controls={desktop ? controls : undefined}
       />
       <section className="runtime-panel" aria-label="Runtime status and controls">
@@ -652,7 +808,9 @@ export default function App() {
           </section>
         )}
       </section>
-      <div className={`app-main ${detailMode ? 'detail-mode' : ''}`}>
+      <div
+        className={`app-main ${detailMode ? 'detail-mode' : ''}${compactInspector ? ' compact-inspector' : ''}`}
+      >
         <WorkspaceRail
           active={state.surface}
           onNavigate={(surface) => dispatch({ type: 'navigate', surface })}
@@ -684,11 +842,32 @@ export default function App() {
               onSubmit={submitComposer}
             />
             <MemberList members={guild.members} />
-            <Inspector
-              activeTab={state.inspectorTab}
-              onSelectTab={(tab) => dispatch({ type: 'select-inspector-tab', tab })}
-              trace={state.interaction}
-            />
+            <div className="inspector-dock">
+              {compactInspector && (
+                <button
+                  className="inspector-disclosure"
+                  ref={inspectorDisclosure}
+                  type="button"
+                  aria-expanded={inspectorExpanded}
+                  aria-controls="inspector-disclosure-content"
+                  onClick={() => setInspectorExpanded((expanded) => !expanded)}
+                >
+                  {inspectorExpanded ? 'Collapse inspector' : 'Expand inspector'}
+                </button>
+              )}
+              <div
+                className="inspector-disclosure-content"
+                id="inspector-disclosure-content"
+                ref={inspectorContent}
+                hidden={compactInspector && !inspectorExpanded}
+              >
+                <Inspector
+                  activeTab={state.inspectorTab}
+                  onSelectTab={(tab) => dispatch({ type: 'select-inspector-tab', tab })}
+                  trace={state.interaction}
+                />
+              </div>
+            </div>
           </>
         ) : (
           <FeatureSurface

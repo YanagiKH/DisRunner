@@ -16,7 +16,13 @@ export function RuntimeStrip({ runtime, desktop }: RuntimeStripProps) {
   const lastOutput = runtime.output.at(-1);
   return (
     <section className={`runtime-strip ${runtime.phase}`} aria-label="Local bot runtime status">
-      <span className="runtime-phase">
+      <span
+        className="runtime-phase"
+        role="status"
+        aria-label="Runtime phase"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         <Activity size={13} />
         {desktop ? runtime.phase : 'browser preview'}
       </span>
