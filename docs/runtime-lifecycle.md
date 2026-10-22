@@ -211,6 +211,12 @@ fixtures in `packages/core/tests/fixtures/bot-runner-lifecycle/`. They cover:
   are not covered by real-process failures. They are covered by the injected cases in
   `cleanup-failures.test.mjs` (see above), which use the internal dependency seam.
 
+## Permission opt-in and run identity
+
+The shared-runtime [ordinary-message permission opt-in](project-configuration.md#ordinary-message-permission-opt-in) validates its paired bot fixture and initial state before starting listeners or a child. Missing permission grants are not a startup error when the fixture is otherwise structurally admitted: the ordinary REST operation denies at request time.
+
+The configured bot ID is stable across starts of that selected project. It does not make credentials reusable: each run still gets a fresh run ID, synthetic token, signing key and peer secret, and stale invocations remain invalid. Application/application-owner IDs remain synthetic and distinct from the bot. The opt-in does not change resource ownership, cleanup or retry rules above.
+
 ## Live conversation projection
 
 Desktop displays a read-only projection of ordinary messages from the current running
@@ -219,7 +225,10 @@ session's retained core store. A message is eligible only when its visibility is
 to an existing type-0 guild text channel in the same guild. Unknown visibility, private or
 ephemeral messages, unsupported flags, and mismatched channel/guild references are excluded
 before renderer IPC. This is a bounded supported-channel view, not a general Discord
-permission system or support for direct messages.
+permission system or support for direct messages. Even with ordinary-message permission
+enforcement enabled, this remains a diagnostic state projection, not a viewer-permission-filtered
+view. Renderer snapshots do not expose role/member resources or raw user roles, channel
+permission overwrites or guild owner permission context.
 
 The projection is capped by resource count and serialized bytes. Truncation and unavailable
 snapshots are shown explicitly; absence from this view does not prove a resource was deleted.

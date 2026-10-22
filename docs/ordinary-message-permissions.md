@@ -1,8 +1,12 @@
 # Ordinary message permission profile
 
-This is a **core API opt-in**, not a runtime, Desktop or SDK-wide permission guarantee. The default is **`legacy-unenforced`**. Existing callers and fixtures keep their previous behavior. The runtime currently generates bot identities without authoritative guild membership, so it does not enable this profile automatically.
+This is an explicit **core API and shared-runtime opt-in**, not a Discord or SDK-wide permission guarantee. The default is **`legacy-unenforced`**. Existing callers, project configurations and fixtures keep their previous behavior. CLI `bot-test` and Desktop use the same runtime project setting; neither enables it automatically.
 
 Set `ordinaryMessagePermissions: 'guild-text-own-messages-v1'` when constructing `LocalRestEmulator` or `MessageDomainService`. Both options and the exported `OrdinaryMessagePermissionProfile` type are available from `@disrunner/core`. Unknown profile values throw `TypeError`; the option is independent of strict/lenient payload validation.
+
+For a runtime project, set `profile.ordinaryMessagePermissions` to `"guild-text-own-messages-v1"` and supply `fixtures.bot` together. The bot fixture is a version-1 `user` envelope with a canonical positive unsigned-64-bit string ID and literal `bot: true`. `fixtures.user` remains the separate invocation actor. Supply explicit `guild.members`, roles and channel overwrites; the runtime never generates membership or permission grants. See the [project configuration example](project-configuration.md#ordinary-message-permission-opt-in) for complete fixture envelopes and import rules. The direct core API example below uses standalone resources instead.
+
+Runtime identity is the configured bot ID with `bot: true` across Gateway READY, REST current-user bootstrap, ordinary authors and interaction-message authors. Presentation fields can remain synthetic; a fixture username or avatar is not guaranteed on every protocol surface. Desktop channel/message snapshots remain diagnostic state, not a viewer-permission-filtered Discord view.
 
 ## Covered operations and deliberate limits
 
