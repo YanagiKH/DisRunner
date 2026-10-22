@@ -1,6 +1,22 @@
-import type { RiskFinding, SimulationProfile } from './contracts.js';
+import { isDeepStrictEqual } from 'node:util';
+import type { ResourceRecord, RiskFinding, SimulationProfile } from './contracts.js';
 import type { VirtualClock } from './clock.js';
 import type { SeededRandom, SnowflakeGenerator } from './random.js';
+import {
+  assertMessageCommandIdle,
+  messageCommandActive,
+  withMessageCommand,
+} from './message-command-guard.js';
+import {
+  InteractionMessageDomain,
+  cloneInteractionPayload,
+  validateInteractionMessagePayload,
+  interactionMessagePayload,
+  type InteractionMessageAuthorityOptions,
+  type InteractionMessageCommand,
+  type InteractionMessageProfile,
+  type InteractionMessageResult,
+} from './interaction-message-domain.js';
 import { assertSyntheticToken } from './session-token.js';
 
 export type InteractionResponseType =
@@ -33,6 +49,8 @@ export interface InteractionContext {
 }
 
 export interface SimulatedInteraction {
+  readonly messageProfile?: 'chat-input-messages-v1';
+  readonly originalMessageId?: string;
   readonly id: string;
   readonly token: string;
   readonly applicationId?: string;
@@ -49,6 +67,8 @@ export interface SimulatedInteraction {
 }
 
 interface MutableInteraction {
+  messageProfile?: 'chat-input-messages-v1';
+  originalMessageId?: string;
   id: string;
   token: string;
   applicationId?: string;
@@ -67,6 +87,7 @@ interface MutableInteraction {
 }
 
 export interface InteractionEngineOptions {
+  readonly messageAuthority?: InteractionMessageAuthorityOptions;
   readonly clock: VirtualClock;
   readonly random: SeededRandom;
   readonly snowflakes: SnowflakeGenerator;
@@ -95,6 +116,8 @@ export class InteractionEngine {
   readonly #maxRetainedBytesPerInteraction: number;
   readonly #maxRetainedBytes: number;
   readonly #applicationId: string | undefined;
+  readonly #messageAuthority: InteractionMessageAuthorityOptions | undefined;
+  readonly #messageDomain: InteractionMessageDomain | undefined;
   #retainedBytes = 0;
 
   public constructor(options: InteractionEngineOptions) {
@@ -121,6 +144,24 @@ export class InteractionEngine {
       options.applicationId === undefined
         ? undefined
         : requireCanonicalId(options.applicationId, 'applicationId');
+    this.#messageAuthority =
+      options.messageAuthority === undefined
+        ? undefined
+        : {
+            state: options.messageAuthority.state,
+            gateway: options.messageAuthority.gateway,
+            author: structuredClone(options.messageAuthority.author),
+            context: { ...options.messageAuthority.context },
+          };
+    if (
+      this.#messageAuthority !== undefined &&
+      this.#applicationId !== this.#messageAuthority.gateway.applicationId
+    )
+      throw new TypeError('Interaction application must match the Gateway application.');
+    this.#messageDomain =
+      this.#messageAuthority === undefined
+        ? undefined
+        : new InteractionMessageDomain(this.#messageAuthority);
   }
 
   public create(
@@ -130,8 +171,13 @@ export class InteractionEngine {
       readonly type?: string;
       readonly data?: Readonly<Record<string, unknown>>;
       readonly context?: InteractionContext;
+      readonly messageProfile?: InteractionMessageProfile;
     } = {},
   ): SimulatedInteraction {
+    this.#assertLifecycleIdle();
+    if (input.messageProfile === 'chat-input-messages-v1') return this.#createAuthoritative(input);
+    if (input.messageProfile !== undefined && input.messageProfile !== 'model')
+      throw unsupportedMessageProfile();
     // The application ID always comes from the engine; same-name input or data fields are ignored.
     const context = input.context === undefined ? undefined : copyContext(input.context);
     const data = cloneBoundedPayload(input.data ?? {}, this.#maxPayloadBytes, 'Interaction data');
@@ -140,7 +186,7 @@ export class InteractionEngine {
     if (suppliedToken !== undefined && this.#tokenIndex.has(suppliedToken)) {
       throw new DiscordApiError(409, 40041, 'Interaction token already exists.');
     }
-    this.#ensureInteractionCapacity();
+    if (this.#messageAuthority === undefined) this.#ensureInteractionCapacity();
     const id = boundedText(input.id ?? this.#snowflakes.generate(), 'Interaction id', 64);
     if (this.#interactions.has(id))
       throw new DiscordApiError(409, 40041, 'Interaction already exists.');
@@ -165,29 +211,36 @@ export class InteractionEngine {
     };
     const retainedBytes = retainedInteractionBytes(interaction);
     this.#assertInteractionRetainedSize(retainedBytes);
-    this.#ensureRetainedCapacity(retainedBytes);
+    if (this.#messageAuthority === undefined) this.#ensureRetainedCapacity(retainedBytes);
+    else
+      for (const removed of this.#planCapacity(retainedBytes, true)) {
+        this.#removeInteraction(removed, this.#interactions.get(removed)!);
+      }
     interaction.retainedBytes = retainedBytes;
     this.#interactions.set(id, interaction);
     this.#tokenIndex.set(token, id);
     this.#retainedBytes += retainedBytes;
-    return cloneInteraction(interaction);
+    return this.#snapshot(interaction);
   }
 
   public get(id: string): SimulatedInteraction | undefined {
     const interaction = this.#interactions.get(id);
     if (interaction === undefined) return undefined;
     this.#refresh(interaction);
-    return cloneInteraction(interaction);
+    return this.#snapshot(interaction);
   }
 
   public require(id: string): SimulatedInteraction {
     const interaction = this.#requireMutable(id);
-    return cloneInteraction(interaction);
+    return this.#snapshot(interaction);
   }
 
   public list(): readonly SimulatedInteraction[] {
-    this.sweepExpired();
-    return [...this.#interactions.values()].map(cloneInteraction);
+    if (!this.#commandActive())
+      for (const interaction of this.#interactions.values()) {
+        if (interaction.messageProfile === undefined) this.#refresh(interaction);
+      }
+    return [...this.#interactions.values()].map((interaction) => this.#snapshot(interaction));
   }
 
   public getByToken(token: string): SimulatedInteraction | undefined {
@@ -195,7 +248,7 @@ export class InteractionEngine {
     const interaction = id === undefined ? undefined : this.#interactions.get(id);
     if (interaction === undefined) return undefined;
     this.#refresh(interaction);
-    return cloneInteraction(interaction);
+    return this.#snapshot(interaction);
   }
 
   public retainedByteCount(): number {
@@ -207,6 +260,10 @@ export class InteractionEngine {
     responseType: InteractionResponseType,
     data: Readonly<Record<string, unknown>> = {},
   ): SimulatedInteraction {
+    this.#assertLifecycleIdle();
+    if (this.#interactions.get(id)?.messageProfile === 'chat-input-messages-v1')
+      return this.executeMessage({ operation: 'respond', interactionId: id, responseType, data })
+        .interaction;
     const interaction = this.#interactions.get(id);
     if (interaction === undefined) throw new DiscordApiError(404, 10062, 'Unknown interaction.');
     this.#refresh(interaction);
@@ -243,10 +300,24 @@ export class InteractionEngine {
     interaction.acknowledgedAtMs = acknowledgedAtMs;
     interaction.status = status;
     this.#commitResize(interaction, retainedBytes);
-    return cloneInteraction(interaction);
+    return this.#snapshot(interaction);
   }
 
   public followup(id: string, data: Readonly<Record<string, unknown>> = {}): InteractionFollowup {
+    this.#assertLifecycleIdle();
+    if (this.#interactions.get(id)?.messageProfile === 'chat-input-messages-v1') {
+      const result = this.executeMessage({ operation: 'create-followup', interactionId: id, data });
+      const message = result.message!;
+      return {
+        id: message.id,
+        data: interactionMessagePayload(message),
+        atMs:
+          result.interaction.followups.find((entry) => entry.id === message.id)?.atMs ??
+          result.interaction.initialResponse!.atMs,
+        ephemeral: ((message['flags'] as number) & 64) !== 0,
+        deleted: false,
+      };
+    }
     const interaction = this.#requireUsableToken(id);
     if (interaction.status === 'pending') {
       this.#emitRisk(
@@ -284,6 +355,10 @@ export class InteractionEngine {
   }
 
   public editOriginal(id: string, data: Readonly<Record<string, unknown>>): SimulatedInteraction {
+    this.#assertLifecycleIdle();
+    if (this.#interactions.get(id)?.messageProfile === 'chat-input-messages-v1')
+      return this.executeMessage({ operation: 'edit-original', interactionId: id, data })
+        .interaction;
     const interaction = this.#requireUsableToken(id);
     if (interaction.status === 'pending') {
       throw new DiscordApiError(404, 10015, 'Unknown webhook.');
@@ -310,17 +385,20 @@ export class InteractionEngine {
     interaction.initialResponse = response;
     interaction.status = 'responded';
     this.#commitResize(interaction, retainedBytes);
-    return cloneInteraction(interaction);
+    return this.#snapshot(interaction);
   }
 
   public deleteOriginal(id: string): SimulatedInteraction {
+    this.#assertLifecycleIdle();
+    if (this.#interactions.get(id)?.messageProfile === 'chat-input-messages-v1')
+      return this.executeMessage({ operation: 'delete-original', interactionId: id }).interaction;
     const interaction = this.#requireUsableToken(id);
     if (interaction.status === 'pending') throw new DiscordApiError(404, 10015, 'Unknown webhook.');
     if (interaction.status === 'deleted') throw new DiscordApiError(404, 10008, 'Unknown message.');
     const retainedBytes = this.#prepareResize(interaction, { ...interaction, status: 'deleted' });
     interaction.status = 'deleted';
     this.#commitResize(interaction, retainedBytes);
-    return cloneInteraction(interaction);
+    return this.#snapshot(interaction);
   }
 
   public editFollowup(
@@ -328,6 +406,16 @@ export class InteractionEngine {
     followupId: string,
     data: Readonly<Record<string, unknown>>,
   ): InteractionFollowup {
+    this.#assertLifecycleIdle();
+    if (this.#interactions.get(interactionId)?.messageProfile === 'chat-input-messages-v1') {
+      const result = this.executeMessage({
+        operation: 'edit-followup',
+        interactionId,
+        messageId: followupId,
+        data,
+      });
+      return result.interaction.followups.find((entry) => entry.id === followupId)!;
+    }
     const interaction = this.#requireUsableToken(interactionId);
     const index = interaction.followups.findIndex(
       (followup) => followup.id === followupId && !followup.deleted,
@@ -351,6 +439,11 @@ export class InteractionEngine {
   }
 
   public deleteFollowup(interactionId: string, followupId: string): void {
+    this.#assertLifecycleIdle();
+    if (this.#interactions.get(interactionId)?.messageProfile === 'chat-input-messages-v1') {
+      this.executeMessage({ operation: 'delete-followup', interactionId, messageId: followupId });
+      return;
+    }
     const interaction = this.#requireUsableToken(interactionId);
     const index = interaction.followups.findIndex(
       (followup) => followup.id === followupId && !followup.deleted,
@@ -369,14 +462,418 @@ export class InteractionEngine {
   }
 
   public sweepExpired(): readonly SimulatedInteraction[] {
+    this.#assertLifecycleIdle();
     const expired: SimulatedInteraction[] = [];
     for (const interaction of this.#interactions.values()) {
       const previous = interaction.status;
-      this.#refresh(interaction);
+      this.#refresh(interaction, true);
       if (previous !== 'expired' && interaction.status === 'expired')
-        expired.push(cloneInteraction(interaction));
+        expired.push(this.#snapshot(interaction));
     }
     return expired;
+  }
+
+  public executeMessage(command: InteractionMessageCommand): InteractionMessageResult {
+    const authority = this.#messageAuthority;
+    if (authority === undefined) throw unsupportedMessageProfile();
+    return withMessageCommand(authority.state, () => {
+      const interaction = this.#requireAuthoritative(
+        command.interactionId,
+        command.operation === 'respond',
+      );
+      const domain = this.#messageDomain as InteractionMessageDomain;
+      const context = interaction.context as InteractionContext;
+      const applicationId = interaction.applicationId as string;
+      domain.assertContext(context);
+      const candidate: MutableInteraction = {
+        ...interaction,
+        followups: [...interaction.followups],
+      };
+      let operation: 'create' | 'update' | 'delete' | 'none' = 'none';
+      let kind: 'original' | 'followup' | undefined;
+      let current: ResourceRecord | undefined;
+      let payload: Readonly<Record<string, unknown>> | undefined;
+      let messageId: string | undefined;
+      let loading = false;
+      const now = this.#clock.now();
+      const normalized = (
+        data: Readonly<Record<string, unknown>>,
+        existing?: ResourceRecord,
+        materializing = false,
+      ) => validateInteractionMessagePayload(data, this.#maxPayloadBytes, existing, materializing);
+      if (command.operation === 'respond') {
+        if (interaction.status !== 'pending')
+          throw new DiscordApiError(400, 40060, 'Interaction has already been acknowledged.');
+        try {
+          validateResponseType(interaction.type, command.responseType);
+        } catch {
+          throw invalidInteractionPayload();
+        }
+        const data = cloneAuthorityPayload(
+          command.data === undefined ? {} : command.data,
+          this.#maxPayloadBytes,
+        );
+        if (command.responseType === 'message') {
+          payload = normalized(data);
+          operation = 'create';
+          kind = 'original';
+        } else if (command.responseType === 'defer') {
+          if (
+            Object.keys(data).some((key) => key !== 'flags') ||
+            (Object.hasOwn(data, 'flags') && data['flags'] !== 0 && data['flags'] !== 64)
+          )
+            throw invalidInteractionPayload();
+          payload = {
+            content: '',
+            embeds: [],
+            components: [],
+            attachments: [],
+            tts: false,
+            flags: data['flags'] ?? 0,
+          };
+          operation = 'create';
+          kind = 'original';
+          loading = true;
+        } else if (command.responseType !== 'modal') throw invalidInteractionPayload();
+        candidate.acknowledgedAtMs = now;
+        candidate.status = command.responseType === 'defer' ? 'deferred' : 'responded';
+        candidate.initialResponse = {
+          type: command.responseType,
+          data: operation === 'none' ? data : {},
+          atMs: now,
+          ephemeral: payload === undefined ? isEphemeral(data) : isEphemeral(payload),
+        };
+      } else {
+        if (interaction.status === 'pending')
+          throw new DiscordApiError(
+            400,
+            40061,
+            'Interaction must be acknowledged before creating a follow-up.',
+          );
+        if (command.operation === 'create-followup') {
+          const original =
+            interaction.originalMessageId === undefined
+              ? undefined
+              : authority.state.get('message', interaction.originalMessageId);
+          if (
+            original !== undefined &&
+            interaction.status === 'deferred' &&
+            ((original['flags'] as number) & 128) !== 0
+          ) {
+            current = this.#ownedMessage(interaction, original.id, 'original');
+            const created = normalized(command.data);
+            payload = {
+              ...created,
+              flags: ((created['flags'] as number) & ~64) | ((current['flags'] as number) & 64),
+            };
+            operation = 'update';
+            kind = 'original';
+            messageId = current.id;
+            candidate.status = 'responded';
+            candidate.initialResponse = {
+              type: 'message',
+              data: {},
+              atMs: now,
+              ephemeral: isEphemeral(payload),
+            };
+          } else {
+            if (interaction.followups.length >= this.#maxFollowupsPerInteraction)
+              throw new InteractionCapacityError('Interaction follow-up capacity exceeded.');
+            payload = normalized(command.data);
+            operation = 'create';
+            kind = 'followup';
+          }
+        } else if (
+          command.operation === 'edit-original' ||
+          command.operation === 'delete-original'
+        ) {
+          if (interaction.originalMessageId === undefined || interaction.status === 'deleted')
+            throw unknownInteractionMessage();
+          current = this.#ownedMessage(interaction, interaction.originalMessageId, 'original');
+          kind = 'original';
+          messageId = current.id;
+          if (command.operation === 'delete-original') {
+            operation = 'delete';
+            candidate.status = 'deleted';
+          } else {
+            const materializing = ((current['flags'] as number) & 128) !== 0;
+            const updated = normalized(command.data, current, materializing);
+            payload = { ...updated, flags: (updated['flags'] as number) & ~128 };
+            operation = 'update';
+            candidate.status = 'responded';
+            candidate.initialResponse = {
+              type: 'message',
+              data: {},
+              atMs: now,
+              ephemeral: isEphemeral(payload),
+            };
+          }
+        } else if (
+          command.operation === 'edit-followup' ||
+          command.operation === 'delete-followup'
+        ) {
+          const index = interaction.followups.findIndex(
+            (entry) => entry.id === command.messageId && !entry.deleted,
+          );
+          if (index < 0) throw unknownInteractionMessage();
+          current = this.#ownedMessage(interaction, command.messageId, 'followup');
+          kind = 'followup';
+          messageId = current.id;
+          if (command.operation === 'delete-followup') {
+            operation = 'delete';
+            candidate.followups[index] = {
+              ...candidate.followups[index]!,
+              data: {},
+              deleted: true,
+            };
+          } else {
+            payload = normalized(command.data, current);
+            operation = 'update';
+          }
+        }
+      }
+      if (
+        operation === 'update' &&
+        current !== undefined &&
+        isDeepStrictEqual(interactionMessagePayload(current), payload)
+      ) {
+        return {
+          interaction: this.#snapshot(interaction),
+          message: current,
+          stateRevision: authority.state.revision,
+          eventId: null,
+          delivery: null,
+        };
+      }
+      if (operation === 'create') {
+        do {
+          messageId = this.#snowflakes.generate();
+        } while (messageId === interaction.id);
+        if (kind === 'original') candidate.originalMessageId = messageId;
+        else
+          candidate.followups.push({
+            id: messageId,
+            data: {},
+            atMs: now,
+            ephemeral: isEphemeral(payload!),
+            deleted: false,
+          });
+      }
+      const beforeInteractions = new Map(this.#interactions);
+      const beforeTokens = new Map(this.#tokenIndex);
+      const beforeBytes = this.#retainedBytes;
+      let committedInteraction: SimulatedInteraction | undefined;
+      try {
+        const result = domain.commit(
+          {
+            operation,
+            interactionId: interaction.id,
+            applicationId,
+            context,
+            ...(kind === undefined ? {} : { kind }),
+            ...(current === undefined ? {} : { current }),
+            ...(messageId === undefined ? {} : { messageId }),
+            ...(payload === undefined ? {} : { payload }),
+            loading,
+          },
+          () => {
+            committedInteraction = this.#snapshot(candidate);
+            const retainedBytes = Buffer.byteLength(
+              JSON.stringify(this.#snapshot(candidate, false)),
+            );
+            const evictions = this.#planCapacity(
+              retainedBytes - interaction.retainedBytes,
+              false,
+              interaction.id,
+            );
+            this.#assertInteractionRetainedSize(retainedBytes);
+            for (const id of evictions) this.#removeInteraction(id, this.#interactions.get(id)!);
+            candidate.retainedBytes = retainedBytes;
+            this.#interactions.set(candidate.id, candidate);
+            this.#retainedBytes += retainedBytes - interaction.retainedBytes;
+          },
+        );
+        return { ...result, interaction: committedInteraction! };
+      } catch (error) {
+        this.#interactions.clear();
+        for (const [id, value] of beforeInteractions) this.#interactions.set(id, value);
+        this.#tokenIndex.clear();
+        for (const [token, id] of beforeTokens) this.#tokenIndex.set(token, id);
+        this.#retainedBytes = beforeBytes;
+        throw error;
+      }
+    });
+  }
+
+  public getOriginalMessage(interactionId: string): ResourceRecord {
+    const interaction = this.#requireAuthoritative(interactionId);
+    if (interaction.originalMessageId === undefined || interaction.status === 'deleted')
+      throw unknownInteractionMessage();
+    return this.#ownedMessage(interaction, interaction.originalMessageId, 'original');
+  }
+  public getFollowupMessage(interactionId: string, messageId: string): ResourceRecord {
+    const interaction = this.#requireAuthoritative(interactionId);
+    if (!interaction.followups.some((entry) => entry.id === messageId && !entry.deleted))
+      throw unknownInteractionMessage();
+    return this.#ownedMessage(interaction, messageId, 'followup');
+  }
+
+  #assertLifecycleIdle(): void {
+    if (this.#messageAuthority !== undefined)
+      assertMessageCommandIdle(this.#messageAuthority.state);
+  }
+  #commandActive(): boolean {
+    return (
+      this.#messageAuthority !== undefined && messageCommandActive(this.#messageAuthority.state)
+    );
+  }
+  #effectiveStatus(interaction: MutableInteraction): InteractionStatus {
+    return this.#clock.now() >= interaction.tokenExpiresAtMs ||
+      (interaction.status === 'pending' && this.#clock.now() >= interaction.initialDeadlineAtMs)
+      ? 'expired'
+      : interaction.status;
+  }
+  #requireAuthoritative(id: string, initial = false): MutableInteraction {
+    const interaction = this.#interactions.get(id);
+    if (interaction === undefined)
+      throw new DiscordApiError(
+        404,
+        initial ? 10062 : 10015,
+        initial ? 'Unknown interaction.' : 'Unknown webhook.',
+      );
+    if (
+      interaction.messageProfile !== 'chat-input-messages-v1' ||
+      this.#messageAuthority === undefined
+    )
+      throw unsupportedMessageProfile();
+    if (this.#effectiveStatus(interaction) === 'expired')
+      throw new DiscordApiError(
+        404,
+        initial ? 10062 : 10015,
+        initial ? 'Unknown interaction.' : 'Unknown webhook.',
+      );
+    return interaction;
+  }
+  #ownedMessage(
+    interaction: MutableInteraction,
+    id: string,
+    kind: 'original' | 'followup',
+  ): ResourceRecord {
+    const message = this.#messageAuthority?.state.get('message', id);
+    if (
+      message === undefined ||
+      message['message_origin'] !== 'interaction' ||
+      message['interaction_id'] !== interaction.id ||
+      message['interaction_message_kind'] !== kind ||
+      message['channel_id'] !== interaction.context?.channelId ||
+      message['guild_id'] !== interaction.context?.guildId ||
+      message['application_id'] !== interaction.applicationId ||
+      message['webhook_id'] !== interaction.applicationId
+    )
+      throw unknownInteractionMessage();
+    return message;
+  }
+  #snapshot(interaction: MutableInteraction, deriveStatus = true): SimulatedInteraction {
+    const snapshot = cloneInteraction(interaction);
+    if (interaction.messageProfile !== 'chat-input-messages-v1') return snapshot;
+    let initialResponse = snapshot.initialResponse;
+    if (initialResponse !== undefined && interaction.originalMessageId !== undefined) {
+      const original = this.#messageAuthority?.state.get('message', interaction.originalMessageId);
+      initialResponse = {
+        ...initialResponse,
+        data:
+          original === undefined || interaction.status === 'deleted'
+            ? {}
+            : interactionMessagePayload(original),
+      };
+    }
+    const followups = snapshot.followups.map((entry) => {
+      const message = entry.deleted
+        ? undefined
+        : this.#messageAuthority?.state.get('message', entry.id);
+      return { ...entry, data: message === undefined ? {} : interactionMessagePayload(message) };
+    });
+    return {
+      ...snapshot,
+      status: deriveStatus ? this.#effectiveStatus(interaction) : interaction.status,
+      ...(initialResponse === undefined ? {} : { initialResponse }),
+      followups,
+    };
+  }
+  #authorityRetainedBytes(interaction: MutableInteraction): number {
+    return Buffer.byteLength(JSON.stringify(this.#snapshot(interaction, false)));
+  }
+  #planCapacity(additionalBytes: number, adding: boolean, protectedId?: string): string[] {
+    let bytes = this.#retainedBytes + additionalBytes;
+    let count = this.#interactions.size + (adding ? 1 : 0);
+    const evictions: string[] = [];
+    for (const [id, entry] of this.#interactions) {
+      if (bytes <= this.#maxRetainedBytes && count <= this.#maxInteractions) break;
+      if (id !== protectedId && this.#effectiveStatus(entry) === 'expired') {
+        evictions.push(id);
+        bytes -= entry.retainedBytes;
+        count -= 1;
+      }
+    }
+    if (bytes > this.#maxRetainedBytes || count > this.#maxInteractions)
+      throw new InteractionCapacityError('Interaction registry capacity exceeded.');
+    return evictions;
+  }
+  #createAuthoritative(input: {
+    readonly id?: string;
+    readonly token?: string;
+    readonly type?: string;
+    readonly data?: Readonly<Record<string, unknown>>;
+    readonly context?: InteractionContext;
+  }): SimulatedInteraction {
+    const authority = this.#messageAuthority;
+    if (authority === undefined) throw unsupportedMessageProfile();
+    return withMessageCommand(authority.state, () => {
+      const data = cloneAuthorityPayload(input.data ?? {}, this.#maxPayloadBytes);
+      const context = input.context === undefined ? undefined : copyContext(input.context);
+      if (
+        (input.type ?? 'command') !== 'command' ||
+        data['type'] !== 1 ||
+        context === undefined ||
+        this.#applicationId === undefined
+      )
+        throw new DiscordApiError(400, 50035, 'Invalid authoritative interaction context.');
+      this.#messageDomain!.assertContext(context);
+      const id = boundedText(input.id ?? this.#snowflakes.generate(), 'Interaction id', 64);
+      const token =
+        input.token === undefined
+          ? assertSyntheticToken(`disrunner.offline.interaction_${this.#random.token(24)}`)
+          : assertSyntheticToken(input.token);
+      if (this.#interactions.has(id) || this.#tokenIndex.has(token))
+        throw new DiscordApiError(409, 40041, 'Interaction already exists.');
+      const createdAtMs = this.#clock.now();
+      const interaction: MutableInteraction = {
+        id,
+        token,
+        applicationId: this.#applicationId,
+        context,
+        type: 'command',
+        data,
+        createdAtMs,
+        initialDeadlineAtMs: createdAtMs + this.#profile.interactionDeadlineMs,
+        tokenExpiresAtMs: createdAtMs + this.#profile.interactionTokenTtlMs,
+        status: 'pending',
+        followups: [],
+        timeoutReported: false,
+        retainedBytes: 0,
+        messageProfile: 'chat-input-messages-v1',
+      };
+      const retainedBytes = this.#authorityRetainedBytes(interaction);
+      this.#assertInteractionRetainedSize(retainedBytes);
+      const evictions = this.#planCapacity(retainedBytes, true);
+      for (const removed of evictions)
+        this.#removeInteraction(removed, this.#interactions.get(removed)!);
+      interaction.retainedBytes = retainedBytes;
+      this.#interactions.set(id, interaction);
+      this.#tokenIndex.set(token, id);
+      this.#retainedBytes += retainedBytes;
+      return this.#snapshot(interaction);
+    });
   }
 
   // PATCH contract: omitted fields stay, explicit null clears (removes) a field, any other value
@@ -431,7 +928,7 @@ export class InteractionEngine {
     if (this.#interactions.size < this.#maxInteractions) return;
     for (const [id, interaction] of this.#interactions) {
       this.#refresh(interaction);
-      if (interaction.status !== 'expired') continue;
+      if (this.#effectiveStatus(interaction) !== 'expired') continue;
       this.#removeInteraction(id, interaction);
       if (this.#interactions.size < this.#maxInteractions) return;
     }
@@ -464,7 +961,8 @@ export class InteractionEngine {
     return interaction;
   }
 
-  #refresh(interaction: MutableInteraction): void {
+  #refresh(interaction: MutableInteraction, explicit = false): void {
+    if (this.#commandActive() || (!explicit && interaction.messageProfile !== undefined)) return;
     const previousStatus = interaction.status;
     if (interaction.status === 'pending' && this.#clock.now() >= interaction.initialDeadlineAtMs) {
       this.#markTimedOut(interaction);
@@ -494,7 +992,14 @@ export class InteractionEngine {
     const retainedBytes = retainedInteractionBytes(candidate);
     this.#assertInteractionRetainedSize(retainedBytes);
     const additionalBytes = retainedBytes - interaction.retainedBytes;
-    if (additionalBytes > 0) this.#ensureRetainedCapacity(additionalBytes, interaction.id);
+    if (additionalBytes > 0) {
+      if (this.#messageAuthority === undefined)
+        this.#ensureRetainedCapacity(additionalBytes, interaction.id);
+      else
+        for (const removed of this.#planCapacity(additionalBytes, false, interaction.id)) {
+          this.#removeInteraction(removed, this.#interactions.get(removed)!);
+        }
+    }
     return retainedBytes;
   }
 
@@ -504,7 +1009,10 @@ export class InteractionEngine {
   }
 
   #synchronizeRetainedSize(interaction: MutableInteraction): void {
-    const retainedBytes = retainedInteractionBytes(interaction);
+    const retainedBytes =
+      interaction.messageProfile === undefined
+        ? retainedInteractionBytes(interaction)
+        : this.#authorityRetainedBytes(interaction);
     this.#retainedBytes += retainedBytes - interaction.retainedBytes;
     interaction.retainedBytes = retainedBytes;
   }
@@ -522,7 +1030,7 @@ export class InteractionEngine {
     for (const [id, interaction] of this.#interactions) {
       if (id === protectedId) continue;
       this.#refresh(interaction);
-      if (interaction.status !== 'expired') continue;
+      if (this.#effectiveStatus(interaction) !== 'expired') continue;
       this.#removeInteraction(id, interaction);
       if (this.#retainedBytes + additionalBytes <= this.#maxRetainedBytes) return;
     }
@@ -821,6 +1329,12 @@ function retainedInteractionBytes(interaction: MutableInteraction): number {
 
 function serializableInteraction(interaction: MutableInteraction): SimulatedInteraction {
   return {
+    ...(interaction.messageProfile === undefined
+      ? {}
+      : { messageProfile: interaction.messageProfile }),
+    ...(interaction.originalMessageId === undefined
+      ? {}
+      : { originalMessageId: interaction.originalMessageId }),
     id: interaction.id,
     token: interaction.token,
     ...(interaction.applicationId === undefined
@@ -841,4 +1355,27 @@ function serializableInteraction(interaction: MutableInteraction): SimulatedInte
       : { initialResponse: interaction.initialResponse }),
     followups: interaction.followups,
   };
+}
+
+function unsupportedMessageProfile(): DiscordApiError {
+  return new DiscordApiError(
+    501,
+    0,
+    'Authoritative interaction messages are unavailable for this profile.',
+  );
+}
+function unknownInteractionMessage(): DiscordApiError {
+  return new DiscordApiError(404, 10008, 'Unknown message.');
+}
+function invalidInteractionPayload(): DiscordApiError {
+  return new DiscordApiError(400, 50035, 'Invalid interaction message payload.');
+}
+
+function cloneAuthorityPayload(
+  value: unknown,
+  maxBytes: number,
+): Readonly<Record<string, unknown>> {
+  const data = cloneInteractionPayload(value, maxBytes);
+  if (!isPlainObject(data)) throw invalidInteractionPayload();
+  return data;
 }

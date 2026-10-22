@@ -36,7 +36,7 @@ export function selectLiveMessages(
       resource.visibility !== 'channel' ||
       resource.guild_id !== context.guildId ||
       resource.channel_id !== context.channelId ||
-      resource.type !== 0 ||
+      (resource.type !== 0 && resource.type !== 20) ||
       typeof resource.content !== 'string' ||
       typeof resource.flags !== 'number' ||
       !Number.isSafeInteger(resource.flags) ||

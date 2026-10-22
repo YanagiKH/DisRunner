@@ -8,7 +8,9 @@ import {
   DiscordApiError,
   type InteractionEngine,
   type InteractionResponseType,
+  type SimulatedInteraction,
 } from './interactions.js';
+import type { InteractionMessageResult } from './interaction-message-domain.js';
 import { assertOfflineGatewayUrl, isLoopbackHostname } from './network-policy.js';
 import {
   MessageDomainService,
@@ -379,6 +381,10 @@ export class LocalRestEmulator {
       const interaction = this.#interactions.get(interactionId);
       if (interaction === undefined || !routeTokenEqual(token, interaction.token))
         throw new DiscordApiError(404, 10062, 'Unknown interaction.');
+      if (isAuthoritative(interaction)) {
+        this.#authoritativeCallback(interaction, url, body, response, rateLimit);
+        return;
+      }
       const payload = requireObjectBody(body);
       const callbackType = callbackTypeName(payload['type']);
       this.#interactions.respond(interactionId, callbackType, objectOrEmpty(payload['data']));
@@ -391,6 +397,21 @@ export class LocalRestEmulator {
       const token = decodeRouteToken(webhookMatch[2] as string);
       const interaction = this.#interactions.getByToken(token);
       if (interaction === undefined) throw new DiscordApiError(404, 10015, 'Unknown webhook.');
+      if (isAuthoritative(interaction)) {
+        requireNoMessageQuery(url);
+        const result = this.#interactions.executeMessage({
+          operation: 'create-followup',
+          interactionId: interaction.id,
+          data: requireMessageBody(requireJsonBody(body)),
+        });
+        sendJson(
+          response,
+          200,
+          messageRepresentation(result.message as Readonly<Record<string, unknown>>),
+          interactionHeaders(rateLimit, result),
+        );
+        return;
+      }
       sendJson(
         response,
         200,
@@ -400,7 +421,118 @@ export class LocalRestEmulator {
       return;
     }
 
+    const itemMatch = WEBHOOK_ITEM_ROUTE.exec(path);
+    if (itemMatch !== null && ['GET', 'PATCH', 'DELETE'].includes(method)) {
+      const token = decodeRouteToken(itemMatch[2] as string);
+      const interaction = this.#interactions.getByToken(token);
+      if (interaction === undefined) throw new DiscordApiError(404, 10015, 'Unknown webhook.');
+      // New item routes validate query options after authentication, quota and body parsing,
+      // including model-only interactions that cannot supply authoritative messages.
+      requireNoMessageQuery(url);
+      if (!isAuthoritative(interaction)) throw unsupportedMessageRoute();
+      this.#authoritativeItem(
+        method,
+        interaction,
+        itemMatch[3] as string,
+        body,
+        response,
+        rateLimit,
+      );
+      return;
+    }
+
     throw new DiscordApiError(404, 0, '404: Not Found');
+  }
+
+  #authoritativeCallback(
+    interaction: SimulatedInteraction,
+    url: URL,
+    body: unknown,
+    response: ServerResponse,
+    rateLimit: RateLimitResult,
+  ): void {
+    const withResponse = parseWithResponse(url);
+    const payload = requireMessageBody(requireJsonBody(body));
+    if (Object.keys(payload).some((key) => key !== 'type' && key !== 'data'))
+      throw invalidMessagePayload();
+    const responseType = AUTHORITATIVE_CALLBACK_TYPES[payload['type'] as number];
+    if (typeof payload['type'] !== 'number' || responseType === undefined)
+      throw invalidMessagePayload();
+    let data: Readonly<Record<string, unknown>> | undefined;
+    if (Object.hasOwn(payload, 'data')) data = requireMessageBody(payload['data']);
+    const result = this.#interactions.executeMessage({
+      operation: 'respond',
+      interactionId: interaction.id,
+      responseType,
+      ...(data === undefined ? {} : { data }),
+    });
+    const headers = interactionHeaders(rateLimit, result);
+    if (!withResponse) {
+      sendEmpty(response, 204, headers);
+      return;
+    }
+    const message = result.message;
+    const flags = message === null ? 0 : (message['flags'] as number);
+    sendJson(
+      response,
+      200,
+      {
+        interaction: {
+          id: interaction.id,
+          type: 2,
+          ...(message === null
+            ? {}
+            : {
+                response_message_id: message.id,
+                response_message_loading: (flags & 128) !== 0,
+                response_message_ephemeral: (flags & 64) !== 0,
+              }),
+        },
+        ...(message === null || (flags & 128) !== 0
+          ? {}
+          : { resource: { type: 4, message: messageRepresentation(message) } }),
+      },
+      headers,
+    );
+  }
+
+  #authoritativeItem(
+    method: string,
+    interaction: SimulatedInteraction,
+    item: string,
+    body: unknown,
+    response: ServerResponse,
+    rateLimit: RateLimitResult,
+  ): void {
+    const original = item === '@original';
+    if (method === 'GET') {
+      const message = original
+        ? this.#interactions.getOriginalMessage(interaction.id)
+        : this.#interactions.getFollowupMessage(interaction.id, item);
+      sendJson(response, 200, messageRepresentation(message), rateLimit.headers);
+      return;
+    }
+    if (method === 'PATCH') {
+      const data = requireMessageBody(requireJsonBody(body));
+      const result = this.#interactions.executeMessage(
+        original
+          ? { operation: 'edit-original', interactionId: interaction.id, data }
+          : { operation: 'edit-followup', interactionId: interaction.id, messageId: item, data },
+      );
+      sendJson(
+        response,
+        200,
+        messageRepresentation(result.message as Readonly<Record<string, unknown>>),
+        interactionHeaders(rateLimit, result),
+      );
+      return;
+    }
+    const result = this.#interactions.executeMessage(
+      original
+        ? { operation: 'delete-original', interactionId: interaction.id }
+        : { operation: 'delete-followup', interactionId: interaction.id, messageId: item },
+    );
+    sendEmpty(response, 204, interactionHeaders(rateLimit, result));
   }
 
   #validateLocalRequest(request: IncomingMessage): void {
@@ -456,11 +588,32 @@ export class LocalRestEmulator {
       if (interaction.status === 'expired') {
         // The model's own token check reports EXPIRED_INTERACTION_TOKEN and throws 404/10015
         // for an expired interaction without changing it; quota has not been spent yet.
-        this.#interactions.followup(interaction.id, {});
+        // Authoritative interactions are rejected on the snapshot alone.
+        if (!isAuthoritative(interaction)) this.#interactions.followup(interaction.id, {});
         throw new DiscordApiError(404, 10015, 'Unknown webhook.');
       }
       // The bucket path is the verified identity, so rotating path IDs cannot add buckets.
       return `/webhooks/${interaction.applicationId}/${encodeURIComponent(interaction.token)}`;
+    }
+    const itemMatch = WEBHOOK_ITEM_ROUTE.exec(path);
+    if (itemMatch !== null) {
+      const applicationId = itemMatch[1] as string;
+      const token = decodeRouteToken(itemMatch[2] as string);
+      const interaction = this.#interactions.getByToken(token);
+      // Non-mutating lookup: identity and expiry are compared on the snapshot and rejected
+      // before quota and before the body is read. Nothing is recorded on the interaction.
+      if (
+        interaction === undefined ||
+        !routeTokenEqual(token, interaction.token) ||
+        interaction.applicationId === undefined ||
+        interaction.applicationId !== applicationId ||
+        interaction.status === 'expired'
+      ) {
+        throw new DiscordApiError(404, 10015, 'Unknown webhook.');
+      }
+      // The item ID is not a major parameter: every followup ID shares one bucket.
+      const suffix = itemMatch[3] === '@original' ? '@original' : ':messageId';
+      return `/webhooks/${interaction.applicationId}/${encodeURIComponent(interaction.token)}/messages/${suffix}`;
     }
     throw new DiscordApiError(404, 0, '404: Not Found');
   }
@@ -478,11 +631,78 @@ function traceRouteTemplate(path: string): string {
   return path;
 }
 
+const WEBHOOK_ITEM_ROUTE = /^\/webhooks\/(\d+)\/([^/]+)\/messages\/(@original|\d+)$/;
+
 function isTokenAuthenticatedRoute(method: string, path: string): boolean {
+  if (['GET', 'PATCH', 'DELETE'].includes(method) && WEBHOOK_ITEM_ROUTE.test(path)) return true;
   return (
     method === 'POST' &&
     (/^\/interactions\/\d+\/[^/]+\/callback$/.test(path) || /^\/webhooks\/\d+\/[^/]+$/.test(path))
   );
+}
+
+function isAuthoritative(interaction: SimulatedInteraction): boolean {
+  return interaction.messageProfile === 'chat-input-messages-v1';
+}
+
+const AUTHORITATIVE_CALLBACK_TYPES: Readonly<Record<number, InteractionResponseType>> = {
+  4: 'message',
+  5: 'defer',
+  9: 'modal',
+};
+
+function invalidMessagePayload(): DiscordApiError {
+  return new DiscordApiError(400, 50035, 'Invalid interaction message payload.');
+}
+
+function unsupportedMessageRoute(): DiscordApiError {
+  return new DiscordApiError(501, 0, 'This interaction does not support message routes.');
+}
+
+/** An empty request body is not valid JSON; it gets the fixed JSON syntax diagnostic. */
+function requireJsonBody(value: unknown): unknown {
+  if (value === undefined) throw new DiscordApiError(400, 50035, 'Invalid JSON body.');
+  return value;
+}
+
+/** A present message body or callback data must be a plain JSON object. */
+function requireMessageBody(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    throw invalidMessagePayload();
+  return value as Readonly<Record<string, unknown>>;
+}
+
+/** Only an absent query or exactly `with_response=true|false` is accepted. */
+function parseWithResponse(url: URL): boolean {
+  const entries = [...url.searchParams.entries()];
+  if (url.search === '' || url.search === '?') return false;
+  if (entries.length !== 1 || entries[0]?.[0] !== 'with_response') throw invalidMessagePayload();
+  const value = entries[0][1];
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw invalidMessagePayload();
+}
+
+/** Original/followup message routes have no supported query options in this profile. */
+function requireNoMessageQuery(url: URL): void {
+  if (url.search !== '') throw invalidMessagePayload();
+}
+
+/** Revision, delivery and event headers only for a committed public message event. */
+function interactionHeaders(
+  rateLimit: RateLimitResult,
+  result: InteractionMessageResult,
+): Readonly<Record<string, string>> {
+  if (result.eventId === null || result.delivery === null) return rateLimit.headers;
+  return {
+    ...rateLimit.headers,
+    'X-DisRunner-State-Revision': String(result.stateRevision),
+    'X-DisRunner-Delivery': result.delivery.status,
+    'X-DisRunner-Delivery-Failures': String(
+      result.delivery.failed + result.delivery.transportFailed,
+    ),
+    'X-DisRunner-Event-Id': result.eventId,
+  };
 }
 
 /** Constant-time comparison for route tokens; the value is compared exactly as sent. */

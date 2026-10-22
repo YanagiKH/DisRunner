@@ -1144,10 +1144,23 @@ async function gui() {
           await expectNoDiagnostics();
           await new Promise((resolve) => setTimeout(resolve, 150));
           await expectNoDiagnostics();
-          assert.deepEqual(await visibleMessageContents(), []);
+          assert.deepEqual(
+            await visibleMessageContents(),
+            ['G1 parity reply.'],
+            'the delayed public reply is committed in the channel it was sent from',
+          );
           await send();
           await expectDiagnostic(canonical);
-          assert.deepEqual(await visibleMessageContents(), []);
+          assert.deepEqual(
+            await visibleMessageContents(),
+            ['G1 parity reply.', 'G1 parity reply.'],
+            'each public reply appears once in send order',
+          );
+          const delayedIds = await page
+            .locator('.chat-message:visible')
+            .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-message-id')));
+          assert.equal(delayedIds.length, 2);
+          assert.notEqual(delayedIds[0], delayedIds[1], 'two replies keep distinct message ids');
         } else if (mode === 'pong-only') {
           // Existing UI labels this deadline failure Denied; it is not a permission denial.
           await expectDiagnostic(/Interaction deadline exceeded\./u, '3000', '2001', true);
@@ -1158,8 +1171,8 @@ async function gui() {
           const actual = await expectDiagnostic(expectedDiagnostic);
           assert.deepEqual(
             await visibleMessageContents(),
-            [],
-            'callbacks are not ordinary messages',
+            [mode === 'wrong-safe' ? 'Different G1 reply.' : 'G1 parity reply.'],
+            'a public reply appears once in the feed',
           );
           assert.equal(
             actual === canonical,
@@ -1167,11 +1180,17 @@ async function gui() {
             'fixed diagnostic parity assertion',
           );
         }
-        if (mode === 'stalled-command')
+        if (mode === 'stalled-command') {
           await until(
             async () => (await trace(directory)).some((event) => event.event === 'body-started'),
             'pending partial command body',
           );
+          assert.deepEqual(
+            await visibleMessageContents(),
+            [],
+            'an incomplete reply is never committed',
+          );
+        }
         const command = (await trace(directory)).find((event) => event.event === 'command');
         assert.deepEqual(
           [command.guildId, command.channelId, command.actorId],
@@ -1225,7 +1244,11 @@ async function gui() {
     await expectNoDiagnostics();
     await send();
     await expectDiagnostic(canonical, '3001');
-    assert.deepEqual(await visibleMessageContents(), []);
+    assert.deepEqual(
+      await visibleMessageContents(),
+      ['G1 parity reply.'],
+      'the replacement project shows its own public reply once',
+    );
     const command = (await trace(nextProject)).find((event) => event.event === 'command');
     assert.deepEqual(
       [command.actorId, command.guildId, command.channelId],
@@ -1240,7 +1263,11 @@ async function gui() {
     await composer.fill('/ping');
     await composer.press('Enter');
     await expectDiagnostic('Pong! Offline and deterministic.', '3000', '2000');
-    assert.deepEqual(await visibleMessageContents(), []);
+    assert.deepEqual(
+      await visibleMessageContents(),
+      ['Pong! Offline and deterministic.'],
+      'the unchanged example public reply appears once',
+    );
     await capture('gui-unchanged-raw');
     await page.getByRole('button', { name: 'Stop bot', exact: true }).click();
     await until(async () => (await snapshot()).phase === 'ready', 'raw control stop');

@@ -30,6 +30,14 @@ store hashes and raw commits are not exported. Invalid revisions, failed
 sanitization, or invalid clocks return null instead of falling back to raw data.
 This is a local diagnostic view, not a multi-user visibility or ephemeral-message filter.
 
+Message resources keep their type: ordinary and followup messages are type 0 and
+interaction originals are type 20. An interaction message is included only when its
+core record is consistent (interaction origin, matching kind and type, interaction ID,
+application ID equal to webhook ID, matching channel and guild, bot author). This is
+a data consistency check, not proof of origin. Ephemeral, loading and deleted messages
+are excluded. Context-bound chat-input invocations use the chat-input message profile
+with the same runId as the REST emulator; see [Interaction engine](../../docs/interaction-engine.md).
+
 Commit notifications republish the Session snapshot. Subscription generations
 and runtime ownership guards reject obsolete callbacks. Stop suppresses updates;
 failed resource closure retains state, clock, subscription and sanitizer so a

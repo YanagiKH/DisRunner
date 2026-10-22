@@ -4,11 +4,17 @@ import { isDeepStrictEqual } from 'node:util';
 import type { BootstrapUser } from './bootstrap-profile.js';
 import type { ResourceRecord, SimulationMode } from './contracts.js';
 import type { GatewayEmulator } from './gateway.js';
-import { sanitizeForExport } from './export-sanitizer.js';
+import {
+  withMessageCommand,
+  nextMessageSequence,
+  commitMessageSequence,
+} from './message-command-guard.js';
 import { DiscordApiError } from './interactions.js';
 import {
   isOrdinaryMessage,
   mapMessageEvent,
+  readMessageEvidence,
+  recordMessageEvidence,
   projectMessageWire,
   type MessageDomainEvent,
   type MessageEventName,
@@ -41,9 +47,6 @@ export interface MessageDomainOptions {
   readonly mode?: SimulationMode;
 }
 
-const activeStates = new WeakSet<VirtualState>();
-const MAX_EVENT_BYTES = 1_048_576;
-
 /** Ordinary channel messages only. No generic store-change or interaction-event bridge. */
 export class MessageDomainService {
   readonly #state: VirtualState;
@@ -51,10 +54,6 @@ export class MessageDomainService {
   readonly #author: BootstrapUser | undefined;
   readonly #context: Required<MessageDomainContext>;
   readonly #mode: SimulationMode;
-  #sequence = 0;
-  #recordBytes = 0;
-  #records: { event: MessageDomainEvent; delivery: MessageDelivery; bytes: number }[] = [];
-  #dropped = 0;
 
   public constructor(options: MessageDomainOptions) {
     this.#state = options.state;
@@ -70,10 +69,7 @@ export class MessageDomainService {
     readonly records: readonly { event: MessageDomainEvent; delivery: MessageDelivery }[];
     readonly dropped: number;
   } {
-    return {
-      records: this.#records.map(({ event, delivery }) => structuredClone({ event, delivery })),
-      dropped: this.#dropped,
-    };
+    return readMessageEvidence(this.#state, this.#context.runId);
   }
 
   public create(
@@ -107,19 +103,9 @@ export class MessageDomainService {
     messageId: string | undefined,
     payload: Readonly<Record<string, unknown>>,
   ): MessageMutationResult {
-    if (activeStates.has(this.#state))
-      throw new DiscordApiError(409, 0, 'Reentrant message commands are not supported.');
-    activeStates.add(this.#state);
-    try {
-      const transactionActive: unknown = (
-        this.#state as VirtualState & { readonly transactionActive?: unknown }
-      ).transactionActive;
-      if (typeof transactionActive !== 'boolean')
-        throw new DiscordApiError(503, 0, 'Outermost message transaction guard is unavailable.');
-      if (transactionActive)
-        throw new DiscordApiError(409, 0, 'Message commands require an outermost transaction.');
+    return withMessageCommand(this.#state, () => {
       const beforeRevision = this.#revision();
-      if (beforeRevision >= Number.MAX_SAFE_INTEGER || this.#sequence >= Number.MAX_SAFE_INTEGER)
+      if (beforeRevision >= Number.MAX_SAFE_INTEGER)
         throw new DiscordApiError(503, 0, 'Message revision or sequence capacity exceeded.');
       const channel = this.#state.require('channel', channelId);
       let guildId: string | undefined;
@@ -152,6 +138,8 @@ export class MessageDomainService {
             50005,
             'Only messages authored by this bot can be changed.',
           );
+        if (current['message_origin'] === 'interaction')
+          throw new DiscordApiError(403, 50013, 'Interaction messages require their owning token.');
         if (!isOrdinaryMessage(current))
           throw new DiscordApiError(
             403,
@@ -188,7 +176,7 @@ export class MessageDomainService {
         schemaVersion: 1 as const,
         runId: this.#context.runId,
         eventId: randomUUID(),
-        sequence: this.#sequence + 1,
+        sequence: nextMessageSequence(this.#state, this.#context.runId),
         stateRevision: beforeRevision + 1,
         correlationId: requestId,
         causationId: requestId,
@@ -239,7 +227,7 @@ export class MessageDomainService {
       });
       // The state contract is authoritative. No fabricated per-service state revision.
       const stateRevision = this.#revision();
-      this.#sequence += 1;
+      commitMessageSequence(this.#state, this.#context.runId, eventBase.sequence);
       const event: MessageDomainEvent = {
         ...eventBase,
         stateRevision,
@@ -267,31 +255,10 @@ export class MessageDomainService {
         // A committed mutation must never be converted into a retryable REST mutation error.
         delivery = { status: 'partial', accepted: 0, filtered: 0, failed: 1, transportFailed: 0 };
       }
-      // Diagnostic evidence is redacted and bounded independently of replay history.
-      try {
-        const safe = sanitizeForExport(
-          { event, delivery },
-          { sensitiveValues: [this.#gateway.sessionToken] },
-        );
-        const bytes = Buffer.byteLength(JSON.stringify(safe));
-        if (bytes > MAX_EVENT_BYTES) this.#dropped += 1;
-        else {
-          while (this.#records.length >= 100 || this.#recordBytes + bytes > MAX_EVENT_BYTES) {
-            const removed = this.#records.shift();
-            if (removed === undefined) break;
-            this.#recordBytes -= removed.bytes;
-            this.#dropped += 1;
-          }
-          this.#records.push({ ...safe, bytes });
-          this.#recordBytes += bytes;
-        }
-      } catch {
-        this.#dropped += 1;
-      }
+      // Evidence failure cannot change a committed mutation into a retryable failure.
+      recordMessageEvidence(this.#state, event, delivery, [this.#gateway.sessionToken]);
       return { message, stateRevision, eventId: event.eventId, delivery };
-    } finally {
-      activeStates.delete(this.#state);
-    }
+    });
   }
 }
 

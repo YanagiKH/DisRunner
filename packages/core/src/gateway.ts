@@ -195,6 +195,11 @@ export class GatewayEmulator {
     return this.#botUserId;
   }
 
+  /** Application identity advertised by this Gateway in READY. */
+  public get applicationId(): string {
+    return this.#applicationId;
+  }
+
   /** The per-instance synthetic credential to inject into a contained bot process. */
   public get sessionToken(): string {
     return this.#fakeToken;

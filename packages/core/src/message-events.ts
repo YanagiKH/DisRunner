@@ -1,4 +1,7 @@
 import type { ResourceRecord } from './contracts.js';
+import type { MessageDelivery } from './message-domain.js';
+import type { VirtualState } from './state.js';
+import { sanitizeForExport } from './export-sanitizer.js';
 
 export type MessageEventName = 'MESSAGE_CREATE' | 'MESSAGE_UPDATE' | 'MESSAGE_DELETE';
 export interface MessageDomainEvent {
@@ -9,7 +12,7 @@ export interface MessageDomainEvent {
   readonly stateRevision: number;
   readonly correlationId: string;
   readonly causationId: string;
-  readonly origin: 'rest';
+  readonly origin: 'rest' | 'interaction';
   readonly clockDomain: 'virtual' | 'realtime';
   readonly timestamp: number;
   readonly payload: {
@@ -30,6 +33,8 @@ export function projectMessageWire(
       ? ['id', 'channel_id', 'guild_id']
       : [
           'id',
+          'application_id',
+          'webhook_id',
           'channel_id',
           'guild_id',
           'content',
@@ -75,7 +80,10 @@ export function mapMessageEvent(event: MessageDomainEvent):
   if (
     !['MESSAGE_CREATE', 'MESSAGE_UPDATE', 'MESSAGE_DELETE'].includes(event.payload.type) ||
     event.payload.visibility !== 'channel' ||
-    !isOrdinaryMessage(event.payload.message)
+    !isOrdinaryMessage(event.payload.message) ||
+    (event.origin === 'interaction'
+      ? !isPublicInteractionMessage(event.payload.message)
+      : event.payload.message['message_origin'] === 'interaction')
   )
     return undefined;
   return {
@@ -89,8 +97,19 @@ export function isOrdinaryMessage(message: Readonly<Record<string, unknown>>): b
     typeof flags === 'number' &&
     [0, 4, 4096, 4100].includes(flags) &&
     message['visibility'] === 'channel' &&
+    (message['type'] === 0 || message['type'] === 20 || message['type'] === undefined) &&
     typeof message['channel_id'] === 'string' &&
     (message['guild_id'] === undefined || typeof message['guild_id'] === 'string')
+  );
+}
+function isPublicInteractionMessage(message: Readonly<Record<string, unknown>>): boolean {
+  return (
+    message['message_origin'] === 'interaction' &&
+    typeof message['interaction_id'] === 'string' &&
+    typeof message['application_id'] === 'string' &&
+    message['webhook_id'] === message['application_id'] &&
+    ((message['interaction_message_kind'] === 'original' && message['type'] === 20) ||
+      (message['interaction_message_kind'] === 'followup' && message['type'] === 0))
   );
 }
 function projectUser(value: Readonly<Record<string, unknown>>): Record<string, unknown> {
@@ -186,4 +205,76 @@ function pick(
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+interface MessageEvidenceLedger {
+  records: { event: MessageDomainEvent; delivery: MessageDelivery; bytes: number }[];
+  bytes: number;
+  dropped: number;
+}
+const messageEvidence = new WeakMap<VirtualState, Map<string, MessageEvidenceLedger>>();
+const MAX_MESSAGE_EVIDENCE_BYTES = 1_048_576;
+
+/** Internal postcommit collector. Run registration is bounded separately by the sequence owner. */
+export function recordMessageEvidence(
+  state: VirtualState,
+  event: MessageDomainEvent,
+  delivery: MessageDelivery,
+  sensitiveValues: readonly string[],
+): void {
+  let perRun = messageEvidence.get(state);
+  if (perRun === undefined) {
+    perRun = new Map();
+    messageEvidence.set(state, perRun);
+  }
+  let ledger = perRun.get(event.runId);
+  if (ledger === undefined) {
+    ledger = { records: [], bytes: 0, dropped: 0 };
+    perRun.set(event.runId, ledger);
+  }
+  try {
+    const projected: MessageDomainEvent = {
+      ...event,
+      payload: {
+        type: event.payload.type,
+        visibility: 'channel',
+        message: {
+          ...projectMessageWire(event.payload.message),
+          id: event.payload.message.id,
+          resourceType: 'message',
+          visibility: 'channel',
+        },
+      },
+    };
+    const safe = sanitizeForExport({ event: projected, delivery }, { sensitiveValues });
+    const bytes = Buffer.byteLength(JSON.stringify(safe));
+    if (bytes > MAX_MESSAGE_EVIDENCE_BYTES) {
+      ledger.dropped += 1;
+      return;
+    }
+    while (ledger.records.length >= 100 || ledger.bytes + bytes > MAX_MESSAGE_EVIDENCE_BYTES) {
+      const removed = ledger.records.shift();
+      if (removed === undefined) break;
+      ledger.bytes -= removed.bytes;
+      ledger.dropped += 1;
+    }
+    ledger.records.push({ ...safe, bytes });
+    ledger.bytes += bytes;
+  } catch {
+    ledger.dropped += 1;
+  }
+}
+export function readMessageEvidence(
+  state: VirtualState,
+  runId: string,
+): {
+  readonly records: readonly { event: MessageDomainEvent; delivery: MessageDelivery }[];
+  readonly dropped: number;
+} {
+  const ledger = messageEvidence.get(state)?.get(runId);
+  return {
+    records:
+      ledger?.records.map(({ event, delivery }) => structuredClone({ event, delivery })) ?? [],
+    dropped: ledger?.dropped ?? 0,
+  };
 }

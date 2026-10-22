@@ -153,6 +153,7 @@ async function runFullPackagedSmoke(signal) {
       started,
       '/ping',
       'Pong! Offline and deterministic.',
+      1,
     );
 
     const ping = await invokeSessionCommand(page, '/ping');
@@ -170,6 +171,7 @@ async function runFullPackagedSmoke(signal) {
       started,
       '/secret',
       'Only you can see this.',
+      2,
     );
     assert.notEqual(secretDiagnostic.requestId, pingDiagnostic.requestId);
 
@@ -293,8 +295,8 @@ async function runFullPackagedSmoke(signal) {
   }
 }
 
-// Callbacks, including ephemeral replies, are Inspector evidence, never ordinary chat rows.
-async function assertCallbackDiagnostic(page, started, command, content) {
+// Inspector callbacks remain diagnostics; only retained public originals become chat rows.
+async function assertCallbackDiagnostic(page, started, command, content, expectedPublicOriginals) {
   // Wait for this composer invocation before selecting Trace: ephemeral replies select Payload.
   await page
     .locator('.toast')
@@ -328,10 +330,34 @@ async function assertCallbackDiagnostic(page, started, command, content) {
       { actorId: payload.actorId, guildId: payload.guildId, channelId: payload.channelId },
       started.contexts[0],
     );
+    const snapshot = await page.evaluate(() => window.disrunnerDesktop.getRuntimeState());
+    assert.equal(snapshot.runId, started.runId);
+    assert.equal(snapshot.coreState?.runId, started.runId);
+    const originals = snapshot.coreState.resources.filter(
+      (resource) => resource.resourceType === 'message',
+    );
+    assert.equal(originals.length, expectedPublicOriginals);
+    assert.equal(new Set(originals.map((resource) => resource.id)).size, expectedPublicOriginals);
+    for (const resource of originals) {
+      assert.equal(resource.type, 20, 'public replies must be retained original messages');
+      assert.equal(resource.visibility, 'channel');
+      assert.equal(resource.flags, 0);
+      assert.equal(resource.content, 'Pong! Offline and deterministic.');
+      assert.equal(resource.guild_id, started.contexts[0].guildId);
+      assert.equal(resource.channel_id, started.contexts[0].channelId);
+      const row = page.locator(`.chat-message[data-message-id="${resource.id}"]`);
+      await row.waitFor({ state: 'visible' });
+      assert.equal(await row.count(), 1);
+      assert.equal(await row.locator('.message-content').textContent(), resource.content);
+    }
+    assert.equal(await page.locator('.chat-message').count(), expectedPublicOriginals);
     assert.equal(
-      await page.locator('.chat-message').count(),
+      await page
+        .locator('.chat-message')
+        .getByText('Only you can see this.', { exact: true })
+        .count(),
       0,
-      'callbacks must not become chat rows',
+      'ephemeral callbacks must stay diagnostic-only and never enter the public feed',
     );
     await page.getByRole('tab', { name: 'Trace', exact: true }).click();
     return payload;

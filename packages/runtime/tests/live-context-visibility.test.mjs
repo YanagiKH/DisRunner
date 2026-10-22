@@ -114,3 +114,44 @@ test('only supported ordinary flags and existing guild text channels are project
   );
   owner.release();
 });
+
+test('interaction provenance IDs are canonical before sanitization and allow distinct app and bot IDs', () => {
+  const original = {
+    ...ordinary,
+    type: 20,
+    message_origin: 'interaction',
+    interaction_message_kind: 'original',
+    interaction_id: '4000',
+    application_id: '5000',
+    webhook_id: '5000',
+    author: { id: '6000', username: 'Bot', bot: true },
+  };
+  const invalid = ['', '01', 'not-an-id', '18446744073709551616'];
+  const bad = invalid
+    .flatMap((id, i) => [
+      { ...original, id: `interaction-${i}`, interaction_id: id },
+      { ...original, id: `application-${i}`, application_id: id, webhook_id: id },
+      { ...original, id: `webhook-${i}`, webhook_id: id },
+      { ...original, id: `author-${i}`, author: { ...original.author, id } },
+    ])
+    .map((record) => ({ ...record, content: 'INVALID_PROVENANCE_SENTINEL' }));
+  const inspected = [];
+  const { owner } = actualStore(
+    [...identities, { ...original, id: 'public-original' }, ...bad],
+    (view) => {
+      inspected.push(view);
+      return structuredClone(view);
+    },
+  );
+  try {
+    const snapshot = owner.snapshot();
+    assert.deepEqual(
+      snapshot.resources.filter((r) => r.resourceType === 'message').map((r) => [r.id, r.type]),
+      [['public-original', 20]],
+    );
+    assert.equal(JSON.stringify(snapshot).includes('INVALID_PROVENANCE_SENTINEL'), false);
+    assert.equal(JSON.stringify(inspected).includes('INVALID_PROVENANCE_SENTINEL'), false);
+  } finally {
+    owner.release();
+  }
+});

@@ -144,12 +144,7 @@ export class DesktopRuntimeManager {
     if (
       context === null ||
       typeof context !== 'object' ||
-      ![context.actorId, context.guildId, context.channelId].every(
-        (id) =>
-          typeof id === 'string' &&
-          /^[1-9][0-9]{0,19}$/.test(id) &&
-          BigInt(id) <= 18_446_744_073_709_551_615n,
-      )
+      ![context.actorId, context.guildId, context.channelId].every(isCanonicalSnowflake)
     ) {
       throw new SessionError(
         'invalid',
@@ -366,17 +361,15 @@ export class DesktopRuntimeManager {
           return;
         this.#publish(this.#state);
       });
-      const interactions = new core.InteractionEngine({
-        applicationId,
-        clock,
-        random,
-        snowflakes,
-        profile,
-        onRisk: (finding: unknown) => risks.add(finding),
-      });
-      this.#interactions = interactions;
       this.#applicationId = applicationId;
       this.#interactionContext = deriveInteractionContext(configuration.resources);
+      const botUser = {
+        id: botUserId,
+        username: 'DisRunner Bot',
+        discriminator: '0',
+        avatar: null,
+        bot: true,
+      };
       const gatewayPort = await reserveLoopbackPort();
       signal.throwIfAborted();
       const expectedGatewayUrl = `ws://127.0.0.1:${gatewayPort}/gateway`;
@@ -389,6 +382,23 @@ export class DesktopRuntimeManager {
         applicationId,
         botUserId,
       });
+      // Shared state, Gateway and the bootstrap bot exist before the engine; the engine and
+      // the REST emulator share one message run so both origins use one ordered record.
+      const interactions = new core.InteractionEngine({
+        applicationId,
+        clock,
+        random,
+        snowflakes,
+        profile,
+        onRisk: (finding: unknown) => risks.add(finding),
+        messageAuthority: {
+          state,
+          gateway,
+          author: botUser,
+          context: { runId, clockDomain: 'realtime' },
+        },
+      });
+      this.#interactions = interactions;
       // Own the real resource before wrapping it: if wrapping throws, cleanup still reaches it.
       this.#gatewayServer = new GatewayServer({ gateway, trace });
       const gatewayServer = this.#dependencies.wrapGateway(this.#gatewayServer);
@@ -419,13 +429,7 @@ export class DesktopRuntimeManager {
         fakeToken: sessionToken,
         gatewayUrl,
         bootstrap: {
-          user: {
-            id: botUserId,
-            username: 'DisRunner Bot',
-            discriminator: '0',
-            avatar: null,
-            bot: true,
-          },
+          user: botUser,
           application: {
             id: applicationId,
             name: 'DisRunner Test Application',
@@ -705,8 +709,12 @@ export class DesktopRuntimeManager {
         Object.entries(actor ?? {}).filter(([key]) => key !== 'resourceType'),
       );
       const argumentText = normalized.slice(commandToken.length).trim();
+      // Context-bound chat-input invocations use authoritative messages; the older
+      // contextless path stays model-only.
       const created = this.#interactions.create({
-        ...(selectedContext === undefined ? {} : { context: selectedContext }),
+        ...(selectedContext === undefined
+          ? {}
+          : { context: selectedContext, messageProfile: 'chat-input-messages-v1' }),
         type: 'command',
         data: {
           name: commandName,
@@ -764,7 +772,10 @@ export class DesktopRuntimeManager {
       signal.throwIfAborted();
       this.assertLive();
       if (selectedContext !== undefined) this.validateContext(selectedContext);
-      const normalizedCallback = normalizeInteractionCallback(callback);
+      const normalizedCallback = normalizeInteractionCallback(
+        callback,
+        selectedContext !== undefined,
+      );
       const result: RuntimeInvocationResult = {
         ok: true,
         command: commandName,
@@ -1145,7 +1156,18 @@ async function verifySignedPing(
 
 function normalizeInteractionCallback(
   value: unknown,
+  authoritative: boolean,
 ): NonNullable<RuntimeInvocationResult['response']> {
+  if (
+    authoritative &&
+    (!isRecord(value) ||
+      Object.keys(value).some((key) => key !== 'type' && key !== 'data') ||
+      typeof value['type'] !== 'number' ||
+      ![4, 5, 9].includes(value['type']) ||
+      (Object.hasOwn(value, 'data') && !isRecord(value['data'])))
+  ) {
+    throw new Error('Invalid interaction message payload.');
+  }
   if (!isRecord(value) || typeof value['type'] !== 'number') {
     throw new Error('Bot interaction callback must be an object with a numeric type.');
   }
@@ -1306,6 +1328,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isCanonicalSnowflake(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[1-9][0-9]{0,19}$/.test(value) &&
+    BigInt(value) <= 18_446_744_073_709_551_615n
+  );
+}
+
 function operationFailure(
   error: unknown,
   signal: AbortSignal,
@@ -1415,7 +1445,7 @@ export class RetainedCoreState {
         if (
           isRecord(resource) &&
           resource['resourceType'] === 'message' &&
-          !isPublicOrdinaryMessage(resource, raw['resources'])
+          !isPublicChannelMessage(resource, raw['resources'])
         )
           continue;
         const view = projectResourceView(resource);
@@ -1478,7 +1508,8 @@ function projectResourceView(value: unknown): RuntimeResourceView | null {
   if (type === 'channel' && Number.isSafeInteger(value['type'])) result['type'] = value['type'];
   if (type === 'message') {
     result['visibility'] = 'channel';
-    result['type'] = 0;
+    // Only type 0 and type 20 reach this projection; the type is kept, not forced.
+    result['type'] = value['type'] === 20 ? 20 : 0;
     if (Number.isSafeInteger(value['flags'])) result['flags'] = value['flags'];
     if (typeof value['edited_timestamp'] === 'string' || value['edited_timestamp'] === null)
       result['edited_timestamp'] = value['edited_timestamp'];
@@ -1523,13 +1554,40 @@ function contextsFromResources(
     );
 }
 
-function isPublicOrdinaryMessage(
+/**
+ * Data consistency check on the full core record. An interaction message is projected only
+ * with interaction origin, the kind that matches its type, an interaction ID, a matching
+ * application and webhook ID and a bot author; anything else is not a channel row.
+ */
+function interactionRecordConsistent(message: Record<string, unknown>): boolean {
+  const kind = message['interaction_message_kind'];
+  const author = message['author'];
+  return (
+    message['message_origin'] === 'interaction' &&
+    ((kind === 'original' && message['type'] === 20) ||
+      (kind === 'followup' && message['type'] === 0)) &&
+    isCanonicalSnowflake(message['interaction_id']) &&
+    isCanonicalSnowflake(message['application_id']) &&
+    message['application_id'] === message['webhook_id'] &&
+    message['recipient_id'] === undefined &&
+    isRecord(author) &&
+    isCanonicalSnowflake(author['id']) &&
+    author['bot'] === true
+  );
+}
+
+function isPublicChannelMessage(
   message: Record<string, unknown>,
   resources: readonly unknown[],
 ): boolean {
+  const interaction =
+    message['message_origin'] === 'interaction' ||
+    message['interaction_id'] !== undefined ||
+    message['interaction_message_kind'] !== undefined ||
+    message['type'] === 20;
+  if (interaction ? !interactionRecordConsistent(message) : message['type'] !== 0) return false;
   if (
     message['visibility'] !== 'channel' ||
-    message['type'] !== 0 ||
     typeof message['flags'] !== 'number' ||
     !Number.isSafeInteger(message['flags']) ||
     ![0, 4, 4096, 4100].includes(message['flags'])
