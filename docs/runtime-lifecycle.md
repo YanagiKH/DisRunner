@@ -219,10 +219,11 @@ The configured bot ID is stable across starts of that selected project. It does 
 
 ## Live conversation projection
 
-Desktop displays a read-only projection of ordinary messages from the current running
-session's retained core store. A message is eligible only when its visibility is explicitly
-`channel`, its type is `0`, its flags are one of `0`, `4`, `4096`, or `4100`, and it belongs
-to an existing type-0 guild text channel in the same guild. Unknown visibility, private or
+Desktop displays a read-only projection of ordinary and selected public interaction messages
+from the current running session's retained core store. An ordinary message is eligible only
+when its visibility is explicitly `channel`, its type is `0`, its flags are one of `0`, `4`,
+`4096`, or `4100`, and it belongs to an existing type-0 guild text channel in the same
+guild. Unknown visibility, private or
 ephemeral messages, unsupported flags, and mismatched channel/guild references are excluded
 before renderer IPC. This is a bounded supported-channel view, not a general Discord
 permission system or support for direct messages. Even with ordinary-message permission
@@ -237,7 +238,13 @@ only the accepted current session/run snapshot, clears the feed while resynchron
 stopped, and does not append optimistic messages. A failed cleanup can retain the underlying
 store for a retry without presenting it as a running conversation.
 
-Command callback responses remain invocation diagnostics, not state-backed conversation rows.
+Public interaction originals (type `20`) and follow-ups (type `0`) are also projected when
+their origin/kind, interaction/application/webhook IDs, bot author, channel and guild are
+consistent, with the same supported flag set. Ephemeral, loading-only and deleted messages
+are excluded. See [Interaction engine](interaction-engine.md#runtime-and-desktop-projection).
+
+Raw command callback responses remain invocation diagnostics, not conversation rows.
+A supported public callback can separately commit a retained message that appears in the feed.
 The model-only browser mode retains its separate example messages. Invocation validation and
 wire actor identity read the full retained live store, never the truncated display projection.
 Deleted actors/channels/guilds and unsupported or reassociated channels invalidate contexts;

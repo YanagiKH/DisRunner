@@ -4,12 +4,13 @@ DisRunner v0.1 is a Preview testing foundation, not Discord and not proof that p
 
 ## Current product boundary
 
-- The authoritative v0.1 behavior is the deterministic core/CLI, bundled signed raw-webhook example, and Electron's real local `/ping` path.
+- The authoritative v0.1 behavior includes the deterministic core/CLI, bundled signed raw-webhook example, Electron's local command path, and selected retained ordinary/public interaction message projections.
 - `discord.js`, `discord.py`, generic Gateway/stdio, and simulator SDK adapters are not implemented and fail project validation.
-- Most desktop guild, command, scenario, inspector, risk, and settings content is seeded visual-preview data.
-- Desktop fixtures, REST mutations, Gateway dispatches, and renderer state are not synchronized end to end.
+- Most desktop editors, inspector, risk, and settings content remains seeded visual-preview data.
+- Selected ordinary/public interaction message mutations connect retained state, Gateway dispatches and Desktop projections; this is not general resource or editor synchronization.
 - Guild Editor/Scenario Lab/Settings changes and Risk Center exports are not persisted.
-- Desktop interactions do not cover context commands, autocomplete, components, modals, real follow-up observation, or a controllable 15-minute token clock.
+- Desktop interaction controls do not cover context commands, autocomplete, components, modal submissions, or a controllable 15-minute token clock. Supported public originals/follow-ups can appear after commit; raw callbacks, ephemeral responses and loading-only responses are not conversation rows.
+- The packaged Linux G1 and bounded strict permission matrices passed, but `completeParity` remains false. Successful old-run callback rejection after restart, SDK adapters, accessibility, Windows/macOS strict qualification and installed-release acceptance remain separate gaps. See [G1 evidence](g1-acceptance.md).
 
 ## Ordinary message permission boundary
 

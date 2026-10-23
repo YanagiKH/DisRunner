@@ -51,10 +51,37 @@ Use the schema shipped with a release when possible. The `main` URL can change. 
 - `environment`: explicit non-secret string values. Credential-like names cannot override supervisor-owned values: they are dropped by the process boundary and protected values are written afterward. Production-shaped token values are rejected; the UI displays names, not a value preview.
 - `profile.mode`: passed to the current core/REST profile. It is not a promise that every parser has universal strict/lenient behavior.
 - `profile.ordinaryMessagePermissions`: optional `legacy-unenforced` (the default) or `guild-text-own-messages-v1`. Unknown or non-string values fail validation. Independent of `profile.mode`; either payload-validation mode can use either permission profile.
+- `profile.commandRegistry`: optional `command-registry-v1` descriptor with an explicit guild installation allowlist. Omission disables registration; see below. Independent of mode and ordinary message permissions.
 - `profile.seed`: deterministic input for runtime core IDs/randomness.
 - `profile.networkPolicy`: must be `offline`.
 - `fixtures.guild` / `fixtures.user`: optional bounded JSON files loaded into runtime core state. `fixtures.user` supplies the invocation actor, not the authenticated bot.
 - `fixtures.bot`: required only with `guild-text-own-messages-v1`; forbidden with omitted or explicit `legacy-unenforced`. See below. Desktop diagnostic projections do not guarantee viewer permissions.
+
+## Command registry opt-in
+
+To enable [application-command registration](application-command-registry.md), add this field inside the existing `profile` object:
+
+```json
+{
+  "commandRegistry": {
+    "profile": "command-registry-v1",
+    "guildIds": ["1000"]
+  }
+}
+```
+
+Both descriptor fields are required and additional fields are rejected. Omission disables the registry; there is no `false`, `null` or default descriptor. `guildIds: []` enables global-only registration without requiring a guild fixture.
+
+`guildIds` accepts at most 128 unique canonical positive decimal uint64 strings, from `"1"` through `"18446744073709551615"`. Numbers, zero, leading zeros, signs, spaces and exponent notation are rejected rather than normalized. Each configured ID must reference a loaded `guild` fixture. Version 1 still accepts only one `fixtures.guild` file containing one guild envelope, not an array of guild fixtures; listing additional absent guilds fails validation. Fixture presence alone never installs a guild for registration.
+
+The JSON Schema checks the descriptor structure, uniqueness, length and digit pattern. Runtime validation additionally checks the uint64 numeric upper bound and loaded guild existence; the schema pattern alone proves neither. Invalid configuration fails project loading before listeners or a child process start, with fixed errors that do not echo submitted values:
+
+- Invalid descriptor: `profile.commandRegistry must be a command-registry-v1 descriptor with unique canonical guildIds (maximum 128).`
+- Missing fixture guild: `profile.commandRegistry.guildIds must reference loaded guild fixtures.`
+
+Registration is independent of strict/lenient mode and `ordinaryMessagePermissions`. Registry-only enablement does not require `fixtures.bot`; that fixture remains required only for the enforcing ordinary-message permission profile and forbidden for the legacy permission profile. No membership, role or permission grant supplies registry installation authority.
+
+The shared runtime passes this descriptor to its existing REST instance with the same state, synthetic credential and bootstrap application identity. The raw child discovers its application through authenticated `GET /oauth2/applications/@me`, not a new config field or application-ID environment variable. The only adapter remains `raw-interaction-webhook`. Successful restarts create fresh command state and credentials. To load edited configuration, reselect the project; editing the file alone does not update the selected configuration.
 
 ## Ordinary message permission opt-in
 
@@ -146,4 +173,4 @@ Hard-coded ports reduce parallel reliability. Do not use hostnames other than ex
 
 Version 1 has one `profile` object and one fixed config filename. Multiple named profiles, inheritance, hot reload, and profile switching are planned. Use separate trusted project copies/config revisions when different settings are required.
 
-The desktop validator must succeed before **Start Bot** is enabled. CLI `validate` validates scenario files, not project configuration. Validation is not a trust decision; use [hard isolation](offline-mode.md#hard-isolation) for unknown code.
+The desktop validator must succeed before **Start Bot** is enabled. CLI `validate` validates scenario files, not project configuration. Validation is not a trust decision; use [hard isolation](offline-mode.md#running-untrusted-code) for unknown code.

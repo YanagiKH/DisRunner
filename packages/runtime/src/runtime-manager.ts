@@ -441,6 +441,9 @@ export class DesktopRuntimeManager {
       ]);
       const rest = new core.LocalRestEmulator({
         state,
+        ...(configuration.profile.commandRegistry === undefined
+          ? {}
+          : { commandRegistry: configuration.profile.commandRegistry }),
         ordinaryMessagePermissions: configuration.profile.ordinaryMessagePermissions,
         messageDomain: { runId, clockDomain: 'realtime' },
         interactions,

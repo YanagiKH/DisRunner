@@ -30,6 +30,14 @@ The selected project must contain the actor, guild, and text channel, and the ch
 
 Permission-negative fixtures may start successfully and return ordinary REST `403` responses. Case v1 still asserts the webhook response type and content, not arbitrary REST permissions: a test bot can make an ordinary REST request and report its outcome in its callback. Interaction-token routes keep their existing authorization; an ordinary-message denial does not itself imply a callback failure. This is shared-runtime behavior, not SDK conformance.
 
+## Application-command registration
+
+`bot-test` also loads the shared [command registry project opt-in](project-configuration.md#command-registry-opt-in). Omission leaves registration disabled; `guildIds: []` enables only global registration, and guild registration requires an explicit allowlist backed by loaded fixtures. There is no CLI registry override. This setting is independent of ordinary message permissions and does not add an adapter.
+
+A supervised raw-webhook child can discover its application through authenticated `GET /oauth2/applications/@me` and register through the existing injected REST URL and synthetic Bot credential. Each run owns its command state; a successful restart starts fresh and the child must register again. Signed readiness and authenticated webhook responses are still required.
+
+Case v1 remains an assertion of webhook response type and exact content, not a direct registry HTTP assertion format. A child reporting success is not independent proof of the registration status, response body or state revision. Registering a name does not connect it to a handler, change the invocation grammar, add options support, or make invocation look up the registry. SDK and Command Explorer integration remain unsupported.
+
 ## Result and cleanup
 
 The module exports `runBotTest(options, dependencies?)`. Its only injectable dependency is `createSession`, for unit testing. Production uses the same runtime as Desktop; it never spawns a child directly. The order is bounded read/parse, session creation, project selection, context validation, startup, sequential invoke/evaluate, disposal in `finally`, and final report writing. All steps are parsed before startup. First mismatch stops later steps; unexecuted steps are absent, not counted as passes.

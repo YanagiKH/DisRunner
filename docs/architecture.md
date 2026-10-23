@@ -1,6 +1,6 @@
 # Architecture
 
-DisRunner v0.1 is a Preview with three deliberately different surfaces. The deterministic core and CLI are the broadest tested surface. Electron connects a raw interaction-webhook project for one real mutually authenticated command path. Most Discord-like desktop editors and panels use seeded display data.
+DisRunner v0.1 is a Preview with three deliberately different surfaces. The deterministic core and CLI are the broadest tested surface. Electron connects raw interaction-webhook projects through a mutually authenticated command path and bounded live message projections. Most Discord-like desktop editors and panels use seeded display data.
 
 ## Shipped boundaries
 
@@ -33,13 +33,13 @@ The core provides deterministic primitives and partial Discord-shaped protocol b
 
 The desktop runtime validates a selected version 1 project, starts its declared process, and creates loopback REST and Gateway services with a per-run synthetic token. For the only supported adapter, `raw-interaction-webhook`, it also creates an ephemeral Ed25519 key pair and an independent 32-byte peer secret. The child verifies signed requests. Every accepted response HMAC-binds the request timestamp, HTTP status, request digest, and exact response digest; Electron verifies that HMAC on bounded raw bytes before checking status, parsing JSON, or validating the callback through the core interaction lifecycle.
 
-Electron does not currently provide a supported generic Gateway, `discord.js`, `discord.py`, or stdio adapter. The local REST/Gateway services are real core services, but desktop fixture-to-event synchronization, permission enforcement on REST routes, REST-mutation Gateway dispatch, and deferred follow-up observation are not wired in v0.1.
+Electron does not currently provide a supported generic Gateway, `discord.js`, `discord.py`, or stdio adapter. Selected ordinary and public interaction message mutations share retained core state, emit Gateway message dispatches and feed bounded Desktop projections. Ordinary guild-text permission enforcement requires the explicit `guild-text-own-messages-v1` profile and bot fixture; the default remains legacy-unenforced. Context-bound chat-input invocations use `chat-input-messages-v1`, including original/follow-up message routes. These are bounded profiles, not general fixture/event synchronization or Discord parity.
 
 ### Renderer
 
-The renderer has a narrow preload bridge for project selection, runtime start/stop, command invocation, and window controls. Runtime status, bounded process output, the real mutually authenticated command result, and associated runtime trace/risk entries come from Electron.
+The renderer has a narrow preload bridge for project selection, runtime start/stop, command invocation, and window controls. Runtime status, bounded process output, mutually authenticated command diagnostics, selected retained guild/channel/user/message projections, and associated runtime trace/risk entries come from Electron. The live feed includes ordinary type 0 messages, public interaction originals of type 20 and public follow-ups of type 0. It is diagnostic state, not viewer-permission-filtered state.
 
-Guilds, channels, members, command/scenario editors, most inspector values, the virtual-clock control, and much of Risk Center are seeded visual previews. Their edits are not persisted and do not drive the CLI/core scenario runner.
+Guild/member editors, command/scenario editors, most inspector values, the virtual-clock control, and much of Risk Center remain seeded visual previews. Their edits are not persisted and do not drive the CLI/core scenario runner.
 
 ## Determinism and state
 
@@ -64,9 +64,9 @@ v0.1 has no workspace database, migration system, automatic fixture persistence,
 2. Electron creates a core interaction and signs the Discord-shaped HTTP body with the per-run private key.
 3. The imported loopback endpoint verifies the request, serializes one bounded response, and authenticates its exact status/body with the protected per-run peer secret.
 4. Electron reads a bounded response, timing-safely verifies its HMAC, then checks HTTP status and parses JSON.
-5. Electron validates the authenticated callback through `InteractionEngine`, records bounded evidence, and renders the result.
+5. Electron validates the authenticated callback through `InteractionEngine` and records invocation diagnostics. Supported public message commits update retained state, emit selected Gateway dispatches and appear through the live projection.
 
-This path does not currently wait for a deferred edit/follow-up, mutate the displayed seeded guild state, or generate a complete end-to-end Gateway/REST waterfall.
+Invocation completion does not wait for a deferred edit/follow-up. Later supported public original/follow-up commits can appear through the live feed; raw callback diagnostics are not themselves conversation rows. This does not generate a complete end-to-end Gateway/REST waterfall. See [Interaction engine](interaction-engine.md) for profile and projection boundaries.
 
 ## Trust boundaries
 

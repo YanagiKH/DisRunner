@@ -33,29 +33,30 @@ The `bot.runtime` label in a raw-webhook project describes how to launch that we
 
 ## Capability matrix
 
-| Surface                                 | v0.1 status     | Current boundary                                                                   |
-| --------------------------------------- | --------------- | ---------------------------------------------------------------------------------- |
-| Deterministic state/clock/IDs/snapshots | Core-tested     | In-process version 1 scenarios and tests                                           |
-| Scenario run and assertions             | Core-tested     | CLI/core schema; unsupported actions fail validation                               |
-| Recording and deterministic replay      | Core-tested     | Versioned CLI recording envelope and verification output                           |
-| JSON/JUnit/HTML/SARIF reports           | Core-tested     | Generated from CLI scenario results; findings do not fail a run unless asserted    |
-| Interaction lifecycle                   | Core-tested     | Immediate/deferred/follow-up state and 3,000/900,000 ms virtual-time contracts     |
-| Electron raw-webhook interaction        | Desktop preview | Real local `/ping`; response status/body authenticated before callback validation  |
-| Permission calculation                  | Core-tested     | `BigInt` roles, overwrites, administrator and implicit channel removals            |
-| Intent filtering                        | Core-tested     | In-process requested/allowed intent behavior; desktop config intents are not wired |
-| Rate-limit engine                       | Core-tested     | Configurable programmatic buckets; not a desktop project-profile feature           |
-| REST emulator                           | Core-tested     | Partial local routes; explicit core command-registry-v1 opt-in                     |
-| Gateway lifecycle                       | Core-tested     | Partial in-process/WebSocket lifecycle; no desktop fixture/event synchronization   |
-| Protocol/object limits                  | Core-tested     | Selected message/embed/attachment/component/custom-ID checks only                  |
-| Risk findings                           | Core-tested     | Small implemented rule set listed in `docs/risk-engine.md`                         |
-| Desktop runtime status/output           | Desktop preview | Project validation, PID/status, bounded stdout/stderr, start/stop and cleanup      |
-| Guild/command/scenario editor surfaces  | Visual preview  | Seeded display state; edits/runs are not persisted or connected to the CLI engine  |
-| Inspector and Risk Center               | Visual preview  | Some `/ping` timing/callback and runtime risks; remaining panels are illustrative  |
-| Generic fault injection                 | Planned         | No version 1 `faults` schema or packet/network fault policy                        |
-| Imported-process performance profiling  | Planned         | No CPU/memory/event-loop/queue instrumentation                                     |
-| Components V2 catalog                   | Planned         | Selected validators do not constitute complete support                             |
-| Voice state/transport/audio/encryption  | Out             | Not implemented                                                                    |
-| CDN/regional/anti-abuse behavior        | Out             | Not reproduced                                                                     |
+| Surface                                 | v0.1 status     | Current boundary                                                                                  |
+| --------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------- |
+| Deterministic state/clock/IDs/snapshots | Core-tested     | In-process version 1 scenarios and tests                                                          |
+| Scenario run and assertions             | Core-tested     | CLI/core schema; unsupported actions fail validation                                              |
+| Recording and deterministic replay      | Core-tested     | Versioned CLI recording envelope and verification output                                          |
+| JSON/JUnit/HTML/SARIF reports           | Core-tested     | Generated from CLI scenario results; findings do not fail a run unless asserted                   |
+| Interaction lifecycle                   | Core-tested     | Immediate/deferred/follow-up state and 3,000/900,000 ms virtual-time contracts                    |
+| Electron raw-webhook interaction        | Desktop preview | Real local `/ping`; response status/body authenticated before callback validation                 |
+| Permission calculation                  | Core-tested     | `BigInt` roles, overwrites, administrator and implicit channel removals                           |
+| Intent filtering                        | Core-tested     | In-process requested/allowed intent behavior; desktop config intents are not wired                |
+| Rate-limit engine                       | Core-tested     | Configurable programmatic buckets; not a desktop project-profile feature                          |
+| REST emulator                           | Core-tested     | Partial local routes; explicit core/shared-runtime command-registry-v1 opt-in                     |
+| Gateway lifecycle                       | Core-tested     | Partial lifecycle plus selected committed message dispatches; no imported-bot adapter             |
+| Protocol/object limits                  | Core-tested     | Selected message/embed/attachment/component/custom-ID checks only                                 |
+| Risk findings                           | Core-tested     | Small implemented rule set listed in `docs/risk-engine.md`                                        |
+| Desktop runtime status/output           | Desktop preview | Project validation, PID/status, bounded stdout/stderr, start/stop and cleanup                     |
+| Guild/command/scenario editor surfaces  | Visual preview  | Seeded display state; edits/runs are not persisted or connected to the CLI engine                 |
+| Inspector and Risk Center               | Visual preview  | Live invocation diagnostics and selected runtime risks; remaining panels illustrative             |
+| Live conversation messages              | Desktop preview | Retained ordinary type 0 and public interaction type 20/0 messages; bounded diagnostic projection |
+| Generic fault injection                 | Planned         | No version 1 `faults` schema or packet/network fault policy                                       |
+| Imported-process performance profiling  | Planned         | No CPU/memory/event-loop/queue instrumentation                                                    |
+| Components V2 catalog                   | Planned         | Selected validators do not constitute complete support                                            |
+| Voice state/transport/audio/encryption  | Out             | Not implemented                                                                                   |
+| CDN/regional/anti-abuse behavior        | Out             | Not reproduced                                                                                    |
 
 ## Compatibility policy
 
@@ -69,8 +70,8 @@ Report protocol drift with a minimal redacted fixture. Never attach a production
 
 ## Opt-in ordinary message authorization
 
-The `guild-text-own-messages-v1` profile enforces live guild/member/role/overwrite permissions for ordinary guild-text message reads and own-message mutations. It is available through the core API and the shared-runtime project configuration used by CLI `bot-test` and Desktop, with a required explicit bot fixture and no inferred permission grants. The default remains **legacy-unenforced**; existing projects are not migrated or enabled automatically. Desktop state views are diagnostic, not viewer-permission-filtered; this adds no renderer permission controls or GUI certification. DMs retain legacy behavior. Own-only mutation, conservative timeout restrictions, ordinary-only history excluding interaction-origin messages, and uncertified richer composition permissions are deliberate boundaries, not Discord parity. See [Ordinary message permissions](docs/ordinary-message-permissions.md) for the API, required fixtures and exact scope.
+The `guild-text-own-messages-v1` profile enforces live guild/member/role/overwrite permissions for ordinary guild-text message reads and own-message mutations. It is available through the core API and the shared-runtime project configuration used by CLI `bot-test` and Desktop, with a required explicit bot fixture and no inferred permission grants. The default remains **legacy-unenforced**; existing projects are not migrated or enabled automatically. Desktop state views are diagnostic, not viewer-permission-filtered; this adds no renderer permission controls or full GUI permission certification. The bounded packaged Linux allow/deny matrix is qualified separately in [G1 evidence](docs/g1-acceptance.md). DMs retain legacy behavior. Own-only mutation, conservative timeout restrictions, ordinary-only history excluding interaction-origin messages, and uncertified richer composition permissions are deliberate boundaries, not Discord parity. See [Ordinary message permissions](docs/ordinary-message-permissions.md) for the API, required fixtures and exact scope.
 
 ## Opt-in application command registration
 
-The core REST `command-registry-v1` profile supports global/guild registration for command types 1/2/3, with slash options restricted to empty arrays. It requires explicit bootstrap identity and a guild installation allowlist. It is not enabled by default or wired through the shared runtime, SDKs, or Command Explorer; it adds no invocation or Gateway command events. See [Application command registry](docs/application-command-registry.md) for exact payload, state, version, history, and safety boundaries.
+The REST `command-registry-v1` profile supports global/guild registration for command types 1/2/3, with slash options restricted to empty arrays. Core construction requires explicit bootstrap identity; the shared runtime uses its own per-run bootstrap identity and accepts optional `profile.commandRegistry` in Desktop and CLI `bot-test` projects. Omission disables registration; an empty guild allowlist enables global-only registration, while guild registration requires explicit IDs backed by loaded fixtures. Mode and ordinary message permissions do not imply installation. Registration shares the run's state and credentials; successful restart creates fresh command state and credentials. Command records remain outside renderer projections. This adds no SDK or Command Explorer integration, registered-command invocation lookup, or Gateway command events. See [Application command registry](docs/application-command-registry.md) for exact payload, state, version, history, and safety boundaries.

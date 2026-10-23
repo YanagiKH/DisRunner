@@ -1,7 +1,8 @@
 import { open, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { OrdinaryMessagePermissionProfile } from '@disrunner/core';
+import { parseCommandRegistryProfile } from '@disrunner/core';
+import type { CommandRegistryProfile, OrdinaryMessagePermissionProfile } from '@disrunner/core';
 
 import type { ProjectSummary } from './contracts.js';
 
@@ -21,6 +22,7 @@ interface ResolvedAdapter {
 }
 
 interface ResolvedProfile {
+  readonly commandRegistry?: CommandRegistryProfile;
   readonly ordinaryMessagePermissions: OrdinaryMessagePermissionProfile;
   readonly mode: 'strict' | 'lenient';
   readonly seed: number;
@@ -143,9 +145,27 @@ export async function loadProjectConfiguration(
   const profileRaw = requireRecord(config['profile'], 'profile');
   assertKeys(
     profileRaw,
-    ['mode', 'seed', 'intents', 'networkPolicy', 'hotReload', 'ordinaryMessagePermissions'],
+    [
+      'mode',
+      'seed',
+      'intents',
+      'networkPolicy',
+      'hotReload',
+      'ordinaryMessagePermissions',
+      'commandRegistry',
+    ],
     'profile',
   );
+  let commandRegistry: CommandRegistryProfile | undefined;
+  if (Object.hasOwn(profileRaw, 'commandRegistry')) {
+    try {
+      commandRegistry = parseCommandRegistryProfile(profileRaw['commandRegistry']);
+    } catch {
+      throw new TypeError(
+        'profile.commandRegistry must be a command-registry-v1 descriptor with unique canonical guildIds (maximum 128).',
+      );
+    }
+  }
   const ordinaryMessagePermissions =
     profileRaw['ordinaryMessagePermissions'] === undefined
       ? 'legacy-unenforced'
@@ -169,6 +189,16 @@ export async function loadProjectConfiguration(
   if (typeof hotReload !== 'boolean') throw new TypeError('profile.hotReload must be a boolean.');
 
   const resources = await loadFixtures(root, config['fixtures'], ordinaryMessagePermissions);
+  if (commandRegistry !== undefined) {
+    const guildIds = new Set(
+      resources
+        .filter((resource) => resource['resourceType'] === 'guild')
+        .map((resource) => resource['id']),
+    );
+    if (commandRegistry.guildIds.some((id) => !guildIds.has(id))) {
+      throw new TypeError('profile.commandRegistry.guildIds must reference loaded guild fixtures.');
+    }
+  }
   const botUserId =
     ordinaryMessagePermissions === 'guild-text-own-messages-v1'
       ? (resources.at(-1)?.['id'] as string)
@@ -190,6 +220,7 @@ export async function loadProjectConfiguration(
     environment,
     adapter,
     profile: {
+      ...(commandRegistry === undefined ? {} : { commandRegistry }),
       mode,
       seed,
       intents,

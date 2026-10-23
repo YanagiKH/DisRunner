@@ -1,10 +1,47 @@
 # Application command registry
 
-`command-registry-v1` is an explicit, core REST opt-in for local application-command registration. It stores global and guild commands in `VirtualState`; it does not invoke them. Its Discord-shaped responses are a bounded simulator contract, not complete Discord API parity.
+`command-registry-v1` is an explicit REST opt-in for local application-command registration. It stores global and guild commands in `VirtualState`; it does not invoke them. Its Discord-shaped responses are a bounded simulator contract, not complete Discord API parity.
 
-There is no default enablement, shared-runtime/project configuration, SDK registration integration, or Command Explorer wiring for this profile. Registration emits no Gateway command events. Existing interaction execution is a separate surface; registering a command does not connect it to a handler.
+The shared runtime used by Desktop and CLI `bot-test` supports this profile through optional project configuration. It remains disabled by default, with no SDK registration integration or Command Explorer wiring. Registration emits no Gateway command events. Existing interaction execution is a separate surface; registering a command does not connect it to a handler.
 
-## Enablement and identity
+## Project enablement and raw-Bot registration
+
+Add this descriptor inside the existing `profile` in `discord-simulator.config.json`:
+
+```json
+{
+  "commandRegistry": {
+    "profile": "command-registry-v1",
+    "guildIds": ["1000"]
+  }
+}
+```
+
+This is a profile fragment, not a complete project. Guild `1000` must exist in the loaded guild fixture. Use `guildIds: []` for global-only registration, which needs no guild fixture. Omit `commandRegistry` to disable it; `null`, booleans and implicit defaults are not supported. See [project configuration](project-configuration.md#command-registry-opt-in) for validation and fixture requirements.
+
+The setting is independent of `profile.mode` and `profile.ordinaryMessagePermissions`. It does not install the bot into every fixture guild or infer installation from membership or permissions. `raw-interaction-webhook` remains the only supported adapter, and the existing signed readiness and response-authentication requirements still apply.
+
+The supervised child uses the existing `DISCORD_API_BASE_URL` and `DISRUNNER_FAKE_TOKEN` environment values. Discover the authoritative application ID with authenticated `GET /oauth2/applications/@me`, then use that ID in registration routes. For example, this code runs inside the supervised Node raw-webhook process; it is not a standalone adapter:
+
+```js
+const apiBase = process.env.DISCORD_API_BASE_URL;
+const authorization = `Bot ${process.env.DISRUNNER_FAKE_TOKEN}`;
+const bootstrap = await fetch(`${apiBase}/oauth2/applications/@me`, {
+  headers: { Authorization: authorization },
+});
+if (!bootstrap.ok) throw new Error('Local application discovery failed.');
+const application = await bootstrap.json();
+const registration = await fetch(`${apiBase}/applications/${application.id}/commands`, {
+  method: 'POST',
+  headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'ping', description: 'Ping' }),
+});
+if (!registration.ok) throw new Error('Local command registration failed.');
+```
+
+Do not supply a production credential, invent an application-ID environment variable, or use a fixture user/bot ID as the application ID. Runtime REST uses the same per-run bootstrap application identity as Gateway READY and signed interactions. A valid authenticated registry route without the opt-in returns `501` with `Command registry profile is not enabled.`
+
+## Core enablement and identity
 
 Supply `commandRegistry` to `LocalRestEmulator` together with a validated [REST bootstrap identity](rest-bootstrap.md). REST binds the registry application exclusively to `bootstrap.application.id`. The registry option is a copied, frozen descriptor, not an injected service or request-controlled identity.
 
@@ -102,6 +139,12 @@ Responses are copies, not live state references. Successful REST responses inclu
 
 The authoritative records are `application-command` resources in `VirtualState`. There is no independent registry cache: undo, redo, reset, or snapshot restore is reflected by subsequent operations. Invalid stored records fail closed with `503`; overwrite does not silently repair corruption or return a misleading partial list. Malformed records outside the requested scope can also cause failure; unrelated well-formed records are left untouched.
 
+The shared runtime uses the same per-run state for registration and ordinary/interaction messages, not a separate command cache or persistence file. A successful restart creates fresh credentials and fresh command state; the child must register again. Editing the config file after project selection does not change the selected configuration: reselect the project to load changes.
+
+Existing core `VirtualState` undo, redo and snapshot restore immediately affect subsequent REST operations. `state.reset()` clears **all** resources, not just commands: global listing is empty and an allowlisted guild returns `404` / `10004` until its resource is restored, for example by restoring the initial snapshot. Restoring a same-run snapshot containing commands restores those records too. These are core state operations; this profile adds no public Session reset/restore API or GUI action.
+
+Renderer snapshots and state events still project only guild, channel, user and message resources. Command records and their private registry markers are excluded. Command writes can advance `stateRevision`, increase `totalResources` and make `truncated` true without adding command rows to the displayed resources. This is not Command Explorer integration.
+
 A substantive mutation commits exactly once. Canonically unchanged POST/PATCH/PUT operations return `200` without changing revision, version, or history. Every mutating call, including no-ops, still enters the state-scoped mutation guard and an outermost transaction. Caller-owned active transactions, nested registry writes, and commit-listener writes are rejected. Commit listeners may read the fully committed state; listener failures do not undo a successful commit.
 
 `version` is a local positive-decimal uint64 approximation, **not a timestamp-bearing Discord Snowflake**. New commands use the anticipated next state revision. A forward edit uses the greater of that revision and the currently stored command version plus one. Undo or restore can rewind versions. There is no historical uniqueness or global monotonicity guarantee across replay.
@@ -124,7 +167,7 @@ Only collection GET accepts a query: exactly `with_localizations=false`, or no q
 
 GET and DELETE require zero body bytes: even whitespace or JSON `null` is invalid. A declared body larger than `maxBodyBytes` receives `413`; a positive in-bounds declared body is rejected immediately. Chunked bodies are rejected at the first nonempty chunk. JSON mutations inherit the REST body bound (`maxBodyBytes`, 1 MiB by default) and malformed-JSON handling.
 
-All supported collection and item methods normalize to the same verified app/scope collection path before the injected `RateLimitEngine` is called. Configure one **methodless** rule per intended collection template, with distinct global/guild rule IDs and `majorParameters: ['applicationId']` or `['applicationId', 'guildId']`. The corresponding templates are `/applications/:applicationId/commands` and `/applications/:applicationId/guilds/:guildId/commands`. Reads can therefore consume the same local bucket as writes. The emulator does not install or overwrite these rules for you. Existing global limiting is inherited; production quotas, daily-create limits, and real Discord bucket identities are not modeled.
+All supported collection and item methods normalize to the same verified app/scope collection path before the injected `RateLimitEngine` is called. Configure one **methodless** rule per intended collection template, with distinct global/guild rule IDs and `majorParameters: ['applicationId']` or `['applicationId', 'guildId']`. The corresponding templates are `/applications/:applicationId/commands` and `/applications/:applicationId/guilds/:guildId/commands`. Reads can therefore consume the same local bucket as writes. The emulator does not install or overwrite these rules for you. The shared runtime adds no registry-specific rate rule; existing injected/global limiting is unchanged. Production quotas, daily-create limits, and real Discord bucket identities are not modeled.
 
 ## Fixed registry errors
 
