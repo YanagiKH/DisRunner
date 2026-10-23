@@ -35,3 +35,5 @@ export type {
 } from './interaction-message-domain.js';
 
 export type { OrdinaryMessagePermissionProfile } from './ordinary-message-permissions.js';
+export * from './application-command-profile.js';
+export * from './application-command-registry.js';
