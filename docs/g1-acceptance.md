@@ -1,4 +1,4 @@
-# Linux raw G1 parity: harness, not acceptance
+# Linux raw G1: bounded packaged qualification
 
 This harness exercises the shared runtime through the CLI and packaged Desktop.
 Qualification requires evidence tied to the exact tested source and build; equal
@@ -65,17 +65,35 @@ save DOM, screenshots, real bridge corroboration and packaged artifact identity.
 Containment is failure, never cleanup success. Read-only independent review is
 required; corrected assertions need new evidence rather than overwritten runs.
 
-Packaged GUI execution has not yet been qualified. CLI-only checks and renderer
-unit tests do not establish G1 acceptance. Existing package-smoke
-security/forged-peer checks are unchanged and remain separate from this harness;
-the parity harness adds no live-host negative probe.
+[PR #35](https://github.com/YanagiKH/DisRunner/pull/35) completed the packaged
+Linux G1 matrix and the bounded strict ordinary-message permission matrix. The
+[merged-main evidence artifact](https://github.com/YanagiKH/DisRunner/actions/runs/39810441560/artifacts/12439657356)
+records source commit `0564eb74950451f53d3760319d34c0c4c3473d8c` and tree
+`be532f20f297c275d638850db4af2207c11e2a72`, with `harnessMatrixPassed`,
+`guiMatrixPassed` and `strictPermissionMatrixPassed` true. `completeParity` remains false.
+This qualification applies to that recorded source/build, not automatically to later
+changes, including shared-runtime command registration.
 
-G0 SDK experiments, actual late-success stale-result qualification, packaged GUI
-execution, Windows/macOS qualification, literal root `pnpm verify`, exact remote
-CI and G8 installed-release acceptance remain separate gates. Direct component
-checks must be reported individually, never relabelled an aggregate pass.
+The strict matrix covers two fresh runs each of allow, missing-SEND and missing-VIEW
+fixtures. Ten ordinary HTTP operations and their separately measured callbacks
+establish allowed create/edit/delete rows and denied creates without ordinary
+state changes or rows. Six distinct runs include stopped-state and direct-child/port
+cleanup evidence. Callback diagnostics and callback commits are not proof that a
+separate ordinary operation succeeded.
 
-## Cleanup recovery candidate (not GUI acceptance)
+All platform package-smoke jobs passed; this does not qualify the strict matrix on
+Windows or macOS. Existing security/forged-peer smoke checks remain separate; the
+parity harness adds no live-host negative probe. Executable/ASAR identity was
+recorded by the hosted harness, but those binary bytes were not included for
+independent rehashing. CLI-only checks and renderer unit tests alone do not
+establish GUI acceptance.
+
+G0 SDK experiments, actual late-success stale-result qualification, accessibility,
+Windows/macOS strict qualification and G8 installed-release acceptance remain
+separate gates. No release or installed-package acceptance is implied. Direct
+component checks must be reported individually, never relabelled an aggregate pass.
+
+## Cleanup recovery scope
 
 Desktop recovery uses the existing ShutdownResult and phase contracts. Start and
 project changes remain blocked after runtime errors until explicit cleanup is
@@ -94,14 +112,16 @@ resource release.
 
 The packaged harness explicitly completes error recovery before selecting another
 project. Its independent process/socket release assertions remain unchanged.
-Actual recovery-button visuals, focus, screen-reader behavior, packaged Electron
-shutdown, Windows uncertainty behavior, and combined lifecycle integration remain
-pending. Do not infer those qualifications from unit tests or a blocked GUI launch.
+The qualified Linux harness covers its packaged recovery and shutdown paths with
+process/socket evidence. This is not comprehensive recovery-button visual, focus
+or screen-reader qualification, Windows uncertainty behavior, or all lifecycle
+failure combinations. Do not infer those qualifications from unit tests or the
+bounded Linux result.
 
-## Hosted Linux qualification wiring (execution pending)
+## Hosted Linux qualification wiring
 
 The existing CI E2E matrix retains every platform and its original package smoke.
-Only the Linux x64 entry adds the G1 candidate harness after smoke succeeds. It
+Only the Linux x64 entry adds the G1 harness after smoke succeeds. It
 builds the CLI separately, reuses the unpacked desktop package at
 `apps/desktop/release/linux-unpacked/disrunner`, and uses the existing `xvfb-run -a`
 launch mechanism. No Electron sandbox flags, credentials, live Discord calls,

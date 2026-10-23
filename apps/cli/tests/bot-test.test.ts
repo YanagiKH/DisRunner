@@ -705,9 +705,17 @@ describe.sequential(
         {
           casePath: join(fixtures, 'case-pass.json'),
           projectDirectory: projectPath,
-          timeoutMs: 1000,
+          timeoutMs: 5000,
         },
         { createSession: observed.factory },
+      );
+      console.info(
+        'C05_SAFE_RESULT ' +
+          JSON.stringify({
+            exitCode: result.exitCode,
+            status: result.report.status,
+            errorCode: result.report.error?.code,
+          }),
       );
       await assertCleanup(observed, projectPath);
       expect(result.exitCode).toBe(1);

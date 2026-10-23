@@ -11,11 +11,13 @@ Implemented scope:
 - CLI validate/run/test, versioned record/replay, and JSON/JUnit/HTML/SARIF output;
 - signed raw-interaction-webhook example;
 - Electron project validation/process lifecycle and a real mutually authenticated local `/ping` path;
+- selected ordinary and public chat-input message commits, Gateway dispatches and bounded Desktop live projections, plus explicit ordinary-message permission enforcement;
+- packaged Linux G1 and strict ordinary-message allow/deny matrices, with `completeParity: false`; see [qualified evidence and remaining gates](docs/g1-acceptance.md);
 - Discord-like desktop visual fixtures and preview feature surfaces.
 
 Known exit gaps for a broader usable preview:
 
-- desktop fixture, REST state, Gateway events, trace panels, and renderer state are not synchronized end to end;
+- synchronization is limited to selected message/state projections and dispatches; other resources, editors and diagnostic panels are not fully connected;
 - editor/scenario/settings changes are not persisted;
 - desktop interaction controls do not cover context commands, autocomplete, components, or modals;
 - generic fault injection, imported-process performance metrics, broad risk rules, and crash recovery need implementation;
@@ -24,8 +26,8 @@ Known exit gaps for a broader usable preview:
 ## Next — connected desktop preview
 
 - Persist virtual guild, channel, role, user, message, command, component, and modal fixtures.
-- Connect desktop actions to the same core state used by REST and Gateway transports.
-- Emit Gateway events from REST/state mutations and display authoritative traces, diffs, permissions, buckets, and findings.
+- Extend the selected message connection to other desktop actions and core resources used by REST and Gateway transports.
+- Extend Gateway events beyond selected message mutations and connect the remaining trace, diff, permission, bucket and finding panels.
 - Expose the core virtual clock and interaction 3-second/15-minute boundaries in Electron.
 - Connect Scenario Lab to the versioned core/CLI scenario engine and safe report export.
 - Add recovery tests for app crashes, active ports, and child-process cleanup.
