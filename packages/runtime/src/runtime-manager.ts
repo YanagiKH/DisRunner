@@ -1113,18 +1113,39 @@ async function waitForSignedPing(
   signal: AbortSignal,
   assertLive: () => void,
 ): Promise<void> {
+  const staleSigningTimestamp = new Error('Readiness signing timestamp has not advanced.');
+  let signedSecond: number | undefined;
   while (true) {
     signal.throwIfAborted();
     assertLive();
     try {
-      await verifySignedPing(endpoint, key, secret, signal);
+      await verifySignedPing(endpoint, key, secret, signal, (timestamp) => {
+        const nextSecond = Number(timestamp);
+        // A clock adjustment can race the wait/check below. Veto before fetch.
+        if (signedSecond !== undefined && nextSecond <= signedSecond) {
+          throw staleSigningTimestamp;
+        }
+        signedSecond = nextSecond;
+      });
       return;
     } catch (error) {
       signal.throwIfAborted();
       if (error instanceof WebhookPeerAuthenticationError) throw error;
-      if (!(error instanceof TypeError && error.message === 'fetch failed')) throw error;
+      if (
+        error !== staleSigningTimestamp &&
+        !(error instanceof TypeError && error.message === 'fetch failed')
+      )
+        throw error;
     }
-    await delay(50, undefined, { signal });
+    // An accepted request may have lost its response. Re-signing the same PING
+    // in the same second would replay its deterministic signature. Wait for real
+    // wall time to advance, never manufacture a timestamp. The original startup
+    // deadline/cancellation bounds this polling even if the clock stalls or rolls back.
+    do {
+      await delay(50, undefined, { signal });
+      signal.throwIfAborted();
+      assertLive();
+    } while (signedSecond !== undefined && Math.floor(Date.now() / 1_000) <= signedSecond);
   }
 }
 
@@ -1161,13 +1182,14 @@ async function verifySignedPing(
   privateKey: KeyObject,
   peerSecretHex: string,
   signal: AbortSignal,
+  onSignedTimestamp: (timestamp: string) => void,
 ): Promise<void> {
   const payload = await sendSignedInteraction(
     endpoint,
     privateKey,
     peerSecretHex,
     { type: 1 },
-    { signal, timeoutMs: 60_000 },
+    { signal, timeoutMs: 60_000, onSignedTimestamp },
   );
   if (!isRecord(payload) || payload['type'] !== 1) {
     throw new Error('Signed interaction PING readiness returned an invalid response.');
