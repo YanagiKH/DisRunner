@@ -24,7 +24,7 @@ A core unit test does not establish that the equivalent desktop/imported-bot pat
 
 - **Core Gateway:** partial lifecycle and dispatch/intent primitives, plus a local WebSocket transport. Desktop fixtures are not bootstrapped or synchronized as a supported imported-bot environment.
 - **Raw interaction webhook:** Ed25519-signed local HTTP request with body/timestamp/replay controls, followed by per-run HMAC verification of the response status and exact bytes before callback validation. Transport peer authentication and Discord-shaped callback validation are distinct failure stages. This is the supported Electron adapter in v0.1.
-- **Core REST:** partial local routes for gateway discovery, bot user, guild/channel/message resources, interaction callbacks, and follow-ups. Application-command registration and many Discord routes are absent.
+- **Core REST:** partial local routes for gateway discovery, bot user, guild/channel/message resources, interaction callbacks, and follow-ups. Application-command registration is available only through the explicit [core registry profile](application-command-registry.md), not the default/shared runtime; many Discord routes remain absent.
 
 These paths have different authentication, retry, state, and failure semantics and must not be treated as interchangeable.
 

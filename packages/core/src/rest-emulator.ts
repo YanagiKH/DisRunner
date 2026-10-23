@@ -1,3 +1,9 @@
+import { ApplicationCommandRegistry } from './application-command-registry.js';
+import {
+  canonicalCommandId,
+  commandError,
+  type CommandRegistryProfile,
+} from './application-command-profile.js';
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
@@ -32,6 +38,7 @@ export type {
 } from './bootstrap-profile.js';
 
 export interface RestEmulatorOptions {
+  readonly commandRegistry?: CommandRegistryProfile;
   readonly ordinaryMessagePermissions?: OrdinaryMessagePermissionProfile;
   readonly state: VirtualState;
   readonly messageDomain?: MessageDomainContext;
@@ -59,6 +66,7 @@ export interface RestEmulatorAddress {
 
 export class LocalRestEmulator {
   readonly #state: VirtualState;
+  readonly #commands: ApplicationCommandRegistry | undefined;
   readonly #messages: MessageDomainService;
   readonly #interactions: InteractionEngine;
   readonly #rateLimits: RateLimitEngine;
@@ -74,6 +82,16 @@ export class LocalRestEmulator {
     const bootstrap = options.bootstrap;
     this.#bootstrap = bootstrap === undefined ? undefined : parseRestBootstrapProfile(bootstrap);
     this.#state = options.state;
+    if (options.commandRegistry !== undefined && this.#bootstrap === undefined)
+      throw commandError('payload');
+    this.#commands =
+      options.commandRegistry === undefined
+        ? undefined
+        : new ApplicationCommandRegistry(
+            options.state,
+            this.#bootstrap!.application.id,
+            options.commandRegistry,
+          );
     this.#messages = new MessageDomainService({
       state: options.state,
       ...(options.ordinaryMessagePermissions === undefined
@@ -160,6 +178,19 @@ export class LocalRestEmulator {
     try {
       this.#validateLocalRequest(request);
       const method = request.method?.toUpperCase() ?? 'GET';
+      if (isCommandRegistryTarget(request.url ?? '/')) {
+        span = this.#trace?.start('rest', 'application-command-registry', {
+          path: '/applications/:applicationId/commands',
+        });
+        if (!this.#authorized(request.headers.authorization))
+          throw new DiscordApiError(401, 0, '401: Unauthorized');
+        await this.#commandRoute(method, request, response);
+        if (span !== undefined)
+          this.#trace?.end(span, response.statusCode === 429 ? 'warning' : 'ok', {
+            status: response.statusCode,
+          });
+        return;
+      }
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
       const routePath = stripApiVersion(url.pathname);
       const routeTemplate = traceRouteTemplate(routePath);
@@ -200,11 +231,84 @@ export class LocalRestEmulator {
             : {}),
         });
     } catch (error) {
+      if (isCommandRegistryTarget(request.url ?? '/')) {
+        if (!response.headersSent) response.setHeader('Connection', 'close');
+        request.resume();
+      }
       const apiError = normalizeError(error);
       sendJson(response, apiError.status, apiError.toJSON());
       if (span !== undefined)
         this.#trace?.end(span, 'error', { status: apiError.status, error: apiError.message });
     }
+  }
+
+  async #commandRoute(
+    method: string,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const route = parseCommandRoute(request.url ?? '/');
+    if (this.#commands === undefined)
+      throw new DiscordApiError(501, 0, 'Command registry profile is not enabled.');
+    if (
+      route.unsupported ||
+      !(route.id === undefined ? ['GET', 'POST', 'PUT'] : ['GET', 'PATCH', 'DELETE']).includes(
+        method,
+      )
+    )
+      throw new DiscordApiError(501, 0, 'Unsupported application command route.');
+    this.#commands.verifyScope(route.app, route.guild);
+    if (route.id === undefined) this.#commands.list(route.app, route.guild);
+    else this.#commands.get(route.app, route.guild, route.id);
+    const rate = this.#rateLimits.acquire({
+      method,
+      path: route.collection,
+      identity: 'authenticated-bot',
+    });
+    if (!rate.allowed) {
+      sendJson(response, 429, rate.body, rate.headers);
+      return;
+    }
+    const url = new URL(request.url!, 'http://127.0.0.1');
+    const query = [...url.searchParams];
+    if (request.url!.includes('?')) {
+      if (
+        method !== 'GET' ||
+        route.id !== undefined ||
+        query.length !== 1 ||
+        query[0]![0] !== 'with_localizations'
+      )
+        throw commandError('payload');
+      if ((request.url!.split('?')[1] ?? '') !== 'with_localizations=' + query[0]![1])
+        throw commandError('payload');
+      if (query[0]![1] === 'true') throw commandError('feature');
+      if (query[0]![1] !== 'false') throw commandError('payload');
+    }
+    const body =
+      method === 'GET' || method === 'DELETE'
+        ? await requireNoCommandBody(request, this.#maxBodyBytes)
+        : await readJsonBody(request, this.#maxBodyBytes);
+    let result: unknown;
+    let status = 200;
+    if (method === 'GET')
+      result =
+        route.id === undefined
+          ? this.#commands.list(route.app, route.guild)
+          : this.#commands.get(route.app, route.guild, route.id);
+    else if (method === 'POST') {
+      const saved = this.#commands.post(route.app, route.guild, body);
+      result = saved.command;
+      status = saved.created ? 201 : 200;
+    } else if (method === 'PUT') result = this.#commands.put(route.app, route.guild, body);
+    else if (method === 'PATCH')
+      result = this.#commands.patch(route.app, route.guild, route.id!, body);
+    else {
+      this.#commands.delete(route.app, route.guild, route.id!);
+      status = 204;
+    }
+    const headers = { ...rate.headers, 'X-DisRunner-State-Revision': String(this.#state.revision) };
+    if (status === 204) sendEmpty(response, status, headers);
+    else sendJson(response, status, result, headers);
   }
 
   #route(
@@ -916,4 +1020,109 @@ function readableMessage(
 
 function isExplicitDirectMessageChannel(channel: Readonly<Record<string, unknown>>): boolean {
   return channel['type'] === 1 && channel['guild_id'] === undefined;
+}
+
+// The raw family gate runs before URL normalization, including dot-segment aliases.
+function isCommandRegistryTarget(raw: string): boolean {
+  const path = raw.split('?')[0] ?? '';
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    decoded = path.replace(/%([0-9a-f]{2})/gi, (_, hex: string) =>
+      String.fromCharCode(parseInt(hex, 16)),
+    );
+  }
+  const segments = decoded.replaceAll('\\', '/').split('/');
+  const application = segments.indexOf('applications');
+  return application >= 0 && segments.slice(application + 1).includes('commands');
+}
+function parseCommandRoute(raw: string): {
+  app: string;
+  guild: string | undefined;
+  id: string | undefined;
+  collection: string;
+  unsupported: boolean;
+} {
+  const rawPath = raw.split('?')[0]!;
+  if (
+    !rawPath.startsWith('/') ||
+    rawPath.includes('%') ||
+    rawPath.includes('\\') ||
+    raw.includes('#') ||
+    rawPath.split('/').some((p) => p === '.' || p === '..')
+  )
+    throw commandError('route');
+  const path = stripApiVersion(rawPath);
+  const match = /^\/applications\/([^/]+)(?:\/guilds\/([^/]+))?\/commands((?:\/[^/]+)*)$/.exec(
+    path,
+  );
+  if (
+    !match ||
+    !canonicalCommandId(match[1]) ||
+    (match[2] !== undefined && !canonicalCommandId(match[2]))
+  )
+    throw commandError('route');
+  const suffix = match[3]!.split('/').filter(Boolean);
+  let id: string | undefined;
+  if (suffix[0] !== undefined && suffix[0] !== 'permissions') {
+    if (!canonicalCommandId(suffix[0])) throw commandError('route');
+    id = suffix[0];
+  }
+  return {
+    app: match[1],
+    guild: match[2],
+    id,
+    collection:
+      '/applications/' +
+      match[1] +
+      (match[2] === undefined ? '' : '/guilds/' + match[2]) +
+      '/commands',
+    unsupported: suffix.length > (id === undefined ? 0 : 1),
+  };
+}
+async function requireNoCommandBody(
+  request: IncomingMessage,
+  maxBytes: number,
+): Promise<undefined> {
+  const length = Number(request.headers['content-length'] ?? 0);
+  if (length > maxBytes) {
+    request.resume();
+    throw new DiscordApiError(413, 40005, 'Request entity too large.');
+  }
+  if (length > 0) {
+    request.resume();
+    throw commandError('payload');
+  }
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      request.off('data', onData);
+      request.off('end', onEnd);
+      request.off('error', onError);
+      request.off('aborted', onAborted);
+    };
+    const onData = (chunk: Buffer): void => {
+      if (chunk.length) {
+        cleanup();
+        request.resume();
+        reject(commandError('payload'));
+      }
+    };
+    const onEnd = (): void => {
+      cleanup();
+      resolve(undefined);
+    };
+    const onError = (): void => {
+      cleanup();
+      reject(commandError('payload'));
+    };
+    const onAborted = (): void => {
+      cleanup();
+      reject(commandError('payload'));
+    };
+    request.on('data', onData);
+    request.once('end', onEnd);
+    request.once('error', onError);
+    request.once('aborted', onAborted);
+  });
 }

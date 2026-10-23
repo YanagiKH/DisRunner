@@ -43,6 +43,8 @@ The emulator uses the rules provided by its caller. The scenario runner and Elec
 
 ## Not implemented
 
-Application-command registration, reactions, pins, threads, polls, moderation/member/role mutations, DMs, general webhooks, original-response edit/delete routes, the full REST catalog, idempotency modeling, latency phases, connection reset, malformed/partial responses, server-error injection, and “commit then lose response” faults are planned.
+Application-command registration is available only through the explicit [core registry profile](application-command-registry.md); it is not enabled by default or wired into the shared runtime or SDKs.
+
+Reactions, pins, threads, polls, moderation/member/role mutations, DMs, general webhooks, original-response edit/delete routes, the full REST catalog, idempotency modeling, latency phases, connection reset, malformed/partial responses, server-error injection, and “commit then lose response” faults are planned.
 
 Local loopback duration is useful for regression evidence but is not a production latency forecast. See [Compatibility](../COMPATIBILITY.md) for the release declaration.

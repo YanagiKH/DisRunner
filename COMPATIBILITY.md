@@ -44,7 +44,7 @@ The `bot.runtime` label in a raw-webhook project describes how to launch that we
 | Permission calculation                  | Core-tested     | `BigInt` roles, overwrites, administrator and implicit channel removals            |
 | Intent filtering                        | Core-tested     | In-process requested/allowed intent behavior; desktop config intents are not wired |
 | Rate-limit engine                       | Core-tested     | Configurable programmatic buckets; not a desktop project-profile feature           |
-| REST emulator                           | Core-tested     | Partial user/channel/message/guild/callback/follow-up routes; no command registry  |
+| REST emulator                           | Core-tested     | Partial local routes; explicit core command-registry-v1 opt-in                     |
 | Gateway lifecycle                       | Core-tested     | Partial in-process/WebSocket lifecycle; no desktop fixture/event synchronization   |
 | Protocol/object limits                  | Core-tested     | Selected message/embed/attachment/component/custom-ID checks only                  |
 | Risk findings                           | Core-tested     | Small implemented rule set listed in `docs/risk-engine.md`                         |
@@ -70,3 +70,7 @@ Report protocol drift with a minimal redacted fixture. Never attach a production
 ## Opt-in ordinary message authorization
 
 The `guild-text-own-messages-v1` profile enforces live guild/member/role/overwrite permissions for ordinary guild-text message reads and own-message mutations. It is available through the core API and the shared-runtime project configuration used by CLI `bot-test` and Desktop, with a required explicit bot fixture and no inferred permission grants. The default remains **legacy-unenforced**; existing projects are not migrated or enabled automatically. Desktop state views are diagnostic, not viewer-permission-filtered; this adds no renderer permission controls or GUI certification. DMs retain legacy behavior. Own-only mutation, conservative timeout restrictions, ordinary-only history excluding interaction-origin messages, and uncertified richer composition permissions are deliberate boundaries, not Discord parity. See [Ordinary message permissions](docs/ordinary-message-permissions.md) for the API, required fixtures and exact scope.
+
+## Opt-in application command registration
+
+The core REST `command-registry-v1` profile supports global/guild registration for command types 1/2/3, with slash options restricted to empty arrays. It requires explicit bootstrap identity and a guild installation allowlist. It is not enabled by default or wired through the shared runtime, SDKs, or Command Explorer; it adds no invocation or Gateway command events. See [Application command registry](docs/application-command-registry.md) for exact payload, state, version, history, and safety boundaries.
