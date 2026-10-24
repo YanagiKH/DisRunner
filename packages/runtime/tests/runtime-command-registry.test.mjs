@@ -2,13 +2,20 @@ import assert from 'node:assert/strict';
 import { createHmac, randomUUID } from 'node:crypto';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { connect } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { BotRunner, VirtualState, InteractionEngine, TraceCollector } from '@disrunner/core';
+import {
+  BotRunner,
+  VirtualState,
+  InteractionEngine,
+  TraceCollector,
+  LocalRestEmulator,
+  LocalGatewayServer,
+} from '@disrunner/core';
 import { createSessionWithDependencies } from '../dist/session.js';
 const { WebSocket } = createRequire(import.meta.resolve('@disrunner/core'))('ws');
 const example = fileURLToPath(new URL('../../../examples/raw-webhook-bot/', import.meta.url));
@@ -74,9 +81,9 @@ async function until(fn) {
   }
   assert.fail('Timed out');
 }
-async function closed(url) {
+async function connected(port) {
   const result = await new Promise((resolve) => {
-    const s = connect({ host: '127.0.0.1', port: Number(new URL(url).port) });
+    const s = connect({ host: '127.0.0.1', port });
     s.once('connect', () => {
       s.destroy();
       resolve('open');
@@ -90,7 +97,32 @@ async function closed(url) {
       resolve('timeout');
     });
   });
-  assert.equal(result, 'ECONNREFUSED');
+  assert.equal(result, 'open');
+}
+function assertListenerClosed(record) {
+  // These are the real instances: their addresses clear only after their close callbacks.
+  // A released port may already belong to someone else; its current occupant is not our oracle.
+  assert.equal(record.resource.address, undefined, `${record.label} still owns its listener`);
+  assert.equal(record.realStopCompleted, true, `${record.label} real stop did not complete`);
+}
+async function withCleanup(run, ...cleanups) {
+  const failures = [];
+  let result;
+  try {
+    result = await run();
+  } catch (error) {
+    failures.push(error);
+  }
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'Test body and/or cleanup failed');
+  return result;
 }
 async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'runtime-registry-'));
@@ -104,11 +136,49 @@ async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
   const runs = [],
     states = [],
     events = [],
-    endpoints = [],
+    listeners = [],
     peers = [],
     traces = new Set();
   let failStop = false,
+    fakeStop,
     interactions = 0;
+  function wrapListener(resource, kind) {
+    const record = {
+      resource,
+      kind,
+      label: `${kind} generation ${listeners.filter((r) => r.kind === kind).length + 1}`,
+      started: false,
+      realStopCompleted: false,
+      stopReturned: false,
+    };
+    listeners.push(record);
+    record.wrapper = {
+      get address() {
+        return resource.address;
+      },
+      async start(...args) {
+        const result = await resource.start(...args);
+        // Retain successful starts before an observer assertion can throw.
+        record.started = true;
+        record.startAddress = resource.address;
+        assert.ok(record.startAddress, `${record.label} did not expose its actual address`);
+        assert.equal(record.startAddress.host, '127.0.0.1');
+        assert.ok(Number.isInteger(record.startAddress.port) && record.startAddress.port > 0);
+        assert.equal(result, record.startAddress);
+        return result;
+      },
+      async stop() {
+        if (kind === 'REST' && failStop) throw Error('injected registry cleanup failure');
+        // The negative control deliberately reports success without closing the real instance.
+        if (fakeStop !== kind) {
+          await resource.stop();
+          record.realStopCompleted = true;
+        }
+        record.stopReturned = true;
+      },
+    };
+    return record.wrapper;
+  }
   const subscribe = VirtualState.prototype.subscribeCommits,
     create = InteractionEngine.prototype.create,
     traceStart = TraceCollector.prototype.start;
@@ -125,11 +195,7 @@ async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
     return create.apply(this, args);
   };
   const session = createSessionWithDependencies(
-    {
-      onEndpoints(e) {
-        if (e) endpoints.push(e);
-      },
-    },
+    {},
     {
       wrapBot(bot) {
         assert.ok(bot instanceof BotRunner);
@@ -147,11 +213,12 @@ async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
         };
       },
       wrapRest(rest) {
-        return {
-          start: (...a) => rest.start(...a),
-          stop: () =>
-            failStop ? Promise.reject(Error('injected registry cleanup failure')) : rest.stop(),
-        };
+        assert.ok(rest instanceof LocalRestEmulator);
+        return wrapListener(rest, 'REST');
+      },
+      wrapGateway(gateway) {
+        assert.ok(gateway instanceof LocalGatewayServer);
+        return wrapListener(gateway, 'Gateway');
       },
     },
   );
@@ -162,9 +229,13 @@ async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
     VirtualState.prototype.subscribeCommits = subscribe;
     InteractionEngine.prototype.create = create;
     TraceCollector.prototype.start = traceStart;
-    await session.dispose();
-    await rm(root, { recursive: true, force: true });
-    throw error;
+    await withCleanup(
+      () => {
+        throw error;
+      },
+      async () => assert.equal((await session.dispose()).ok, true),
+      () => rm(root, { recursive: true, force: true }),
+    );
   }
   const h = {
     root,
@@ -172,8 +243,12 @@ async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
     runs,
     states,
     events,
+    listeners,
     failStop: (v) => {
       failStop = v;
+    },
+    fakeStop: (kind) => {
+      fakeStop = kind;
     },
     state: () => h.currentState,
     interactions: () => interactions,
@@ -256,14 +331,13 @@ async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
     },
     async cleanup() {
       failStop = false;
-      try {
-        h.projection();
-        assert.equal((await session.dispose()).ok, true);
-        for (const e of endpoints) {
-          await closed(e.restBaseUrl);
-          await closed(e.gatewayUrl);
-        }
-        for (const r of runs)
+      await withCleanup(
+        () => h.projection(),
+        async () => assert.equal((await session.dispose()).ok, true),
+        ...listeners.map((r) => () => assertListenerClosed(r)),
+        ...runs.map((r) => async () => {
+          // A rejected bot start may never have produced a child PID.
+          if (r.pid === undefined) return;
           await until(() => {
             try {
               process.kill(r.pid, 0);
@@ -272,26 +346,132 @@ async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
               return e.code === 'ESRCH';
             }
           });
-      } finally {
-        VirtualState.prototype.subscribeCommits = subscribe;
-        InteractionEngine.prototype.create = create;
-        TraceCollector.prototype.start = traceStart;
-        for (const p of peers) p.terminate();
-        await rm(root, { recursive: true, force: true });
-      }
+        }),
+        () => {
+          VirtualState.prototype.subscribeCommits = subscribe;
+          InteractionEngine.prototype.create = create;
+          TraceCollector.prototype.start = traceStart;
+        },
+        ...peers.map((p) => () => p.terminate()),
+        () => rm(root, { recursive: true, force: true }),
+      );
     },
   };
   return h;
 }
 async function withRuntime(options, run) {
   const h = await harness(options);
-  try {
-    await h.start();
-    await run(h);
-  } finally {
-    await h.cleanup();
-  }
+  await withCleanup(
+    async () => {
+      await h.start();
+      await run(h);
+    },
+    () => h.cleanup(),
+  );
 }
+
+test('cleanup preserves body and cleanup failures and attempts every cleanup', async () => {
+  const body = Error('body failure'),
+    cleanup = Error('cleanup failure');
+  let remainingCleanup = false;
+  await assert.rejects(
+    withCleanup(
+      () => {
+        throw body;
+      },
+      () => {
+        throw cleanup;
+      },
+      () => {
+        remainingCleanup = true;
+      },
+    ),
+    (error) =>
+      error instanceof AggregateError &&
+      error.errors.length === 2 &&
+      error.errors[0] === body &&
+      error.errors[1] === cleanup,
+  );
+  assert.equal(remainingCleanup, true);
+});
+
+test('cleanup accepts closed owned generations while their released ports are rebound', async () => {
+  const h = await harness();
+  const rebound = [];
+  await withCleanup(
+    async () => {
+      await h.start();
+      const first = [...h.listeners];
+      assert.equal(first.length, 2);
+      assert.equal((await h.session.stop()).ok, true);
+      for (const record of first) {
+        assertListenerClosed(record);
+        const server = createServer((socket) => socket.destroy());
+        rebound.push(server);
+        await new Promise((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(record.startAddress.port, '127.0.0.1', resolve);
+        });
+        assert.equal(server.address().port, record.startAddress.port);
+        await connected(record.startAddress.port);
+      }
+      await h.start();
+      assert.equal(h.listeners.length, 4);
+      assert.ok(h.listeners.every((r) => r.started));
+      assert.equal((await h.session.stop()).ok, true);
+      assert.ok(rebound.every((server) => server.listening));
+    },
+    // Check all original instances while the unrelated listeners still hold the old ports.
+    () => h.cleanup(),
+    () =>
+      withCleanup(
+        () => {},
+        ...rebound.map(
+          (server) => () =>
+            new Promise((resolve, reject) => {
+              if (!server.listening) return resolve();
+              server.close((error) => (error ? reject(error) : resolve()));
+            }),
+        ),
+      ),
+  );
+});
+
+for (const kind of ['REST', 'Gateway'])
+  test(`cleanup rejects fake-success stop of a live owned ${kind} instance`, async () => {
+    const h = await harness();
+    let retained;
+    await withCleanup(
+      async () => {
+        await h.start();
+        retained = h.listeners.find((r) => r.kind === kind);
+        assert.ok(retained.started);
+        h.fakeStop(kind);
+        assert.equal((await h.session.stop()).ok, true);
+        assert.equal(retained.stopReturned, true);
+        assert.equal(retained.realStopCompleted, false);
+        assert.equal(retained.resource.address, retained.startAddress);
+        await connected(retained.startAddress.port);
+        assert.throws(
+          () => assertListenerClosed(retained),
+          (error) =>
+            error.code === 'ERR_ASSERTION' &&
+            error.actual === retained.startAddress &&
+            error.expected === undefined &&
+            error.message.startsWith(`${retained.label} still owns its listener`),
+        );
+      },
+      async () => {
+        h.fakeStop(undefined);
+        // Runtime disposal cannot recover a resource the fake-success wrapper made it forget.
+        if (retained) {
+          await retained.wrapper.stop();
+          assertListenerClosed(retained);
+        }
+      },
+      () => h.cleanup(),
+    );
+  });
 
 for (const guild of [false, true])
   test(`real child exact ${guild ? 'guild' : 'global'} CRUD, no-op, state and Gateway boundaries`, async () => {
@@ -534,7 +714,7 @@ test('failed cleanup preserves ownership, blocks restart/reselection and retry i
     h.failStop(false);
     assert.equal((await h.session.stop()).ok, true);
     assert.equal(h.session.snapshot().coreState, null);
-    await closed(old.started.endpoints.restBaseUrl);
+    for (const record of h.listeners) assertListenerClosed(record);
     await h.start();
     assert.notEqual(h.run.token, old.run.token);
     assert.notEqual(h.run.peer, old.run.peer);
@@ -552,65 +732,70 @@ test('failed cleanup preserves ownership, blocks restart/reselection and retry i
 test('simultaneous supervised sessions have isolated credentials and stores without assuming globally distinct app IDs', async () => {
   const a = await harness();
   let b;
-  try {
-    await a.start();
-    b = await harness();
-    await b.start();
-    const post = (await a.child(globalPath, 'POST', { name: 'ping', description: 'Ping' })).result;
-    success(post, 201, expected(canonical(post.body.id), a.app), '1');
-    success((await b.child()).result, 200, [], '0');
-    assert.notEqual(a.state(), b.state());
-    assert.notEqual(a.run.token, b.run.token);
-    failure(await b.read(globalPath, a.run.token), 'unauthorized');
-    failure(await a.read(globalPath, b.run.token), 'unauthorized');
-    failure(
-      (
-        await a.child(
-          globalPath,
-          'POST',
-          { name: 'cross', description: 'Denied' },
-          { credential: `Bot ${b.run.token}` },
-        )
-      ).result,
-      'unauthorized',
-    );
-    assert.equal(a.state().revision, 1);
-    assert.equal(b.state().revision, 0);
-    const guild = (await b.child(guildPath, 'POST', { type: 2, name: 'Inspect User' })).result;
-    success(
-      guild,
-      201,
-      expected(canonical(guild.body.id), b.app, { guild: true, type: 2, name: 'Inspect User' }),
-      '1',
-    );
-    success((await a.child(guildPath)).result, 200, [], '1');
-    assert.deepEqual((await a.read()).body, [expected(post.body.id, a.app)]);
-    success((await b.child()).result, 200, [], '1');
-  } finally {
-    if (b) await b.cleanup();
-    await a.cleanup();
-  }
+  await withCleanup(
+    async () => {
+      await a.start();
+      b = await harness();
+      await b.start();
+      const post = (await a.child(globalPath, 'POST', { name: 'ping', description: 'Ping' }))
+        .result;
+      success(post, 201, expected(canonical(post.body.id), a.app), '1');
+      success((await b.child()).result, 200, [], '0');
+      assert.notEqual(a.state(), b.state());
+      assert.notEqual(a.run.token, b.run.token);
+      failure(await b.read(globalPath, a.run.token), 'unauthorized');
+      failure(await a.read(globalPath, b.run.token), 'unauthorized');
+      failure(
+        (
+          await a.child(
+            globalPath,
+            'POST',
+            { name: 'cross', description: 'Denied' },
+            { credential: `Bot ${b.run.token}` },
+          )
+        ).result,
+        'unauthorized',
+      );
+      assert.equal(a.state().revision, 1);
+      assert.equal(b.state().revision, 0);
+      const guild = (await b.child(guildPath, 'POST', { type: 2, name: 'Inspect User' })).result;
+      success(
+        guild,
+        201,
+        expected(canonical(guild.body.id), b.app, { guild: true, type: 2, name: 'Inspect User' }),
+        '1',
+      );
+      success((await a.child(guildPath)).result, 200, [], '1');
+      assert.deepEqual((await a.read()).body, [expected(post.body.id, a.app)]);
+      success((await b.child()).result, 200, [], '1');
+    },
+    async () => {
+      if (b) await b.cleanup();
+    },
+    () => a.cleanup(),
+  );
 });
 
 test('selected configuration is detached from file edits until reselect, including installed guild authority', async () => {
   const h = await harness();
-  try {
-    const path = join(h.root, 'discord-simulator.config.json');
-    const config = JSON.parse(await readFile(path, 'utf8'));
-    delete config.profile.commandRegistry;
-    await writeFile(path, JSON.stringify(config));
-    await h.start();
-    success((await h.child(guildPath)).result, 200, [], '0');
-    assert.equal((await h.session.stop()).ok, true);
-    await h.start();
-    success((await h.child(guildPath)).result, 200, [], '0');
-    assert.equal((await h.session.stop()).ok, true);
-    await h.session.selectProject(h.root);
-    await h.start();
-    failure((await h.child()).result, 'disabled');
-  } finally {
-    await h.cleanup();
-  }
+  await withCleanup(
+    async () => {
+      const path = join(h.root, 'discord-simulator.config.json');
+      const config = JSON.parse(await readFile(path, 'utf8'));
+      delete config.profile.commandRegistry;
+      await writeFile(path, JSON.stringify(config));
+      await h.start();
+      success((await h.child(guildPath)).result, 200, [], '0');
+      assert.equal((await h.session.stop()).ok, true);
+      await h.start();
+      success((await h.child(guildPath)).result, 200, [], '0');
+      assert.equal((await h.session.stop()).ok, true);
+      await h.session.selectProject(h.root);
+      await h.start();
+      failure((await h.child()).result, 'disabled');
+    },
+    () => h.cleanup(),
+  );
 });
 
 for (const guild of [false, true])
