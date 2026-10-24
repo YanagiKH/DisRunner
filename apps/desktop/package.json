@@ -37,7 +37,7 @@
     "@vitejs/plugin-react": "^5.2.0",
     "concurrently": "^9.2.5",
     "cross-env": "^10.1.0",
-    "electron": "44.0.0",
+    "electron": "44.9.1",
     "electron-builder": "^26.15.3",
     "jsdom": "^26.1.0",
     "playwright": "^1.64.1",
