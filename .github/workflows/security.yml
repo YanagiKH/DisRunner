@@ -32,9 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.12.14'
+      - uses: ./.github/actions/setup-python
       - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:
           languages: javascript-typescript, python
@@ -156,5 +154,28 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --audit-level=high
+      - uses: ./.github/actions/setup-python
+      - name: Audit the complete pinned Python SDK requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_environment="$RUNNER_TEMP/disrunner-pip-audit"
+          "$DISRUNNER_TEST_PYTHON" -m venv "$audit_environment"
+          audit_python="$audit_environment/bin/python"
+          "$audit_python" -m pip install --disable-pip-version-check pip-audit==2.10.1
+          "$audit_python" -m pip_audit --version > "$RUNNER_TEMP/disrunner-python-audit-version.txt"
+          "$audit_python" -m pip_audit --disable-pip --no-deps \
+            --requirement packages/adapter-discordpy/requirements.txt \
+            --format json --output "$RUNNER_TEMP/disrunner-python-audit.json"
       - run: pnpm run test:security
       - run: pnpm run test:offline
+      - name: Upload Python dependency audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-dependency-audit-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/disrunner-python-audit.json
+            ${{ runner.temp }}/disrunner-python-audit-version.txt
+          if-no-files-found: warn
+          retention-days: 30

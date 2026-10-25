@@ -209,9 +209,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           node .github/scripts/check-versions.mjs
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.12.14'
+      - uses: ./.github/actions/setup-python
       - name: Prepare pinned Python SDK dependencies
         run: python -m pip install --requirement packages/adapter-discordpy/requirements.txt
       - run: pnpm install --frozen-lockfile
@@ -222,13 +220,10 @@ jobs:
         run: pnpm --filter @disrunner/desktop exec playwright install chromium
       - run: pnpm run verify:release
       - name: Real SDK transport conformance
-        env:
-          DISRUNNER_TEST_PYTHON: python
         run: node --test tests/conformance/*.test.mjs
       - name: Isolated offline raw webhook and SDK conformance
         if: runner.os == 'Linux'
         env:
-          DISRUNNER_TEST_PYTHON: python
           OFFLINE_EVIDENCE_DIR: ${{ runner.temp }}/offline-conformance
         run: bash .github/scripts/offline-conformance.sh
       - name: Upload isolated offline evidence
@@ -287,9 +282,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.12.14'
+      - uses: ./.github/actions/setup-python
       - name: Prepare pinned Python SDK dependencies
         run: python -m pip install --requirement packages/adapter-discordpy/requirements.txt
       - run: pnpm install --frozen-lockfile
@@ -360,32 +353,27 @@ jobs:
       - name: Packaged SDK UI acceptance
         if: runner.os != 'Linux'
         env:
-          DISRUNNER_TEST_PYTHON: python
           DISRUNNER_SDK_UI_EVIDENCE: ${{ runner.temp }}/sdk-ui-evidence
         run: node apps/desktop/tests/e2e/sdk-ui-smoke.mjs
       - name: Packaged SDK UI acceptance on Linux
         if: runner.os == 'Linux'
         env:
-          DISRUNNER_TEST_PYTHON: python
           DISRUNNER_SDK_UI_EVIDENCE: ${{ runner.temp }}/sdk-ui-evidence
         run: xvfb-run -a node apps/desktop/tests/e2e/sdk-ui-smoke.mjs
       - name: Install, exercise, reinstall and uninstall NSIS distribution
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          DISRUNNER_TEST_PYTHON: python
           DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
         run: ./.github/scripts/installer-roundtrip.ps1
       - name: Mount and exercise macOS distribution
         if: runner.os == 'macOS'
         env:
-          DISRUNNER_TEST_PYTHON: python
           DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
         run: bash .github/scripts/installer-roundtrip.sh
       - name: Extract and exercise Linux distribution
         if: runner.os == 'Linux'
         env:
-          DISRUNNER_TEST_PYTHON: python
           DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
         run: xvfb-run -a bash .github/scripts/installer-roundtrip.sh
       - name: Upload distribution operation evidence
