@@ -802,7 +802,7 @@ export class DesktopRuntimeManager {
         this.#droppedDiagnostics += 1;
         this.#adapterIssue = new SessionError(
           'transport',
-          'Invalid or incomplete Bot control record.',
+          'Invalid or incomplete adapter control record.',
         );
       };
       const bot = new core.BotRunner({

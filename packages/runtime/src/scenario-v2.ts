@@ -694,6 +694,13 @@ export async function runBotScenarioV2(
       const stoppedSnapshot = session.snapshot();
       collectDiagnostics(stoppedSnapshot);
       if (!complete(stoppedSnapshot)) evidenceComplete = false;
+      if (snapshot !== null)
+        snapshot = {
+          ...snapshot,
+          activeHandlers: stoppedSnapshot.activeHandlers ?? 0,
+          evidenceComplete: snapshot.evidenceComplete !== false && complete(stoppedSnapshot),
+          output: stoppedSnapshot.output,
+        };
       if (cleanupErrors.length > 0 && status !== 'cancelled') status = 'runner-error';
     }
     unsubscribe?.();
@@ -727,7 +734,10 @@ export async function runBotScenarioV2(
         assertions[index] = {
           ...assertions[index]!,
           passed: false,
-          message: 'Run evidence was dropped or truncated before shutdown completed.',
+          message:
+            (snapshot?.activeHandlers ?? 0) > 0
+              ? 'Tracked handlers did not finish before shutdown.'
+              : 'Run evidence was dropped or truncated before shutdown completed.',
         };
       if (status === 'passed') status = 'failed';
     }
@@ -961,6 +971,9 @@ function associated(
 }
 function complete(snapshot: SessionSnapshot): boolean {
   const evidence = snapshot as unknown as Record<string, unknown>;
+  const active = snapshot.activeHandlers ?? 0;
+  if (!Number.isSafeInteger(active) || active < 0 || (snapshot.phase !== 'running' && active !== 0))
+    return false;
   if (
     (snapshot.coreState?.evidenceComplete === undefined
       ? snapshot.coreState?.truncated === true

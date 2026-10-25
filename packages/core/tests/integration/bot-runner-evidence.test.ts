@@ -52,6 +52,8 @@ describe('real bot output evidence', () => {
         controlRecords: 0,
         controlErrors: 0,
         controlObserverFailures: 0,
+        outputDrained: true,
+        outputDrainErrors: 0,
         complete: false,
       });
       await runChild(
@@ -74,6 +76,8 @@ describe('real bot output evidence', () => {
         controlRecords: 0,
         controlErrors: 0,
         controlObserverFailures: 0,
+        outputDrained: true,
+        outputDrainErrors: 0,
         complete: true,
       });
     } finally {

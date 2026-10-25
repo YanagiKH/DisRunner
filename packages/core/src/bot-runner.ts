@@ -88,6 +88,9 @@ export interface BotOutputEvidence {
   /** Reserved records rejected, including records discarded after protocol failure. */
   readonly controlErrors: number;
   readonly controlObserverFailures: number;
+  /** True only after both readable streams ended and the child closed normally. */
+  readonly outputDrained: boolean;
+  readonly outputDrainErrors: number;
   readonly complete: boolean;
 }
 
@@ -97,6 +100,22 @@ const MAX_CONTROL_LINE_BYTES = 4_096;
 const MAX_CONTROL_RECORDS = 100_000;
 const MAX_CONTROL_HANDLERS = 1_000;
 const CONTROL_PROTOCOL_ERROR = 'Invalid or incomplete Bot control record.';
+const OUTPUT_DRAIN_TIMEOUT_MS = 1_000;
+
+interface BotOutputDrain {
+  readonly child: ChildProcessWithoutNullStreams;
+  readonly completed: Promise<void>;
+  readonly resolve: () => void;
+  stdoutEnded: boolean;
+  stderrEnded: boolean;
+  stdoutClosed: boolean;
+  stderrClosed: boolean;
+  childClosed: boolean;
+  failed: boolean;
+  settled: boolean;
+}
+
+class BotOutputDrainError extends Error {}
 
 export class BotRunner {
   readonly #now: () => number;
@@ -127,6 +146,8 @@ export class BotRunner {
   #controlFailed = false;
   #controlCallbackEnabled = true;
   readonly #controlHandlers = new Set<string>();
+  #outputDrain: BotOutputDrain | undefined;
+  #outputDrainErrors = 0;
   #outputCallbackEnabled = true;
   #sensitiveValues: readonly string[] = [];
   #child: ChildProcessWithoutNullStreams | undefined;
@@ -180,7 +201,8 @@ export class BotRunner {
     if (
       this.#child !== undefined ||
       this.#windowsCleanupFailure !== undefined ||
-      (platform() === 'win32' && this.#stopPromise !== undefined) ||
+      this.#stopPromise !== undefined ||
+      (this.#outputDrain !== undefined && !this.#outputDrain.settled) ||
       this.#ownedGroup !== undefined ||
       this.#status === 'starting' ||
       this.#status === 'running'
@@ -239,6 +261,8 @@ export class BotRunner {
     this.#controlFailed = false;
     this.#controlCallbackEnabled = true;
     this.#controlHandlers.clear();
+    this.#outputDrain = undefined;
+    this.#outputDrainErrors = 0;
     this.#outputCallbackEnabled = true;
     this.#pendingOutput.stdout = { text: '', dropping: false };
     this.#pendingOutput.stderr = { text: '', dropping: false };
@@ -275,6 +299,23 @@ export class BotRunner {
       throw error;
     }
     this.#child = child;
+    let resolveDrain: () => void = () => undefined;
+    const completed = new Promise<void>((resolveCompletion) => {
+      resolveDrain = resolveCompletion;
+    });
+    const outputDrain: BotOutputDrain = {
+      child,
+      completed,
+      resolve: resolveDrain,
+      stdoutEnded: false,
+      stderrEnded: false,
+      stdoutClosed: false,
+      stderrClosed: false,
+      childClosed: false,
+      failed: false,
+      settled: false,
+    };
+    this.#outputDrain = outputDrain;
     if (platform() !== 'win32' && child.pid !== undefined) {
       // detached:true makes the child the leader of a new process group whose PGID is its PID.
       this.#ownedGroup = { pgid: child.pid, leaderStartTime: procStartTime(child.pid) };
@@ -284,16 +325,45 @@ export class BotRunner {
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
-      if (current()) this.#consumeOutput('stdout', chunk);
+      if (current() && !outputDrain.settled) {
+        if (outputDrain.failed) {
+          this.#receivedBytes += Buffer.byteLength(chunk);
+          this.#discardedBytes += Buffer.byteLength(chunk);
+        } else this.#consumeOutput('stdout', chunk);
+      }
     });
     child.stderr.on('data', (chunk: string) => {
-      if (current()) this.#consumeOutput('stderr', chunk);
+      if (current() && !outputDrain.settled) {
+        if (outputDrain.failed) {
+          this.#receivedBytes += Buffer.byteLength(chunk);
+          this.#discardedBytes += Buffer.byteLength(chunk);
+        } else this.#consumeOutput('stderr', chunk);
+      }
     });
     child.stdout.on('end', () => {
-      if (current()) this.#flushOutput('stdout');
+      if (current()) this.#endOutputStream(outputDrain, 'stdout');
     });
     child.stderr.on('end', () => {
-      if (current()) this.#flushOutput('stderr');
+      if (current()) this.#endOutputStream(outputDrain, 'stderr');
+    });
+    for (const stream of ['stdout', 'stderr'] as const) {
+      child[stream].on('error', () => {
+        if (current()) this.#failOutputDrain(outputDrain);
+      });
+      child[stream].on('close', () => {
+        if (!current()) return;
+        if (stream === 'stdout') outputDrain.stdoutClosed = true;
+        else outputDrain.stderrClosed = true;
+        if (!outputDrain[stream === 'stdout' ? 'stdoutEnded' : 'stderrEnded'])
+          this.#failOutputDrain(outputDrain);
+        this.#settleOutputDrain(outputDrain);
+      });
+    }
+    child.once('close', () => {
+      if (!current()) return;
+      outputDrain.childClosed = true;
+      if (!outputDrain.stdoutEnded || !outputDrain.stderrEnded) this.#failOutputDrain(outputDrain);
+      this.#settleOutputDrain(outputDrain);
     });
     const onSpawn = (): void => {
       if (current() && this.#child === child) this.#status = 'running';
@@ -315,8 +385,6 @@ export class BotRunner {
     child.on('error', onError);
     child.once('exit', (code, signal) => {
       if (!current()) return;
-      this.#flushOutput('stdout');
-      this.#flushOutput('stderr');
       this.#exitCode = code;
       this.#signal = signal;
       this.#exitedAtMs = this.#now();
@@ -326,7 +394,14 @@ export class BotRunner {
       // Forget the group as soon as it is confirmed empty; keep it while descendants survive.
       if (this.#stopPromise === undefined) this.#releaseGroupIfEmpty();
     });
-    await waitForSpawn(child);
+    try {
+      await waitForSpawn(child);
+    } catch (error) {
+      // No process was created, but Node still closes its failed spawn's pipe readers
+      // asynchronously. Finish that bounded capture before allowing an immediate retry.
+      if (current() && child.pid === undefined) await this.#waitForOutputDrain();
+      throw error;
+    }
     const spawnedPid = child.pid;
     const group = this.#ownedGroup;
     if (
@@ -351,7 +426,12 @@ export class BotRunner {
       (child === undefined || this.#windowsCleanupFailure instanceof WindowsTaskkillTimeoutError)
     )
       throw this.#windowsCleanupFailure;
-    if (child === undefined && this.#ownedGroup === undefined) return this.snapshot();
+    if (
+      child === undefined &&
+      this.#ownedGroup === undefined &&
+      (this.#outputDrain === undefined || this.#outputDrain.settled)
+    )
+      return this.snapshot();
     const operation = this.#stopOwned(child, graceMs);
     this.#stopPromise = operation;
     try {
@@ -359,7 +439,7 @@ export class BotRunner {
       this.#windowsCleanupFailure = undefined;
       return snapshot;
     } catch (error) {
-      if (platform() === 'win32') {
+      if (platform() === 'win32' && !(error instanceof BotOutputDrainError)) {
         this.#windowsCleanupFailure =
           error instanceof Error ? error : new Error('Windows bot cleanup could not be confirmed.');
       }
@@ -388,6 +468,12 @@ export class BotRunner {
 
   /** Capture completeness for the current run; reading snapshots does not change it. */
   public evidence(): BotOutputEvidence {
+    const outputDrained =
+      this.#outputDrain === undefined ||
+      (this.#outputDrain.stdoutEnded &&
+        this.#outputDrain.stderrEnded &&
+        this.#outputDrain.childClosed &&
+        !this.#outputDrain.failed);
     return {
       receivedBytes: this.#receivedBytes,
       recordedEntries: this.#recordedEntries,
@@ -403,13 +489,22 @@ export class BotRunner {
       controlRecords: this.#controlRecords,
       controlErrors: this.#controlErrors,
       controlObserverFailures: this.#controlObserverFailures,
+      outputDrained,
+      outputDrainErrors: this.#outputDrainErrors,
       complete:
         this.#evictedEntries === 0 &&
         this.#truncatedLines === 0 &&
         this.#redactionTruncatedEntries === 0 &&
         this.#observerFailures === 0 &&
         this.#controlErrors === 0 &&
-        this.#controlObserverFailures === 0,
+        this.#controlObserverFailures === 0 &&
+        this.#outputDrainErrors === 0 &&
+        (this.#exitedAtMs === undefined || outputDrained) &&
+        !(
+          this.#onControl !== undefined &&
+          this.#outputDrain?.stdoutEnded &&
+          this.#exitedAtMs === undefined
+        ),
     };
   }
 
@@ -465,7 +560,77 @@ export class BotRunner {
       this.#ownedGroup = undefined;
       if (this.#child === child) this.#child = undefined;
     }
+    await this.#waitForOutputDrain();
     return this.snapshot();
+  }
+
+  #endOutputStream(output: BotOutputDrain, stream: BotProcessOutput['stream']): void {
+    const key = stream === 'stdout' ? 'stdoutEnded' : 'stderrEnded';
+    if (output[key] || output.settled) return;
+    output[key] = true;
+    if (!output.failed) {
+      this.#flushOutput(stream);
+      if (
+        stream === 'stdout' &&
+        this.#onControl !== undefined &&
+        this.#controlHandlers.size > 0 &&
+        !this.#controlFailed
+      )
+        this.#rejectControl();
+    }
+    this.#settleOutputDrain(output);
+  }
+
+  #settleOutputDrain(output: BotOutputDrain): void {
+    if (
+      !output.settled &&
+      ((output.childClosed && output.stdoutEnded && output.stderrEnded) ||
+        (output.failed && output.stdoutClosed && output.stderrClosed))
+    ) {
+      output.settled = true;
+      output.resolve();
+    }
+  }
+
+  #failOutputDrain(output: BotOutputDrain): void {
+    if (output.settled) return;
+    if (!output.failed) {
+      output.failed = true;
+      this.#outputDrainErrors += 1;
+      for (const stream of ['stdout', 'stderr'] as const) {
+        this.#clippedBytes += Buffer.byteLength(this.#pendingOutput[stream].text);
+        this.#pendingOutput[stream] = { text: '', dropping: false };
+      }
+      if (this.#onControl !== undefined) this.#rejectControl();
+    }
+    output.child.stdout.destroy();
+    output.child.stderr.destroy();
+    this.#settleOutputDrain(output);
+  }
+
+  async #waitForOutputDrain(): Promise<void> {
+    const output = this.#outputDrain;
+    if (output === undefined || output.settled) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        output.completed,
+        new Promise<void>((resolveTimeout) => {
+          timer = setTimeout(() => {
+            this.#failOutputDrain(output);
+            resolveTimeout();
+          }, OUTPUT_DRAIN_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!output.settled)
+      await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+    if (!output.settled)
+      throw new BotOutputDrainError(
+        'Bot output readers could not be closed; cleanup remains pending.',
+      );
   }
 
   async #signalOwned(

@@ -11,7 +11,7 @@ import { createSession, runBotScenarioV2 } from '../dist/index.js';
 const example = fileURLToPath(new URL('../../../examples/raw-webhook-bot/', import.meta.url));
 const context = { actorId: '3000', guildId: '1000', channelId: '2000' };
 
-async function project(t) {
+async function project(t, mode = 'live') {
   const directory = await mkdtemp(join(tmpdir(), 'DisRunner control records '));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await cp(example, directory, { recursive: true });
@@ -21,15 +21,24 @@ async function project(t) {
   await writeFile(configFile, JSON.stringify(config));
   const serverFile = join(directory, 'src/server.mjs');
   const original = await readFile(serverFile, 'utf8');
-  const anchor = '  const reply = interactionReply(interaction);';
+  const anchor =
+    mode === 'live'
+      ? '  const reply = interactionReply(interaction);'
+      : '    const shutdown = () => {';
   assert.equal(original.split(anchor).length, 2);
-  await writeFile(
-    serverFile,
-    original.replace(
-      anchor,
-      `${anchor}\n  process.stdout.write('DISRUNNER_HANDLER {"id":"raw-1","phase":"end"}\\n');`,
-    ),
-  );
+  const start = 'DISRUNNER_HANDLER {"id":"raw-9999","phase":"start"}\n';
+  const end = 'DISRUNNER_HANDLER {"id":"raw-9999","phase":"end"}\n';
+  const modified =
+    mode === 'live'
+      ? original.replace(
+          anchor,
+          `${anchor}\n  process.stdout.write('DISRUNNER_HANDLER {"id":"raw-1","phase":"end"}\\n');`,
+        )
+      : `import { writeSync } from 'node:fs';\n${original.replace(
+          anchor,
+          `${anchor}\n      writeSync(1, ${JSON.stringify(start)});\n${mode === 'shutdown-complete' ? `      setTimeout(() => writeSync(1, ${JSON.stringify(end)}), 50);\n` : ''}`,
+        )}`;
+  await writeFile(serverFile, modified);
   return { directory, serverFile, original };
 }
 
@@ -52,7 +61,7 @@ test(
       assert.equal(session.snapshot().evidenceComplete, false);
       await assert.rejects(
         session.invoke({ runId: started.runId, requestId: 'second', input: '/ping', context }),
-        { code: 'transport', message: 'Invalid or incomplete Bot control record.' },
+        { code: 'transport', message: 'Invalid or incomplete adapter control record.' },
       );
       assert.equal(
         session.snapshot().output.some((entry) => /DISRUNNER_/u.test(entry.text)),
@@ -77,6 +86,59 @@ test(
     }
   },
 );
+
+for (const finishes of [false, true]) {
+  test(
+    `Scenario v2 ${finishes ? 'accepts completed' : 'rejects unfinished'} Bot work started during shutdown`,
+    { timeout: 15_000 },
+    async (t) => {
+      const { directory } = await project(t, finishes ? 'shutdown-complete' : 'shutdown-open');
+      const session = createSession();
+      const result = await runBotScenarioV2(
+        {
+          version: 2,
+          name: 'Shutdown completion',
+          execution: { kind: 'bot', project: '.', clock: 'realtime', timeoutMs: 10_000 },
+          context: { actor: '3000', guild: '1000', channel: '2000' },
+          steps: [{ action: 'invoke-command', command: 'ping', saveAs: 'ping', timeoutMs: 2000 }],
+          assertions: [
+            {
+              type: 'message-content',
+              interaction: '${ping.id}',
+              equals: 'Pong! Offline and deterministic.',
+            },
+            { type: 'no-unexpected-error' },
+          ],
+        },
+        { baseDirectory: directory, createSession: () => session },
+      );
+      assert.equal(result.status, finishes ? 'passed' : 'failed');
+      assert.equal(result.exitCode, finishes ? 0 : 1);
+      assert.equal(result.metadata.evidenceComplete, finishes);
+      assert.deepEqual(result.cleanupErrors, []);
+      assert.equal(session.snapshot().activeHandlers, finishes ? 0 : 1);
+      assert.equal(session.snapshot().evidenceComplete, finishes);
+      assert.equal(result.snapshot.activeHandlers, finishes ? 0 : 1);
+      assert.equal(result.snapshot.evidenceComplete, finishes);
+      if (!finishes)
+        assert.match(
+          result.assertions.find((assertion) => assertion.type === 'evidence-complete').message,
+          /handlers did not finish/u,
+        );
+      assert.ok(
+        result.snapshot.coreState.resources.some(
+          (resource) =>
+            resource.resourceType === 'message' &&
+            resource.content === 'Pong! Offline and deterministic.',
+        ),
+      );
+      assert.equal(
+        result.snapshot.output.some((entry) => /DISRUNNER_/u.test(entry.text)),
+        false,
+      );
+    },
+  );
+}
 
 test(
   'a matching real Bot reply cannot pass Scenario v2 after process control evidence is damaged',

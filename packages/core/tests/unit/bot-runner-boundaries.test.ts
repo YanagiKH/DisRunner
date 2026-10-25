@@ -63,6 +63,25 @@ beforeEach(() => {
     exitCode: null as number | null,
     signalCode: null as NodeJS.Signals | null,
   });
+  // A reaped fake child normally reaches readable EOF and then close, as Node does.
+  const ownedChild = child;
+  const emit = ownedChild.emit.bind(ownedChild);
+  ownedChild.emit = (event, ...args: unknown[]): boolean => {
+    const emitted = emit(event, ...args);
+    if (event === 'exit' && !ownedChild.stdout.writableEnded) {
+      let ended = 0;
+      const onEnd = (): void => {
+        ended += 1;
+        if (ended === 2) emit('close', ...args);
+      };
+      ownedChild.stdout.once('end', onEnd);
+      ownedChild.stderr.once('end', onEnd);
+      ownedChild.stdout.end();
+      ownedChild.stderr.end();
+      ownedChild.stdin.end();
+    }
+    return emitted;
+  };
   mocks.spawn.mockImplementation(() => {
     queueMicrotask(() => child.emit('spawn'));
     return child;

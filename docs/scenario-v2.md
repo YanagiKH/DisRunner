@@ -98,6 +98,8 @@ Structured SDK handler errors also fail the run, even if an initial reply matche
 
 After the final step, the runner waits for tracked SDK handlers to finish within the scenario's overall deadline, then allows 100 ms for immediate error delivery. It continues collecting structured errors through shutdown. A hanging handler cannot produce a pass. This tracks actual SDK handler work, not arbitrary background timers after the process has stopped; add explicit waits and assertions for separate work that completes later.
 
+Adapter controls are validated separately from redacted console output. Malformed controls, output that cannot be drained within the shutdown limit, and handlers left unfinished after the Bot exits make the evidence incomplete. Lines beginning with `DISRUNNER_` are reserved for adapter controls; use a different prefix for your Bot's own log messages.
+
 The runner also checks evidence completeness and the severity policy. Dropped or truncated evidence cannot establish a passing result. `policy.failOnSeverity` accepts `low`, `medium`, `high`, `critical`, or `none`, and defaults to `high`. Explicitly expecting an operation error does not suppress an independent risk finding; select the appropriate policy for a deliberate negative test.
 
 | Result                                                               | Exit code |

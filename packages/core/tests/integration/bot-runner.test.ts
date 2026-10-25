@@ -7,6 +7,48 @@ import { describe, expect, it } from 'vitest';
 import { BotRunner } from '../../src/index.js';
 
 describe('BotRunner', () => {
+  it('allows immediate valid-process retry after a failed spawn without requiring stop', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'disrunner-spawn-retry-'));
+    const controls: { readonly kind: string }[] = [];
+    const runner = new BotRunner({ onControl: (record) => controls.push(record) });
+    const common = {
+      cwd: directory,
+      workspaceRoot: directory,
+      restBaseUrl: 'http://127.0.0.1:1/api/v10',
+      gatewayUrl: 'ws://127.0.0.1:2/gateway',
+    };
+    try {
+      await expect(
+        runner.start({ ...common, executable: join(directory, 'does-not-exist') }),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(runner.snapshot()).toMatchObject({ status: 'crashed' });
+      expect(runner.snapshot().pid).toBeUndefined();
+      const previousControls = controls.length;
+      await runner.start({
+        ...common,
+        executable: process.execPath,
+        args: ['-e', "console.log('DISRUNNER_ADAPTER_READY'); console.log('retry completed');"],
+      });
+      await waitUntil(
+        () => runner.snapshot().status !== 'running' && runner.snapshot().status !== 'starting',
+      );
+      await runner.stop(100);
+      expect(runner.snapshot()).toMatchObject({ status: 'stopped', exitCode: 0 });
+      expect(controls.slice(previousControls)).toEqual([{ kind: 'ready' }]);
+      expect(runner.snapshot().output.map(({ text }) => text)).toEqual(['retry completed\n']);
+      expect(runner.evidence()).toMatchObject({
+        controlRecords: 1,
+        controlErrors: 0,
+        outputDrainErrors: 0,
+        outputDrained: true,
+        complete: true,
+      });
+    } finally {
+      await runner.stop(100);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('starts without a real token, captures redacted output, and observes exit', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'disrunner-core-test-'));
     const runner = new BotRunner();
