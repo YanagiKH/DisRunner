@@ -320,6 +320,7 @@ class RuntimeSession implements Session {
   }
   #publish(): void {
     this.#revision += 1;
+    if (this.#listeners.size === 0) return;
     this.#events.push({
       schemaVersion: 1,
       sessionId: this.#sessionId,

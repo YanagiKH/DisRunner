@@ -1857,6 +1857,7 @@ function operationFailure(
 
 interface CoreSnapshotSource {
   snapshot(): unknown;
+  list?: () => unknown;
   revisionedSnapshot?: () => unknown;
   subscribeCommits?: (listener: (commit: unknown) => void) => () => void;
 }
@@ -1908,7 +1909,12 @@ export class RetainedCoreState {
   // Authorization reads the retained store, never the bounded renderer projection.
   #resources(): readonly Record<string, unknown>[] {
     try {
-      const raw = this.#source?.snapshot();
+      const source = this.#source;
+      if (typeof source?.list === 'function') {
+        const resources = source.list();
+        return Array.isArray(resources) ? resources.filter(isRecord) : [];
+      }
+      const raw = source?.snapshot();
       return isRecord(raw) && Array.isArray(raw['resources'])
         ? raw['resources'].filter(isRecord)
         : [];
