@@ -5,6 +5,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
+import { connect } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   parseBotScenarioV2,
   runBotScenarioV2,
@@ -40,6 +42,70 @@ async function project(t, mode = 'normal') {
   config.environment.DISRUNNER_TEST_TRACE = join(directory, 'child.jsonl');
   await writeFile(configFile, JSON.stringify(config));
   return directory;
+}
+
+function observeRunningResources() {
+  const pids = new Set();
+  const endpoints = new Set();
+  return {
+    pids,
+    endpoints,
+    onSnapshot(snapshot) {
+      if (snapshot.phase !== 'running') return;
+      if (snapshot.pid !== null) pids.add(snapshot.pid);
+      for (const endpoint of Object.values(snapshot.endpoints ?? {})) endpoints.add(endpoint);
+    },
+  };
+}
+
+function connectionOutcome(port) {
+  return new Promise((resolveOutcome) => {
+    const socket = connect({ host: '127.0.0.1', port });
+    const finish = (outcome) => {
+      socket.destroy();
+      resolveOutcome(outcome);
+    };
+    socket.once('connect', () => finish('open'));
+    socket.once('error', (error) => finish(error.code));
+    socket.setTimeout(250, () => finish('timeout'));
+  });
+}
+
+async function assertRuntimeStopped(observed) {
+  assert.equal(observed.pids.size, 1, 'the running snapshot must identify the actual child PID');
+  assert.equal(observed.endpoints.size, 3, 'capture REST, Gateway and raw webhook endpoints');
+  const pids = [...observed.pids];
+  for (const pid of pids) assert.ok(Number.isSafeInteger(pid) && pid > 0);
+  const ports = [...observed.endpoints].map((endpoint) => {
+    const url = new URL(endpoint);
+    assert.equal(url.hostname, '127.0.0.1');
+    const port = Number(url.port);
+    assert.ok(Number.isInteger(port) && port > 0 && port <= 65535);
+    return port;
+  });
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const livePids = pids.filter((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        assert.equal(error.code, 'ESRCH', `unexpected PID probe failure for ${pid}`);
+        return false;
+      }
+    });
+    const connections = await Promise.all(ports.map(connectionOutcome));
+    if (livePids.length === 0 && connections.every((outcome) => outcome === 'ECONNREFUSED')) return;
+    if (Date.now() >= deadline) {
+      assert.deepEqual(livePids, [], 'the real child PID must no longer exist');
+      assert.deepEqual(
+        connections,
+        ports.map(() => 'ECONNREFUSED'),
+        `all runtime listeners must be closed: ${JSON.stringify(ports)}`,
+      );
+    }
+    await delay(25);
+  }
 }
 
 test('v2 parser accepts JSON/YAML, captures context, and does not mutate source', () => {
@@ -156,7 +222,11 @@ test(
   async (t) => {
     for (const mode of ['normal', 'wrong-safe']) {
       const directory = await project(t, mode);
-      const result = await runBotScenarioV2(canonical(), { baseDirectory: directory });
+      const observed = observeRunningResources();
+      const result = await runBotScenarioV2(canonical(), {
+        baseDirectory: directory,
+        onSnapshot: observed.onSnapshot,
+      });
       assert.equal(result.status, mode === 'normal' ? 'passed' : 'failed', JSON.stringify(result));
       assert.equal(result.exitCode, mode === 'normal' ? 0 : 1);
       assert.deepEqual(result.cleanupErrors, []);
@@ -165,7 +235,10 @@ test(
         .split('\n')
         .map(JSON.parse);
       assert.ok(child.some((event) => event.event === 'command' && event.command === 'ping'));
-      assert.ok(child.some((event) => event.event === 'exit'));
+      assert.ok(child.some((event) => event.event === 'launch' && observed.pids.has(event.pid)));
+      // Windows taskkill does not invoke the fixture's JavaScript SIGTERM/SIGINT handlers.
+      if (process.platform !== 'win32') assert.ok(child.some((event) => event.event === 'exit'));
+      await assertRuntimeStopped(observed);
       assert.equal(result.metadata.clock, 'realtime');
       assert.equal(result.metadata.replay, 'bot-rerun');
     }
