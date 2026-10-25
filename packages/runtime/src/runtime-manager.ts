@@ -58,6 +58,7 @@ const MAX_RENDERER_OUTPUT_ENTRY_BYTES = 32_768;
 const MAX_RENDERER_TRACES = 1000;
 const MAX_RENDERER_RISKS = 100;
 const MAX_INTERACTION_INPUT_BYTES = 2_000;
+const UNSUPPORTED_BOOTSTRAP_EXIT_GRACE_MS = 250;
 const CLEANUP_PENDING_SELECT =
   'Previous run cleanup is not confirmed. Stop again to retry cleanup before selecting a project.';
 
@@ -952,6 +953,8 @@ export class DesktopRuntimeManager {
           : rawFailure;
       let cleanupFailure: string | null = null;
       try {
+        if (configuration?.adapter.type !== 'raw-interaction-webhook')
+          await this.#waitForUnsupportedBootstrapExit(signal, generation);
         await this.#cleanup();
       } catch (cleanupError) {
         cleanupFailure = errorMessage(cleanupError);
@@ -973,6 +976,41 @@ export class DesktopRuntimeManager {
     }
     clearTimeout(timer);
     return this.snapshot();
+  }
+
+  async #waitForUnsupportedBootstrapExit(signal: AbortSignal, generation: number): Promise<void> {
+    const bot = this.#bot;
+    if (
+      bot === null ||
+      this.#adapterIssue?.code !== 'invalid' ||
+      this.#sdkReady ||
+      this.#state.phase !== 'starting' ||
+      signal.aborted ||
+      generation !== this.#generation
+    )
+      return;
+    // A rejected SDK bootstrap reports its error before Node reaps it. Let that
+    // terminal path finish before cleanup can launch taskkill at a departed PID.
+    const grace = new AbortController();
+    const timer = setTimeout(() => grace.abort(), UNSUPPORTED_BOOTSTRAP_EXIT_GRACE_MS);
+    const waiting = AbortSignal.any([signal, grace.signal]);
+    try {
+      while (!waiting.aborted && generation === this.#generation && bot === this.#bot) {
+        const observed = bot.snapshot();
+        if (
+          ['stopped', 'crashed'].includes(observed.status) &&
+          observed.pid === undefined &&
+          typeof observed.exitedAtMs === 'number' &&
+          Number.isFinite(observed.exitedAtMs)
+        )
+          return;
+        await delay(10, undefined, { signal: waiting });
+      }
+    } catch {
+      // Cancellation or a failed observation still proceeds through normal cleanup.
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   public async stop(): Promise<DesktopRuntimeState> {
