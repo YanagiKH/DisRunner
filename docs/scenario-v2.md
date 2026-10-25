@@ -100,7 +100,7 @@ After the final step, the runner waits for tracked SDK handlers to finish within
 
 Adapter controls are validated separately from redacted console output. Malformed controls, output that cannot be drained within the shutdown limit, and handlers left unfinished after the Bot exits make the evidence incomplete. Lines beginning with `DISRUNNER_` are reserved for adapter controls; use a different prefix for your Bot's own log messages.
 
-The runner also checks evidence completeness and the severity policy. Dropped or truncated evidence cannot establish a passing result. `policy.failOnSeverity` accepts `low`, `medium`, `high`, `critical`, or `none`, and defaults to `high`. Explicitly expecting an operation error does not suppress an independent risk finding; select the appropriate policy for a deliberate negative test.
+The runner finalizes `metadata.evidenceComplete` after shutdown. A failed Bot run can have complete evidence when all observations were retained. Dropped or truncated evidence cannot establish a passing result. `policy.failOnSeverity` accepts `low`, `medium`, `high`, `critical`, or `none`, and defaults to `high`. Explicitly expecting an operation error does not suppress an independent risk finding; select the appropriate policy for a deliberate negative test.
 
 | Result                                                               | Exit code |
 | -------------------------------------------------------------------- | --------- |

@@ -440,8 +440,11 @@ export async function runBotScenarioV2(
   let name = 'Invalid scenario';
   let scenarioHash = '';
   let runId: string | null = null;
+  let sessionId: string | null = null;
   let initialInputs: NonNullable<SessionSnapshot['inputs']> | null = null;
   let snapshot: SessionSnapshot | null = null;
+  let retainedCoreState: SessionSnapshot['coreState'] = null;
+  let durableEvidenceComplete = true;
   let session: Session | undefined;
   let unsubscribe: (() => void) | undefined;
   let retainRunSnapshot = true;
@@ -454,6 +457,21 @@ export async function runBotScenarioV2(
   if (options.signal?.aborted) abort();
   const signal = AbortSignal.any([deadline.signal, cancelled.signal]);
   let evidenceComplete = false;
+  const rememberRunEvidence = (value: SessionSnapshot): void => {
+    if (runId === null || value.runId !== runId || value.sessionId !== sessionId) return;
+    if (value.coreState != null && value.coreState.runId !== runId) {
+      durableEvidenceComplete = false;
+      return;
+    }
+    // Output may still be draining. Keep irreversible loss separately from that state.
+    durableEvidenceComplete &&= complete({
+      ...value,
+      phase: 'running',
+      evidenceComplete: true,
+    });
+    if (value.coreState != null && value.phase !== 'idle' && value.phase !== 'ready')
+      retainedCoreState = structuredClone(value.coreState);
+  };
   try {
     const scenario = parseBotScenarioV2(input);
     name = scenario.name;
@@ -472,6 +490,7 @@ export async function runBotScenarioV2(
     session = (options.createSession ?? createSession)();
     unsubscribe = session.subscribe((event) => {
       collectDiagnostics(event.snapshot);
+      rememberRunEvidence(event.snapshot);
       if (retainRunSnapshot) {
         snapshot = event.snapshot;
         options.onSnapshot?.(event.snapshot);
@@ -485,8 +504,10 @@ export async function runBotScenarioV2(
     if (initial.runId === null)
       throw new SessionError('transport', 'Runtime did not return an active run.');
     runId = initial.runId;
+    sessionId = initial.sessionId;
     initialInputs = structuredClone(initial.inputs ?? null);
     snapshot = initial;
+    rememberRunEvidence(initial);
     stage = 'run';
     session.setFaults(scenario.faults);
     const saved = new Map<string, BotScenarioV2Observation>();
@@ -590,12 +611,13 @@ export async function runBotScenarioV2(
       observations.push(observation);
       saved.set(requestId, observation);
       snapshot = session.snapshot();
+      rememberRunEvidence(snapshot);
     }
     await waitForHandlers(session, signal);
     signal.throwIfAborted();
     snapshot = session.snapshot();
     collectDiagnostics(snapshot);
-    evidenceComplete = complete(snapshot);
+    rememberRunEvidence(snapshot);
     const consumed = new Set<string>();
     for (const assertion of scenario.assertions) {
       const reference =
@@ -620,14 +642,6 @@ export async function runBotScenarioV2(
         unexpected.length === 0
           ? 'Every operation error was explicitly expected.'
           : `${unexpected.length} unexpected operation error(s).`,
-    });
-    assertions.push({
-      type: 'evidence-complete',
-      passed: evidenceComplete,
-      description: 'Complete observation evidence',
-      message: evidenceComplete
-        ? 'The retained run evidence is complete.'
-        : 'Run evidence was truncated or dropped; a passing result cannot be established.',
     });
     const threshold = SEVERITIES.indexOf(scenario.policy.failOnSeverity);
     const findings =
@@ -676,10 +690,17 @@ export async function runBotScenarioV2(
     if (session !== undefined) {
       snapshot = session.snapshot();
       collectDiagnostics(snapshot);
+      rememberRunEvidence(snapshot);
+      let stoppedCaptureComplete = false;
       try {
         const disposed = await session.dispose();
         collectDiagnostics(disposed.snapshot);
-        if (!complete(disposed.snapshot)) evidenceComplete = false;
+        stoppedCaptureComplete =
+          disposed.snapshot.sessionId === sessionId &&
+          (disposed.snapshot.runId === null || disposed.snapshot.runId === runId) &&
+          complete(disposed.snapshot) &&
+          disposed.errors.every((error) => error.code === 'child-exited') &&
+          (disposed.ok || disposed.errors.length > 0);
         cleanupErrors.push(
           ...disposed.errors.map((error) => ({ code: error.code, message: error.message })),
         );
@@ -693,14 +714,23 @@ export async function runBotScenarioV2(
       }
       const stoppedSnapshot = session.snapshot();
       collectDiagnostics(stoppedSnapshot);
-      if (!complete(stoppedSnapshot)) evidenceComplete = false;
+      stoppedCaptureComplete &&=
+        stoppedSnapshot.sessionId === sessionId &&
+        (stoppedSnapshot.runId === null || stoppedSnapshot.runId === runId) &&
+        complete(stoppedSnapshot);
       if (snapshot !== null)
         snapshot = {
           ...snapshot,
+          coreState: retainedCoreState ?? snapshot.coreState ?? null,
           activeHandlers: stoppedSnapshot.activeHandlers ?? 0,
-          evidenceComplete: snapshot.evidenceComplete !== false && complete(stoppedSnapshot),
+          evidenceComplete: durableEvidenceComplete && stoppedCaptureComplete,
+          droppedOutput: Math.max(snapshot.droppedOutput ?? 0, stoppedSnapshot.droppedOutput ?? 0),
+          droppedTraces: Math.max(snapshot.droppedTraces ?? 0, stoppedSnapshot.droppedTraces ?? 0),
+          droppedRisks: Math.max(snapshot.droppedRisks ?? 0, stoppedSnapshot.droppedRisks ?? 0),
           output: stoppedSnapshot.output,
+          ...(stoppedSnapshot.faults === undefined ? {} : { faults: stoppedSnapshot.faults }),
         };
+      evidenceComplete = runId !== null && snapshot !== null && complete(snapshot);
       if (cleanupErrors.length > 0 && status !== 'cancelled') status = 'runner-error';
     }
     unsubscribe?.();
@@ -713,7 +743,20 @@ export async function runBotScenarioV2(
     if (timer !== undefined) clearTimeout(timer);
     options.signal?.removeEventListener('abort', abort);
   }
+  if (droppedDiagnostics) evidenceComplete = false;
+  if (snapshot !== null) snapshot = { ...snapshot, evidenceComplete };
+  if (!evidenceComplete && status === 'passed') status = 'failed';
   if (runId !== null) {
+    assertions.push({
+      type: 'evidence-complete',
+      passed: evidenceComplete,
+      description: 'Complete observation evidence',
+      message: evidenceComplete
+        ? 'The retained run evidence is complete.'
+        : (snapshot?.activeHandlers ?? 0) > 0
+          ? 'Tracked handlers did not finish before shutdown.'
+          : 'Complete observation and cleanup could not be confirmed.',
+    });
     const passed = diagnostics.length === 0 && !droppedDiagnostics;
     assertions.push({
       type: 'runtime-diagnostics',
@@ -727,20 +770,6 @@ export async function runBotScenarioV2(
     });
     issues.push(...diagnostics);
     if (!passed && status === 'passed') status = 'failed';
-    if (droppedDiagnostics) evidenceComplete = false;
-    if (!evidenceComplete) {
-      const index = assertions.findIndex((assertion) => assertion.type === 'evidence-complete');
-      if (index >= 0)
-        assertions[index] = {
-          ...assertions[index]!,
-          passed: false,
-          message:
-            (snapshot?.activeHandlers ?? 0) > 0
-              ? 'Tracked handlers did not finish before shutdown.'
-              : 'Run evidence was dropped or truncated before shutdown completed.',
-        };
-      if (status === 'passed') status = 'failed';
-    }
     if (snapshot !== null) snapshot = { ...snapshot, diagnostics: structuredClone(diagnostics) };
   }
   const exitCode =

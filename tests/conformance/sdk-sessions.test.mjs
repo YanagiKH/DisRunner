@@ -325,7 +325,7 @@ for (const adapter of ['discord.js', 'discord.py']) {
         { code: 'bot-error', message: 'The error message exceeded the diagnostic limit.' },
       ]);
       assert.equal(result.snapshot.activeHandlers, 0);
-      assert.equal(result.metadata.evidenceComplete, true);
+      assert.equal(result.metadata.evidenceComplete, true, JSON.stringify(result));
     },
   );
 
