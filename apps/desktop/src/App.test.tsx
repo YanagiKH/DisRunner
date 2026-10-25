@@ -849,7 +849,14 @@ describe('runtime panel presentation regressions', () => {
   it('retains the three-region browser-preview layout without desktop context', () => {
     const { container } = render(<App />);
     const panel = screen.getByRole('region', { name: 'Runtime status and controls' });
-    expect(panel.children).toHaveLength(1);
+    expect(panel).toContainElement(
+      screen.getByRole('region', { name: 'Local bot runtime status' }),
+    );
+    expect(panel.querySelector('.conversation-navigation')).toHaveAttribute(
+      'aria-label',
+      'Conversation navigation',
+    );
+    expect(screen.queryByRole('region', { name: 'Runtime invocation context' })).toBeNull();
     expect(container.querySelector('#runtime-recovery')).not.toBeInTheDocument();
     expect(panel.nextElementSibling).toHaveClass('app-main');
     expect(screen.getByRole('button', { name: 'Start bot' })).toBeEnabled();

@@ -396,6 +396,37 @@ select {
   display: none;
 }
 
+.conversation-navigation {
+  display: none;
+  border-bottom: 1px solid var(--line);
+  color: #c1c8d5;
+  font-size: 12px;
+  padding: 7px 16px;
+}
+
+.conversation-navigation label {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.conversation-navigation select {
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  color: var(--text);
+  flex: 1;
+  max-width: 560px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+
+.conversation-navigation select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .runtime-recovery p,
 .runtime-context p {
   margin: 0;
@@ -3525,6 +3556,10 @@ select {
 }
 
 @media (max-width: 1080px) {
+  .conversation-navigation {
+    display: block;
+  }
+
   .app-main {
     grid-template-columns: 62px minmax(420px, 1fr);
   }

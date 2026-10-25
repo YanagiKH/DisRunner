@@ -19,11 +19,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.
 const temporary = await mkdtemp(path.join(tmpdir(), 'DisRunner packaged SDK 測試 '));
 const evidence =
   process.env.DISRUNNER_SDK_UI_EVIDENCE ?? path.join(root, 'apps/desktop/sdk-ui-evidence');
+const testViewport =
+  process.env.DISRUNNER_SDK_UI_COMPACT === '1' ? { width: 720, height: 720 } : null;
 await mkdir(evidence, { recursive: true });
 for (const name of [
   'results.json',
   'failure.png',
   'failure-state.json',
+  'viewport.json',
   'discord.js-interactions.png',
   'discord.js-direct-message.png',
   'discord.py-interactions.png',
@@ -40,6 +43,7 @@ let browser;
 let page;
 let output = '';
 const results = [];
+const viewports = [];
 async function digest(filename) {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(filename)) hash.update(chunk);
@@ -78,6 +82,26 @@ async function prepare(adapter) {
 }
 async function snapshot(actor) {
   return page.evaluate((id) => window.disrunnerDesktop.getRuntimeState(id), actor);
+}
+async function recordViewport(stage, adapter) {
+  viewports.push({
+    stage,
+    adapter,
+    testViewport,
+    ...(await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+      availableScreenWidth: screen.availWidth,
+      availableScreenHeight: screen.availHeight,
+      compactNavigation: window.matchMedia('(max-width: 1080px)').matches,
+    }))),
+    conversationPickerVisible: await page
+      .getByRole('combobox', { name: 'Conversation', exact: true })
+      .isVisible(),
+    guildSidebarVisible: await page.locator('.guild-sidebar').isVisible(),
+  });
+  await writeFile(path.join(evidence, 'viewport.json'), JSON.stringify(viewports, null, 2));
 }
 async function explorer(command) {
   await page.getByRole('button', { name: 'Command Explorer', exact: true }).click();
@@ -124,6 +148,10 @@ async function check(adapter) {
   await invoke();
   await page.locator('.project-editor pre').filter({ hasText: 'Sum: 5' }).waitFor();
   await simulator();
+  const expand = page.getByRole('button', { name: 'Expand inspector', exact: true });
+  const restoreCollapsed = await expand.isVisible();
+  if (restoreCollapsed) await expand.click();
+  await page.getByRole('tab', { name: 'Trace', exact: true }).click();
   await page.getByRole('heading', { name: 'Observed spans', exact: true }).waitFor();
   await page.getByRole('tab', { name: 'Payload', exact: true }).click();
   const typedSummary = JSON.parse(
@@ -134,6 +162,8 @@ async function check(adapter) {
   assert.equal(typedSummary.actorId, context.actorId);
   assert.equal(typedSummary.action.options[0].options[0].options[0].value, 2);
   await page.getByRole('tab', { name: 'Trace', exact: true }).click();
+  if (restoreCollapsed)
+    await page.getByRole('button', { name: 'Collapse inspector', exact: true }).click();
 
   await explorer('controls');
   await invoke();
@@ -205,9 +235,40 @@ async function check(adapter) {
   assert.notEqual(restarted.runId, started.runId);
   const direct = restarted.contexts.find((context) => context.channelId === dmId);
   assert.deepEqual(direct, { actorId: context.actorId, channelId: dmId });
-  const directGroup = page.locator('.other-server-row').filter({ hasText: 'Direct messages' });
-  if (await directGroup.count()) await directGroup.click();
-  await page.locator(`.channel-row[data-channel-id="${dmId}"]`).click();
+  await simulator();
+  await recordViewport('before-dm-navigation', adapter);
+  const conversation = page.getByRole('combobox', { name: 'Conversation', exact: true });
+  if (await conversation.isVisible()) {
+    const option = conversation.locator(`option[data-channel-id="${dmId}"]`);
+    await option.waitFor({ state: 'attached' });
+    assert.equal(await option.count(), 1, 'DM must be offered in the visible conversation picker');
+    const value = await option.getAttribute('value');
+    assert.equal(typeof value, 'string');
+    await conversation.selectOption(value);
+    assert.equal(
+      await conversation.locator('option:checked').getAttribute('data-channel-id'),
+      dmId,
+    );
+  } else {
+    await page.waitForFunction((channelId) => {
+      const sidebar = document.querySelector('.guild-sidebar');
+      return (
+        Boolean(sidebar?.querySelector(`.channel-row[data-channel-id="${channelId}"]`)) ||
+        [...(sidebar?.querySelectorAll('.other-server-row') ?? [])].some((row) =>
+          row.textContent?.includes('Direct messages'),
+        )
+      );
+    }, dmId);
+    const directGroup = page.locator('.other-server-row').filter({ hasText: 'Direct messages' });
+    if (await directGroup.count()) {
+      await directGroup.waitFor({ state: 'visible' });
+      await directGroup.click();
+    }
+    const channel = page.locator(`.channel-row[data-channel-id="${dmId}"]`);
+    await channel.waitFor({ state: 'visible' });
+    await channel.click();
+  }
+  await recordViewport('after-dm-navigation', adapter);
   const composer = page.locator('.composer input');
   await composer.fill('!ping');
   await composer.press('Enter');
@@ -280,6 +341,7 @@ try {
   assert.ok(context);
   page = context.pages()[0] ?? (await context.waitForEvent('page', { timeout: 15000 }));
   await page.waitForURL(/^file:/u);
+  if (testViewport) await page.setViewportSize(testViewport);
   const runtimeInfo = await page.evaluate(() => window.disrunnerDesktop.getRuntimeInfo());
   assert.equal(runtimeInfo.packaged, true);
   if (process.env.RELEASE_VERSION !== undefined)
@@ -288,6 +350,7 @@ try {
       process.env.RELEASE_VERSION,
       'installed desktop version must match the release version',
     );
+  await recordViewport('startup');
   await check('discord.js');
   await check('discord.py');
   assert.equal(
@@ -311,6 +374,8 @@ try {
         sourceCommit: process.env.GITHUB_SHA ?? null,
         executableSha256,
         asarSha256,
+        testViewport,
+        viewports,
         results,
       },
       null,
@@ -323,6 +388,7 @@ try {
   process.stdout.write(`Packaged SDK UI acceptance passed for ${results.length} adapters.\n`);
 } catch (error) {
   if (page && !page.isClosed()) {
+    await recordViewport('failure').catch(() => undefined);
     await page
       .screenshot({ path: path.join(evidence, 'failure.png'), fullPage: true })
       .catch(() => undefined);

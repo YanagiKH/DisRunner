@@ -10,6 +10,7 @@ import {
 import { CheckCircle2, Info, TriangleAlert } from 'lucide-react';
 import { GUILDS } from './data';
 import { Conversation } from './components/Conversation';
+import { ConversationNavigation } from './components/ConversationNavigation';
 import { GuildSidebar } from './components/GuildSidebar';
 import { Inspector } from './components/Inspector';
 import { MemberList } from './components/MemberList';
@@ -1037,6 +1038,15 @@ export default function App() {
       />
       <section className="runtime-panel" aria-label="Runtime status and controls">
         <RuntimeStrip desktop={desktop} runtime={runtimeState} />
+        <ConversationNavigation
+          guilds={guilds}
+          selectedGuild={guild}
+          selectedChannelId={channel.id}
+          onSelect={(guildId, channelId) => {
+            dispatch({ type: 'select-guild', guildId });
+            dispatch({ type: 'select-channel', channelId });
+          }}
+        />
         {desktop && (
           <section
             className="runtime-recovery"
