@@ -11,7 +11,6 @@ import {
   readlink,
   rename,
   rm,
-  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { availableParallelism, cpus, release, tmpdir, totalmem } from 'node:os';
@@ -20,6 +19,7 @@ import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { linkDiscordJsFixture } from './sdk-fixture.mjs';
 
 const execute = promisify(execFile);
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -492,14 +492,10 @@ async function prepareProjects(directory, options, runtime) {
           path.basename(filename),
         ),
     });
-    if (adapter === 'discord.js')
-      await symlink(
-        path.join(source, 'node_modules'),
-        path.join(project, 'node_modules'),
-        'junction',
-      );
     const configFile = path.join(project, 'discord-simulator.config.json');
     const config = JSON.parse(await readFile(configFile, 'utf8'));
+    if (adapter === 'discord.js')
+      await linkDiscordJsFixture(source, path.join(project, config.bot.entryPoint));
     const executable = adapter === 'discord.py' ? options.python : process.execPath;
     config.bot.startCommand = `"${executable.replaceAll('"', '\\"')}" ${config.bot.entryPoint}`;
     await writeFile(configFile, JSON.stringify(config));

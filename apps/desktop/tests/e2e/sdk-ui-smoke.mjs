@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { linkDiscordJsFixture } from '../../../../scripts/sdk-fixture.mjs';
 import {
   findExecutable,
   launchApplication,
@@ -63,12 +64,7 @@ async function prepare(adapter) {
     'user.discord-fixture.json',
   ])
     await cp(path.join(source, file), path.join(directory, file));
-  if (adapter === 'discord.js')
-    await symlink(
-      path.join(source, 'node_modules'),
-      path.join(directory, 'node_modules'),
-      'junction',
-    );
+  if (adapter === 'discord.js') await linkDiscordJsFixture(source, path.join(directory, entry));
   const filename = path.join(directory, 'discord-simulator.config.json');
   const config = JSON.parse(await readFile(filename, 'utf8'));
   const executable =

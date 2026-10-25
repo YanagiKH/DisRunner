@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { linkDiscordJsFixture } from '../../scripts/sdk-fixture.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -89,12 +90,8 @@ test('discord.js: incompatible SDK is rejected before executing installed packag
 test('discord.js: SDK attachment URL is rejected before any remote download', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'disrunner-sdk-attachment-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  await symlink(
-    path.join(root, 'examples', 'discordjs-bot', 'node_modules'),
-    path.join(directory, 'node_modules'),
-    'junction',
-  );
   const entry = path.join(directory, 'bot.cjs');
+  await linkDiscordJsFixture(path.join(root, 'examples', 'discordjs-bot'), entry);
   await writeFile(
     entry,
     "const {MessagePayload}=require('discord.js'); MessagePayload.resolveFile({attachment:'https://cdn.discordapp.com/attachments/offline-test.txt'}).then(()=>{process.exitCode=2}, error=>{console.error(error.message);process.exitCode=1});",
@@ -131,13 +128,8 @@ for (const adapter of ['discord.js', 'discord.py']) {
     const directory = await mkdtemp(path.join(tmpdir(), 'disrunner-sdk-redaction-'));
     t.after(() => rm(directory, { recursive: true, force: true }));
     const javascript = adapter === 'discord.js';
-    if (javascript)
-      await symlink(
-        path.join(root, 'examples', 'discordjs-bot', 'node_modules'),
-        path.join(directory, 'node_modules'),
-        'junction',
-      );
     const entry = path.join(directory, javascript ? 'bot.cjs' : 'bot.py');
+    if (javascript) await linkDiscordJsFixture(path.join(root, 'examples', 'discordjs-bot'), entry);
     await writeFile(
       entry,
       javascript
@@ -159,13 +151,8 @@ for (const adapter of ['discord.js', 'discord.py']) {
     const directory = await mkdtemp(path.join(tmpdir(), 'disrunner-sdk-diagnostic-'));
     t.after(() => rm(directory, { recursive: true, force: true }));
     const javascript = adapter === 'discord.js';
-    if (javascript)
-      await symlink(
-        path.join(root, 'examples', 'discordjs-bot', 'node_modules'),
-        path.join(directory, 'node_modules'),
-        'junction',
-      );
     const entry = path.join(directory, javascript ? 'bot.cjs' : 'bot.py');
+    if (javascript) await linkDiscordJsFixture(path.join(root, 'examples', 'discordjs-bot'), entry);
     await writeFile(
       entry,
       javascript

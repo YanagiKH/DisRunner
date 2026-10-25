@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { linkDiscordJsFixture } from '../../scripts/sdk-fixture.mjs';
 
 import {
   createSession,
@@ -40,11 +41,7 @@ async function project(t, adapter, variant = 'correct') {
     await cp(path.join(example, file), path.join(directory, file));
   }
   if (adapter === 'discord.js' && variant !== 'unsupported')
-    await symlink(
-      path.join(example, 'node_modules'),
-      path.join(directory, 'node_modules'),
-      'junction',
-    );
+    await linkDiscordJsFixture(example, path.join(directory, filename));
   if (variant === 'unsupported') {
     if (adapter === 'discord.js') {
       const sdk = path.join(directory, 'node_modules', 'discord.js');
