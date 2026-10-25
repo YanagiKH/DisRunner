@@ -1990,31 +1990,38 @@ export class RetainedCoreState {
       if (!isRecord(raw) || !Array.isArray(raw['resources'])) return null;
       const totalResources = raw['resources'].length;
       // Bound the sanitized renderer projection independently of the core store capacity.
+      const resourceLimit = this.extended ? 2_000 : 1_000;
+      const rawResources = (raw['resources'] as unknown[]).filter(isRecord);
+      const channels = new Map(
+        rawResources
+          .filter((resource) => resource['resourceType'] === 'channel')
+          .map((channel) => [channel['id'], channel]),
+      );
+      const visibleChannels = new Map<unknown, boolean>();
+      const nowMs = clock.now();
       const resources: RuntimeResourceView[] = [];
       let bytes = 2;
-      let evidenceComplete = totalResources <= 1000;
-      for (const resource of raw['resources'].slice(0, 1_000)) {
+      let evidenceComplete = totalResources <= resourceLimit;
+      for (const resource of selectProjectionResources(
+        raw['resources'] as unknown[],
+        resourceLimit,
+        this.extended,
+      )) {
         if (actorId !== undefined && this.enforceViewPermissions && isRecord(resource)) {
           const channel =
             resource['resourceType'] === 'channel'
               ? resource
               : resource['resourceType'] === 'message'
-                ? (raw['resources'] as unknown[])
-                    .filter(isRecord)
-                    .find(
-                      (r) => r['resourceType'] === 'channel' && r['id'] === resource['channel_id'],
-                    )
+                ? channels.get(resource['channel_id'])
                 : undefined;
-          if (
-            channel &&
-            !canViewChannel(
-              (raw['resources'] as unknown[]).filter(isRecord),
-              actorId,
-              channel,
-              clock.now(),
-            )
-          )
-            continue;
+          if (channel) {
+            let visible = visibleChannels.get(channel['id']);
+            if (visible === undefined) {
+              visible = canViewChannel(rawResources, actorId, channel, nowMs);
+              visibleChannels.set(channel['id'], visible);
+            }
+            if (!visible) continue;
+          }
         }
         if (
           isRecord(resource) &&
@@ -2049,7 +2056,6 @@ export class RetainedCoreState {
         bytes += Buffer.byteLength(encoded) + (resources.length > 0 ? 1 : 0);
         resources.push(JSON.parse(encoded) as RuntimeResourceView);
       }
-      const nowMs = clock.now();
       if (!Number.isFinite(nowMs) || clock.mode !== 'realtime') return null;
       return {
         schemaVersion: 1,
@@ -2077,6 +2083,29 @@ export class RetainedCoreState {
     unsubscribe?.();
     this.#unsubscribe = null;
   }
+}
+
+function selectProjectionResources(
+  resources: readonly unknown[],
+  limit: number,
+  extended: boolean,
+): readonly unknown[] {
+  if (!extended || resources.length <= limit) return resources.slice(0, limit);
+  const structure = resources
+    .filter((resource) => !isRecord(resource) || resource['resourceType'] !== 'message')
+    .slice(0, limit);
+  const remaining = limit - structure.length;
+  if (remaining === 0) return structure;
+  const messages = resources
+    .flatMap((resource, index) => {
+      if (!isRecord(resource) || resource['resourceType'] !== 'message') return [];
+      const timestamp = resource['timestamp'];
+      const parsed =
+        typeof timestamp === 'string' && timestamp.length <= 64 ? Date.parse(timestamp) : NaN;
+      return [{ resource, index, at: Number.isFinite(parsed) ? parsed : 0 }];
+    })
+    .sort((a, b) => a.at - b.at || a.index - b.index);
+  return [...structure, ...messages.slice(-remaining).map(({ resource }) => resource)];
 }
 
 function projectResourceView(

@@ -41,6 +41,9 @@
     "attachmentFileBytes": 2097152,
     "multipartBytes": 8388608,
     "workspaceBytes": 8388608,
+    "sessionProjectionRecords": 2000,
+    "legacyProjectionRecords": 1000,
+    "sessionProjectionBytes": 1048576,
     "maxFaultDelayMs": 30000
   },
   "profiles": {
@@ -84,7 +87,8 @@
       "evidence": [
         "packages/runtime/src/workspace.ts",
         "packages/core/tests/integration/resource-domain.test.ts",
-        "packages/runtime/tests/workspace.test.mjs"
+        "packages/runtime/tests/workspace.test.mjs",
+        "packages/runtime/tests/normal-workspace-view.test.mjs"
       ],
       "releaseVerification": "automated tests and conformance"
     },

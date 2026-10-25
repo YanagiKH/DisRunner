@@ -32,7 +32,7 @@ All of these capacities can be configured through the core constructors within h
 
 The byte budgets measure serialized records, not exact JavaScript heap overhead. The separate count limits bound Map/ring bookkeeping; callers that hold returned spans or cloned report arrays are responsible for bounding those copies too.
 
-`spans(limit)` clones only the newest requested completed spans. `all(limit)` clones only the requested highest-priority findings (severity descending, then rule ID); the no-argument methods retain their full-snapshot behavior. The Electron runtime uses these bounded queries for its 250 ms evidence refresh, with at most 100 traces and 100 risks per refresh.
+`spans(limit)` clones only the newest requested completed spans. `all(limit)` clones only the requested highest-priority findings (severity descending, then rule ID); the no-argument methods retain their full-snapshot behavior. The Electron runtime uses these bounded queries for its 250 ms evidence refresh, with at most 1,000 traces and 100 risks per refresh.
 
 `TraceCollector.evidence()` reports retained, evicted, discarded, rejected, and truncated span counts; `RiskCollector.evidence()` reports aggregation, rejection, and truncation. Bot output and fault receipts also expose completeness accounting. Session combines these signals, and Scenario v2 cannot pass after relevant evidence was dropped or truncated. Expected privacy filtering is distinct from evidence loss: the core projection's `truncated` field can reflect omitted private records, while `evidenceComplete` records capacity/sanitization completeness.
 

@@ -50,4 +50,6 @@ Snapshots and fixture strings are core values. Export encodes `bigint` values in
 
 Live Desktop resources/messages are projections of the current retained state. Public snapshots omit private records; actor views apply the supported channel/recipient rules and include that actor's ephemeral replies. CLI Scenario v2 uses those same views for assertions. The browser demo remains separate.
 
+The current Session profile considers up to 2,000 resources within a 1 MiB serialized projection. This includes the reference workspace with 1 guild, 10 channels, 100 users, 1,000 messages and 50 registered commands. If the count limit is exceeded, structural resources remain available and the newest timestamped messages fill the remaining slots. Earlier raw compatibility profiles retain their 1,000-resource bound. Count or byte loss sets `evidenceComplete: false`; Scenario v2 cannot pass with that incomplete view. Expected privacy filtering is reported separately from capture loss.
+
 There is no general stale-cache model, process-memory checkpoint, or complete Discord resource validator. Reproduction bundles describe inputs for a fresh Bot rerun and require the original project. See [Compatibility](../COMPATIBILITY.md).
