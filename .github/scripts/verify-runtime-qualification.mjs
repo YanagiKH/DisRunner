@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -10,21 +11,70 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const adapters = ['raw-interaction-webhook', 'discord.js', 'discord.py'];
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const digestPattern = /^[a-f0-9]{64}$/u;
+const MAX_FILE_BYTES = 16 * 1_048_576;
+const MAX_ARTIFACT_BYTES = 64 * 1_048_576;
+
+/** Parent directories belong to the trusted checkout/artifact extraction, not a writable Bot project. */
+export async function readBoundedRegularFile(filename, maxBytes, label = 'Qualification input') {
+  assert.ok(Number.isSafeInteger(maxBytes) && maxBytes >= 0 && maxBytes <= MAX_FILE_BYTES);
+  const file = await open(
+    filename,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    const before = await file.stat({ bigint: true });
+    assert.ok(before.isFile(), `${label} must be a regular file.`);
+    assert.ok(before.size <= BigInt(maxBytes), `${label} exceeded the ${maxBytes}-byte limit.`);
+    // One extra byte detects growth while keeping both allocation and I/O bounded by the
+    // descriptor's checked size. Reopening the path would invalidate these checks.
+    const buffer = Buffer.allocUnsafe(Number(before.size) + 1);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const { bytesRead } = await file.read(buffer, offset, buffer.byteLength - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    const after = await file.stat({ bigint: true });
+    assert.ok(
+      BigInt(offset) === before.size &&
+        after.size === before.size &&
+        after.mtimeNs === before.mtimeNs &&
+        after.ctimeNs === before.ctimeNs,
+      `${label} changed while being read.`,
+    );
+    const named = await lstat(filename, { bigint: true });
+    assert.ok(
+      named.isFile() &&
+        !named.isSymbolicLink() &&
+        named.dev === before.dev &&
+        named.ino === before.ino &&
+        named.size === before.size &&
+        named.mtimeNs === before.mtimeNs &&
+        named.ctimeNs === before.ctimeNs,
+      `${label} was replaced while being read.`,
+    );
+    return buffer.subarray(0, offset);
+  } finally {
+    await file.close();
+  }
+}
 
 /** Reproduce the qualification harness's complete runtime/adapter artifact manifest. */
 export async function runtimeArtifactSnapshot(root) {
   const entries = [];
   let totalBytes = 0;
   const add = async (filename) => {
-    const info = await lstat(filename);
-    assert.ok(info.isFile() && !info.isSymbolicLink(), 'Runtime artifact must be a regular file.');
-    assert.ok(info.size <= 16 * 1_048_576, 'Runtime artifact exceeded the file size limit.');
-    totalBytes += info.size;
-    assert.ok(totalBytes <= 64 * 1_048_576, 'Runtime artifacts exceeded the total size limit.');
+    const bytes = await readBoundedRegularFile(
+      filename,
+      Math.min(MAX_FILE_BYTES, MAX_ARTIFACT_BYTES - totalBytes),
+      'Runtime artifact',
+    );
+    totalBytes += bytes.byteLength;
+    assert.ok(totalBytes <= MAX_ARTIFACT_BYTES, 'Runtime artifacts exceeded the total size limit.');
     assert.ok(entries.length < 208, 'Too many runtime artifacts.');
     entries.push({
       path: path.relative(root, filename).split(path.sep).join('/'),
-      sha256: hash(await readFile(filename)),
+      sha256: hash(bytes),
     });
   };
   const visit = async (directory) => {
@@ -70,9 +120,11 @@ export async function verifyRuntimeQualification(
   assert.ok(['full', 'smoke'].includes(mode), 'Qualification mode must be full or smoke.');
   assert.match(sha, /^[a-f0-9]{40}$/u, 'Expected source commit must be a full Git SHA.');
   assert.ok(typeof version === 'string' && version.length > 0, 'Expected version is required.');
-  const info = await lstat(filename);
-  assert.ok(info.isFile() && info.size <= 16 * 1_048_576, 'Invalid qualification receipt size.');
-  const document = JSON.parse(await readFile(filename, 'utf8'));
+  const document = JSON.parse(
+    (await readBoundedRegularFile(filename, MAX_FILE_BYTES, 'Qualification receipt')).toString(
+      'utf8',
+    ),
+  );
   const { integrity, ...content } = document;
   assert.equal(integrity?.algorithm, 'sha256', 'Missing qualification integrity algorithm.');
   assert.equal(integrity?.scope, 'JSON.stringify(document without integrity)');
@@ -90,7 +142,15 @@ export async function verifyRuntimeQualification(
   assert.deepEqual(content.failures, [], 'Qualification reported failures.');
   assert.equal(content.environment?.version, version, 'Qualification version differs.');
   assert.equal(content.environment?.platform, 'linux');
-  const manifest = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+  const manifest = JSON.parse(
+    (
+      await readBoundedRegularFile(
+        path.join(root, 'package.json'),
+        MAX_FILE_BYTES,
+        'Checkout manifest',
+      )
+    ).toString('utf8'),
+  );
   assert.equal(manifest.version, version, 'Checkout version differs.');
   assert.equal(content.environment?.node, '22.23.2');
   assert.equal(content.environment?.python, '3.12.14');

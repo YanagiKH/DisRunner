@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  truncate,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,6 +20,7 @@ import test from 'node:test';
 import { runtimeArtifacts, THRESHOLDS } from '../../scripts/qualify-runtime.mjs';
 import {
   runtimeArtifactSnapshot,
+  readBoundedRegularFile,
   verifyRuntimeQualification,
 } from './verify-runtime-qualification.mjs';
 
@@ -213,4 +226,107 @@ test('a resealed receipt cannot omit handler tracking and missing required adapt
   await rm(path.join(root, 'packages/adapter-discordjs/handler-tracking.cjs'));
   await assert.rejects(runtimeArtifacts(root), { code: 'ENOENT' });
   await assert.rejects(verify(), { code: 'ENOENT' });
+});
+
+test('a pathname replaced after descriptor checking never supplies replacement bytes', async (t) => {
+  const { root } = await fixture(t);
+  const filename = path.join(root, 'descriptor-input');
+  await writeFile(filename, 'original');
+  const probe = await open(filename, 'r');
+  const prototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const stat = prototype.stat;
+  const checked = [];
+  t.mock.method(prototype, 'stat', async function (...args) {
+    const result = await Reflect.apply(stat, this, args);
+    if (checked.length === 0) {
+      checked.push(this);
+      await rename(filename, `${filename}.old`);
+      await writeFile(filename, 'replacement'.repeat(1000));
+    }
+    return result;
+  });
+  await assert.rejects(readBoundedRegularFile(filename, 16), /changed|replaced/u);
+  assert.equal(checked[0].fd, -1, 'The checked descriptor is closed even when the path changes.');
+});
+
+test('growth after fstat is bounded to the checked size plus one byte and closes the descriptor', async (t) => {
+  const { root } = await fixture(t);
+  const filename = path.join(root, 'growing-input');
+  await writeFile(filename, 'original');
+  const probe = await open(filename, 'r');
+  const prototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const stat = prototype.stat;
+  const read = prototype.read;
+  const checked = [];
+  let requested = 0;
+  t.mock.method(prototype, 'stat', async function (...args) {
+    const result = await Reflect.apply(stat, this, args);
+    if (checked.length === 0) {
+      checked.push(this);
+      await appendFile(filename, 'growth'.repeat(10_000));
+    }
+    return result;
+  });
+  t.mock.method(prototype, 'read', function (...args) {
+    requested += args[2];
+    return Reflect.apply(read, this, args);
+  });
+  await assert.rejects(readBoundedRegularFile(filename, 16), /changed/u);
+  assert.ok(requested <= 9, 'A growing file cannot cause reads beyond the checked size plus one.');
+  assert.equal(checked[0].fd, -1);
+});
+
+test('receipt and required adapter leaves reject symbolic links and nonregular files', async (t) => {
+  const { root, filename, verify } = await fixture(t);
+  const moved = `${filename}.original`;
+  await rename(filename, moved);
+  await symlink(moved, filename);
+  await assert.rejects(verify());
+  await rm(filename);
+  await mkdir(filename);
+  await assert.rejects(verify(), /regular file/u);
+  const adapter = path.join(root, 'packages/adapter-discordjs/handler-tracking.cjs');
+  await rm(adapter);
+  await symlink(path.join(root, 'package.json'), adapter);
+  await assert.rejects(runtimeArtifactSnapshot(root));
+});
+
+test(
+  'FIFO input is rejected without waiting for a writer',
+  { skip: process.platform !== 'linux', timeout: 1000 },
+  async (t) => {
+    const { root } = await fixture(t);
+    const filename = path.join(root, 'fifo-input');
+    execFileSync('mkfifo', [filename]);
+    await assert.rejects(readBoundedRegularFile(filename, 16), /regular file/u);
+  },
+);
+
+test('receipt and artifact reads preserve the 16 MiB per-file ceiling', async (t) => {
+  const { root, filename, verify } = await fixture(t);
+  await truncate(filename, 16 * 1_048_576 + 1);
+  await assert.rejects(verify(), /byte limit/u);
+  const artifact = path.join(root, 'packages/runtime/dist/index.js');
+  await truncate(artifact, 16 * 1_048_576 + 1);
+  await assert.rejects(runtimeArtifactSnapshot(root), /byte limit/u);
+});
+
+test('the artifact tree preserves its 64 MiB total byte ceiling', async (t) => {
+  const { root } = await fixture(t);
+  for (let index = 0; index < 4; index++) {
+    const filename = path.join(root, `packages/core/dist/large-${index}.js`);
+    await writeFile(filename, '');
+    await truncate(filename, 16 * 1_048_576);
+  }
+  await assert.rejects(runtimeArtifactSnapshot(root), /byte limit|total size limit/u);
+});
+
+test('malformed and incomplete receipt documents cannot enter qualification', async (t) => {
+  const { filename, verify } = await fixture(t);
+  for (const content of ['{', 'null', '[]', '{}']) {
+    await writeFile(filename, content);
+    await assert.rejects(verify());
+  }
 });
