@@ -36,6 +36,17 @@ export interface BotProcessOutput {
   readonly atMs: number;
 }
 
+/** Parsed supervisor records; free-form messages are redacted before delivery. */
+export type BotProcessControl =
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'handler'; readonly id: string; readonly phase: 'start' | 'end' }
+  | { readonly kind: 'diagnostic'; readonly code: 'bot-error'; readonly message: string }
+  | { readonly kind: 'adapter-error'; readonly code: 'unsupported'; readonly message: string }
+  | {
+      readonly kind: 'protocol-error';
+      readonly message: 'Invalid or incomplete Bot control record.';
+    };
+
 export interface BotProcessSnapshot {
   readonly status: BotProcessStatus;
   readonly pid?: number;
@@ -52,6 +63,8 @@ export interface BotRunnerOptions {
   readonly maxOutputBytes?: number;
   readonly maxOutputLineBytes?: number;
   readonly onOutput?: (entry: BotProcessOutput) => void;
+  /** Consumes reserved control lines separately from human output when present. */
+  readonly onControl?: (record: BotProcessControl) => void;
 }
 
 export interface BotOutputEvidence {
@@ -70,15 +83,26 @@ export interface BotOutputEvidence {
   readonly clippedBytes: number;
   readonly redactionTruncatedEntries: number;
   readonly observerFailures: number;
+  /** Valid reserved records accepted by the dedicated control path. */
+  readonly controlRecords: number;
+  /** Reserved records rejected, including records discarded after protocol failure. */
+  readonly controlErrors: number;
+  readonly controlObserverFailures: number;
   readonly complete: boolean;
 }
 
 const OUTPUT_REDACTION_LIMIT_CHARACTERS = 100_000;
+const CONTROL_PREFIX = 'DISRUNNER_';
+const MAX_CONTROL_LINE_BYTES = 4_096;
+const MAX_CONTROL_RECORDS = 100_000;
+const MAX_CONTROL_HANDLERS = 1_000;
+const CONTROL_PROTOCOL_ERROR = 'Invalid or incomplete Bot control record.';
 
 export class BotRunner {
   readonly #now: () => number;
   readonly #maxOutputEntries: number;
   readonly #onOutput: ((entry: BotProcessOutput) => void) | undefined;
+  readonly #onControl: ((record: BotProcessControl) => void) | undefined;
   readonly #maxOutputBytes: number;
   readonly #maxOutputLineBytes: number;
   readonly #output: BotProcessOutput[] = [];
@@ -97,6 +121,12 @@ export class BotRunner {
   #clippedBytes = 0;
   #redactionTruncatedEntries = 0;
   #observerFailures = 0;
+  #controlRecords = 0;
+  #controlErrors = 0;
+  #controlObserverFailures = 0;
+  #controlFailed = false;
+  #controlCallbackEnabled = true;
+  readonly #controlHandlers = new Set<string>();
   #outputCallbackEnabled = true;
   #sensitiveValues: readonly string[] = [];
   #child: ChildProcessWithoutNullStreams | undefined;
@@ -137,6 +167,7 @@ export class BotRunner {
       throw new RangeError('maxOutputLineBytes cannot exceed maxOutputBytes.');
     }
     this.#onOutput = options.onOutput;
+    this.#onControl = options.onControl;
   }
 
   public async start(config: BotProcessConfig): Promise<BotProcessSnapshot> {
@@ -202,6 +233,12 @@ export class BotRunner {
     this.#clippedBytes = 0;
     this.#redactionTruncatedEntries = 0;
     this.#observerFailures = 0;
+    this.#controlRecords = 0;
+    this.#controlErrors = 0;
+    this.#controlObserverFailures = 0;
+    this.#controlFailed = false;
+    this.#controlCallbackEnabled = true;
+    this.#controlHandlers.clear();
     this.#outputCallbackEnabled = true;
     this.#pendingOutput.stdout = { text: '', dropping: false };
     this.#pendingOutput.stderr = { text: '', dropping: false };
@@ -363,11 +400,16 @@ export class BotRunner {
       clippedBytes: this.#clippedBytes,
       redactionTruncatedEntries: this.#redactionTruncatedEntries,
       observerFailures: this.#observerFailures,
+      controlRecords: this.#controlRecords,
+      controlErrors: this.#controlErrors,
+      controlObserverFailures: this.#controlObserverFailures,
       complete:
         this.#evictedEntries === 0 &&
         this.#truncatedLines === 0 &&
         this.#redactionTruncatedEntries === 0 &&
-        this.#observerFailures === 0,
+        this.#observerFailures === 0 &&
+        this.#controlErrors === 0 &&
+        this.#controlObserverFailures === 0,
     };
   }
 
@@ -484,15 +526,27 @@ export class BotRunner {
       input = newline < 0 ? '' : input.slice(newline + 1);
       if (pending.dropping) this.#discardedBytes += Buffer.byteLength(part);
       if (!pending.dropping) pending.text += part;
-      if (!pending.dropping && Buffer.byteLength(pending.text) > this.#maxOutputLineBytes) {
+      const control = this.#onControl !== undefined && pending.text.startsWith(CONTROL_PREFIX);
+      const possibleControlPrefix =
+        this.#onControl !== undefined && newline < 0 && CONTROL_PREFIX.startsWith(pending.text);
+      const lineLimit = control ? MAX_CONTROL_LINE_BYTES : this.#maxOutputLineBytes;
+      if (
+        !pending.dropping &&
+        !possibleControlPrefix &&
+        Buffer.byteLength(pending.text) > lineLimit
+      ) {
         this.#truncatedLines += 1;
         // A later chunk may complete a secret already present in this prefix.
         this.#clippedBytes += Buffer.byteLength(pending.text);
-        this.#recordOutput(stream, '[TRUNCATED]\n', true);
+        if (control) this.#rejectControl();
+        else this.#recordOutput(stream, '[TRUNCATED]\n', true);
         pending.text = '';
         pending.dropping = newline < 0;
       } else if (newline >= 0) {
-        if (!pending.dropping) this.#recordOutput(stream, pending.text);
+        if (!pending.dropping) {
+          if (control) this.#consumeControl(stream, pending.text);
+          else this.#recordOutput(stream, pending.text);
+        }
         pending.text = '';
         pending.dropping = false;
       }
@@ -501,9 +555,62 @@ export class BotRunner {
 
   #flushOutput(stream: BotProcessOutput['stream']): void {
     const pending = this.#pendingOutput[stream];
-    if (pending.text !== '') this.#recordOutput(stream, pending.text);
+    if (pending.text !== '') {
+      if (this.#onControl !== undefined && pending.text.startsWith(CONTROL_PREFIX))
+        this.#rejectControl();
+      else this.#recordOutput(stream, pending.text);
+    }
     pending.text = '';
     pending.dropping = false;
+  }
+
+  #consumeControl(stream: BotProcessOutput['stream'], raw: string): void {
+    if (this.#controlFailed || stream !== 'stdout' || this.#controlRecords >= MAX_CONTROL_RECORDS) {
+      this.#rejectControl();
+      return;
+    }
+    let record: Exclude<BotProcessControl, { kind: 'protocol-error' }>;
+    try {
+      record = parseControlRecord(raw);
+      if (record.kind === 'handler') {
+        if (record.phase === 'start') {
+          if (
+            this.#controlHandlers.size >= MAX_CONTROL_HANDLERS ||
+            this.#controlHandlers.has(record.id)
+          )
+            throw new Error(CONTROL_PROTOCOL_ERROR);
+          this.#controlHandlers.add(record.id);
+        } else if (!this.#controlHandlers.delete(record.id)) {
+          throw new Error(CONTROL_PROTOCOL_ERROR);
+        }
+      } else if (record.kind === 'diagnostic' || record.kind === 'adapter-error') {
+        record = { ...record, message: this.#redactOutput(record.message) };
+      }
+    } catch {
+      this.#rejectControl();
+      return;
+    }
+    this.#controlRecords += 1;
+    this.#notifyControl(record);
+  }
+
+  #rejectControl(): void {
+    this.#controlErrors += 1;
+    if (this.#controlFailed) return;
+    this.#controlFailed = true;
+    this.#notifyControl({ kind: 'protocol-error', message: CONTROL_PROTOCOL_ERROR });
+  }
+
+  #notifyControl(record: BotProcessControl): void {
+    if (!this.#controlCallbackEnabled || this.#onControl === undefined) return;
+    try {
+      this.#onControl(Object.freeze(record));
+    } catch {
+      this.#controlObserverFailures += 1;
+      this.#controlFailed = true;
+      this.#controlCallbackEnabled = false;
+      this.#recordOutput('stderr', '[DisRunner] Control observer threw and was disabled.\n');
+    }
   }
 
   #redactOutput(raw: string): string {
@@ -558,6 +665,60 @@ export class BotRunner {
       }
     }
   }
+}
+
+function parseControlRecord(raw: string): Exclude<BotProcessControl, { kind: 'protocol-error' }> {
+  if (!raw.endsWith('\n') || Buffer.byteLength(raw) > MAX_CONTROL_LINE_BYTES)
+    throw new Error(CONTROL_PROTOCOL_ERROR);
+  const line = raw.endsWith('\r\n') ? raw.slice(0, -2) : raw.slice(0, -1);
+  if (line === 'DISRUNNER_ADAPTER_READY') return { kind: 'ready' };
+  const separator = line.indexOf(' ');
+  if (separator < 0) throw new Error(CONTROL_PROTOCOL_ERROR);
+  const prefix = line.slice(0, separator);
+  const payload = line.slice(separator + 1);
+  if (!['DISRUNNER_HANDLER', 'DISRUNNER_DIAGNOSTIC', 'DISRUNNER_ADAPTER_ERROR'].includes(prefix))
+    throw new Error(CONTROL_PROTOCOL_ERROR);
+  const value: unknown = JSON.parse(payload);
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    throw new Error(CONTROL_PROTOCOL_ERROR);
+  const object = value as Record<string, unknown>;
+  const keys = Object.keys(object).sort();
+  // These are flat two-string records. Every extra key, including a duplicate key erased by
+  // JSON.parse, introduces at least one additional string token in the original JSON.
+  if (payload.match(/"(?:\\.|[^"\\])*"/gu)?.length !== 4) throw new Error(CONTROL_PROTOCOL_ERROR);
+  if (prefix === 'DISRUNNER_HANDLER') {
+    if (
+      keys.join(',') !== 'id,phase' ||
+      typeof object['id'] !== 'string' ||
+      !isControlHandlerId(object['id']) ||
+      (object['phase'] !== 'start' && object['phase'] !== 'end')
+    )
+      throw new Error(CONTROL_PROTOCOL_ERROR);
+    return { kind: 'handler', id: object['id'], phase: object['phase'] };
+  }
+  if (
+    keys.join(',') !== 'code,message' ||
+    typeof object['message'] !== 'string' ||
+    object['message'].trim() === ''
+  )
+    throw new Error(CONTROL_PROTOCOL_ERROR);
+  if (prefix === 'DISRUNNER_DIAGNOSTIC' && object['code'] === 'bot-error')
+    return { kind: 'diagnostic', code: 'bot-error', message: object['message'] };
+  if (prefix === 'DISRUNNER_ADAPTER_ERROR' && object['code'] === 'unsupported')
+    return { kind: 'adapter-error', code: 'unsupported', message: object['message'] };
+  throw new Error(CONTROL_PROTOCOL_ERROR);
+}
+
+function isControlHandlerId(id: string): boolean {
+  const match =
+    /^(?:(?:js|py)-([1-9][0-9]{0,9})-(0|[1-9][0-9]{0,19})|raw-([1-9][0-9]{0,19}))$/u.exec(id);
+  if (match === null) return false;
+  const counter = match[3] ?? match[2];
+  return (
+    counter !== undefined &&
+    BigInt(counter) <= 0xffff_ffff_ffff_ffffn &&
+    (match[1] === undefined || BigInt(match[1]) <= 0xffff_ffffn)
+  );
 }
 
 export function sanitizeBotEnvironment(

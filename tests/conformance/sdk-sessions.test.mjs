@@ -281,6 +281,99 @@ async function timeoutProject(t, adapter, kind, fails) {
 
 for (const adapter of ['discord.js', 'discord.py']) {
   test(
+    `${adapter}: sensitive values matching reserved controls cannot hide pending SDK handlers`,
+    { timeout: 30_000 },
+    async (t) => {
+      for (const secret of ['DISRUNNER_HANDLER', 'start']) {
+        for (const fails of [false, true]) {
+          const directory = await project(t, adapter, fails ? 'after-error' : 'delayed-followup');
+          const configPath = path.join(directory, 'discord-simulator.config.json');
+          const config = JSON.parse(await readFile(configPath, 'utf8'));
+          config.environment = { LOCAL_ACCESS_KEY: secret };
+          await writeFile(configPath, JSON.stringify(config));
+          const filename = path.join(directory, adapter === 'discord.js' ? 'bot.mjs' : 'bot.py');
+          const source = await readFile(filename, 'utf8');
+          const delay =
+            adapter === 'discord.js' ? 'setTimeout(resolve, 200)' : 'asyncio.sleep(0.2)';
+          assert.ok(source.includes(delay));
+          await writeFile(
+            filename,
+            source.replace(
+              delay,
+              adapter === 'discord.js' ? 'setTimeout(resolve, 350)' : 'asyncio.sleep(0.35)',
+            ),
+          );
+          const humanOutput = new Set();
+          let observedReplyWithActiveHandler = false;
+          const result = await runBotScenarioV2(
+            {
+              version: 2,
+              name: 'Sensitive value matches handler protocol',
+              execution: { kind: 'bot', project: '.', clock: 'realtime', timeoutMs: 10_000 },
+              context: {
+                actor: CONTEXT.actorId,
+                guild: CONTEXT.guildId,
+                channel: CONTEXT.channelId,
+              },
+              steps: [{ action: 'invoke-command', command: 'ping', saveAs: 'ping' }],
+              assertions: [
+                { type: 'message-content', interaction: '${ping.id}', equals: 'Pong!' },
+                ...(fails
+                  ? []
+                  : [{ type: 'message-count', channel: CONTEXT.channelId, equals: 2 }]),
+              ],
+              policy: { failOnSeverity: 'none' },
+            },
+            {
+              baseDirectory: directory,
+              onSnapshot(snapshot) {
+                for (const entry of snapshot.output) humanOutput.add(entry.text);
+                if (
+                  snapshot.activeHandlers > 0 &&
+                  snapshot.coreState?.resources.some(
+                    (resource) =>
+                      resource.resourceType === 'message' && resource.content === 'Pong!',
+                  )
+                )
+                  observedReplyWithActiveHandler = true;
+              },
+            },
+          );
+          assert.equal(observedReplyWithActiveHandler, true, JSON.stringify(result));
+          assert.equal(result.snapshot.activeHandlers, 0);
+          if (fails) {
+            assert.equal(result.status, adapter === 'discord.js' ? 'runner-error' : 'failed');
+            assert.equal(result.exitCode, adapter === 'discord.js' ? 3 : 1);
+            assert.ok(
+              result.snapshot.diagnostics.some(
+                (entry) => entry.code === 'bot-error' && entry.message.includes('after-ack-probe'),
+              ),
+              JSON.stringify(result),
+            );
+          } else {
+            assert.equal(result.status, 'passed', JSON.stringify(result));
+            assert.equal(result.exitCode, 0);
+            assert.ok(
+              result.snapshot.coreState.resources.some(
+                (resource) => resource.content === 'Delayed completion.',
+              ),
+            );
+          }
+          for (const entry of result.snapshot.output) humanOutput.add(entry.text);
+          for (const text of humanOutput) {
+            assert.equal(text.includes(secret), false, 'Known sensitive values remain redacted');
+            assert.doesNotMatch(
+              text,
+              /^DISRUNNER_(?:HANDLER|ADAPTER_READY|DIAGNOSTIC|ADAPTER_ERROR)(?:\s|$)/mu,
+            );
+            assert.doesNotMatch(text, /"id"\s*:\s*"(?:js|py)-\d+-\d+"/u);
+          }
+        }
+      }
+    },
+  );
+
+  test(
     `${adapter}: long sensitive environment values are redacted before diagnostic clipping`,
     { timeout: 20_000 },
     async (t) => {

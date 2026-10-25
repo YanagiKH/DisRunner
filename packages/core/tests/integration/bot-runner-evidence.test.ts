@@ -49,6 +49,9 @@ describe('real bot output evidence', () => {
         clippedBytes: 0,
         redactionTruncatedEntries: 0,
         observerFailures: 0,
+        controlRecords: 0,
+        controlErrors: 0,
+        controlObserverFailures: 0,
         complete: false,
       });
       await runChild(
@@ -68,6 +71,9 @@ describe('real bot output evidence', () => {
         clippedBytes: 0,
         redactionTruncatedEntries: 0,
         observerFailures: 0,
+        controlRecords: 0,
+        controlErrors: 0,
+        controlObserverFailures: 0,
         complete: true,
       });
     } finally {

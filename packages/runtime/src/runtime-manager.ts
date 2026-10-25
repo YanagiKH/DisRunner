@@ -14,6 +14,7 @@ import {
   type InteractionEngine,
   type LocalAttachmentMetadata,
   type LocalRestEmulator,
+  type BotProcessControl,
 } from '@disrunner/core';
 import { createHash, generateKeyPairSync, randomUUID, type KeyObject } from 'node:crypto';
 import { createServer } from 'node:net';
@@ -214,6 +215,7 @@ export class DesktopRuntimeManager {
     };
   }
   public assertLive(): void {
+    this.#checkAdapterIssue();
     const bot = this.#bot?.snapshot();
     if (
       bot !== undefined &&
@@ -266,6 +268,11 @@ export class DesktopRuntimeManager {
   #checkAdapterIssue(): void {
     const issue = this.#adapterIssue;
     if (issue !== null) throw issue;
+  }
+  #resetBotControl(): void {
+    this.#sdkReady = false;
+    this.#adapterIssue = null;
+    this.#activeHandlers.clear();
   }
   public inputIdentity() {
     return this.#inputs === undefined ? undefined : { ...this.#inputs };
@@ -441,7 +448,7 @@ export class DesktopRuntimeManager {
     this.#droppedOutput = 0;
     this.#diagnostics = [];
     this.#droppedDiagnostics = 0;
-    this.#activeHandlers.clear();
+    this.#resetBotControl();
     this.#faultPolicy.clear();
     this.#publish({
       ...this.#state,
@@ -770,17 +777,88 @@ export class DesktopRuntimeManager {
             }
           : {}),
       });
-      this.#sdkReady = false;
-      this.#adapterIssue = null;
       const output: RuntimeOutputEntry[] = [];
       let outputBytes = 0;
+      const appendOutput = (entry: RuntimeOutputEntry): void => {
+        outputBytes += Buffer.byteLength(entry.text);
+        output.push(entry);
+        while (
+          output.length > 0 &&
+          (output.length > MAX_RENDERER_OUTPUT || outputBytes > MAX_RENDERER_OUTPUT_BYTES)
+        ) {
+          const removed = output.shift();
+          this.#droppedOutput += 1;
+          if (removed !== undefined) outputBytes -= Buffer.byteLength(removed.text);
+        }
+        this.#publish({ ...this.#state, output: [...output] });
+      };
+      const safeControlMessage = (message: string, fallback: string): string => {
+        const cleaned = this.#sanitizeForExport?.({ message });
+        return isRecord(cleaned) && typeof cleaned['message'] === 'string'
+          ? cleaned['message']
+          : fallback;
+      };
+      const controlFailure = (): void => {
+        this.#droppedDiagnostics += 1;
+        this.#adapterIssue = new SessionError(
+          'transport',
+          'Invalid or incomplete Bot control record.',
+        );
+      };
       const bot = new core.BotRunner({
         maxOutputEntries: 1000,
         maxOutputBytes: MAX_RENDERER_OUTPUT_BYTES,
         maxOutputLineBytes: 65_536,
+        onControl: (record: BotProcessControl) => {
+          if (generation !== this.#generation) return;
+          switch (record.kind) {
+            case 'ready':
+              this.#sdkReady = true;
+              return;
+            case 'handler':
+              if (record.phase === 'start') {
+                if (this.#activeHandlers.size >= 1000 || this.#activeHandlers.has(record.id))
+                  controlFailure();
+                else this.#activeHandlers.add(record.id);
+              } else if (!this.#activeHandlers.delete(record.id)) controlFailure();
+              this.#publish(this.#state);
+              return;
+            case 'adapter-error': {
+              const message = safeControlMessage(
+                record.message,
+                'The configured SDK or language runtime is unsupported.',
+              );
+              this.#adapterIssue = new SessionError('invalid', message);
+              appendOutput({ stream: 'stderr', text: message + '\n', atMs: Date.now() });
+              return;
+            }
+            case 'diagnostic': {
+              const message = safeControlMessage(
+                record.message,
+                'The bot reported a handler error.',
+              );
+              this.#diagnostics.push({ code: 'bot-error', message: truncateUtf8(message, 8192) });
+              if (this.#diagnostics.length > 100) {
+                this.#diagnostics.shift();
+                this.#droppedDiagnostics += 1;
+              }
+              try {
+                const diagnosticSpan = trace.start('bot-handler', 'Handler error');
+                trace.end(diagnosticSpan, 'error', { message });
+              } catch {
+                this.#droppedDiagnostics += 1;
+              }
+              appendOutput({ stream: 'stderr', text: message + '\n', atMs: Date.now() });
+              return;
+            }
+            case 'protocol-error':
+              controlFailure();
+              return;
+          }
+        },
         onOutput: (entry: unknown) => {
           if (generation !== this.#generation) return;
-          let sanitized = sanitizeOutput(entry);
+          const sanitized = sanitizeOutput(entry);
           if (sanitized === null) return;
           if (
             isRecord(entry) &&
@@ -788,100 +866,7 @@ export class DesktopRuntimeManager {
             Buffer.byteLength(entry['text']) > MAX_RENDERER_OUTPUT_ENTRY_BYTES
           )
             this.#droppedOutput += 1;
-          if (sanitized.text.startsWith('DISRUNNER_ADAPTER_ERROR ')) {
-            try {
-              const issue: unknown = JSON.parse(
-                sanitized.text.slice('DISRUNNER_ADAPTER_ERROR '.length),
-              );
-              if (
-                isRecord(issue) &&
-                issue['code'] === 'unsupported' &&
-                typeof issue['message'] === 'string'
-              ) {
-                const cleaned = this.#sanitizeForExport?.({ message: issue['message'] });
-                const message =
-                  isRecord(cleaned) && typeof cleaned['message'] === 'string'
-                    ? cleaned['message']
-                    : 'The configured SDK or language runtime is unsupported.';
-                this.#adapterIssue = new SessionError('invalid', message);
-                sanitized = { ...sanitized, stream: 'stderr', text: message + '\n' };
-              }
-            } catch {
-              this.#droppedDiagnostics += 1;
-            }
-          }
-          if (sanitized.text.startsWith('DISRUNNER_HANDLER ')) {
-            try {
-              const marker: unknown = JSON.parse(sanitized.text.slice('DISRUNNER_HANDLER '.length));
-              if (
-                !isRecord(marker) ||
-                typeof marker['id'] !== 'string' ||
-                !/^[A-Za-z0-9_-]{1,64}$/u.test(marker['id']) ||
-                !['start', 'end'].includes(String(marker['phase']))
-              )
-                throw new Error('Invalid handler marker.');
-              if (marker['phase'] === 'start') {
-                if (this.#activeHandlers.size >= 1000 || this.#activeHandlers.has(marker['id']))
-                  throw new Error('Handler marker capacity exceeded.');
-                this.#activeHandlers.add(marker['id']);
-              } else if (!this.#activeHandlers.delete(marker['id']))
-                throw new Error('Unknown handler marker.');
-            } catch {
-              this.#droppedDiagnostics += 1;
-            }
-            this.#publish(this.#state);
-            return;
-          }
-          if (sanitized.text.trim() === 'DISRUNNER_ADAPTER_READY') {
-            this.#sdkReady = true;
-            return;
-          }
-          if (sanitized.text.startsWith('DISRUNNER_DIAGNOSTIC ')) {
-            try {
-              const diagnostic: unknown = JSON.parse(
-                sanitized.text.slice('DISRUNNER_DIAGNOSTIC '.length),
-              );
-              if (
-                isRecord(diagnostic) &&
-                diagnostic['code'] === 'bot-error' &&
-                typeof diagnostic['message'] === 'string'
-              ) {
-                const cleaned = this.#sanitizeForExport?.({ message: diagnostic['message'] });
-                const safeMessage =
-                  isRecord(cleaned) && typeof cleaned['message'] === 'string'
-                    ? cleaned['message']
-                    : 'The bot reported a handler error.';
-                sanitized = { ...sanitized, stream: 'stderr', text: safeMessage + '\n' };
-                this.#diagnostics.push({
-                  code: 'bot-error',
-                  message: truncateUtf8(safeMessage, 8192),
-                });
-                if (this.#diagnostics.length > 100) {
-                  this.#diagnostics.shift();
-                  this.#droppedDiagnostics += 1;
-                }
-                try {
-                  const diagnosticSpan = trace.start('bot-handler', 'Handler error');
-                  trace.end(diagnosticSpan, 'error', { message: safeMessage });
-                } catch {
-                  this.#droppedDiagnostics += 1;
-                }
-              }
-            } catch {
-              this.#droppedDiagnostics += 1;
-            }
-          }
-          outputBytes += Buffer.byteLength(sanitized.text);
-          output.push(sanitized);
-          while (
-            output.length > 0 &&
-            (output.length > MAX_RENDERER_OUTPUT || outputBytes > MAX_RENDERER_OUTPUT_BYTES)
-          ) {
-            const removed = output.shift();
-            this.#droppedOutput += 1;
-            if (removed !== undefined) outputBytes -= Buffer.byteLength(removed.text);
-          }
-          this.#publish({ ...this.#state, output: [...output] });
+          appendOutput(sanitized);
         },
       });
       this.#bot = bot;
