@@ -436,10 +436,16 @@ for (const adapter of ['discord.js', 'discord.py']) {
         const directory = await project(t, adapter);
         const configPath = path.join(directory, 'discord-simulator.config.json');
         const config = JSON.parse(await readFile(configPath, 'utf8'));
-        config.environment = { LOCAL_API_KEY: secret, LOCAL_ACCESS_KEY: secret };
+        config.environment = {
+          LOCAL_API_KEY: secret,
+          LOCAL_ACCESS_KEY: secret,
+          ...(adapter === 'discord.py' ? { PYTHONIOENCODING: 'cp1252:backslashreplace' } : {}),
+        };
         await writeFile(configPath, JSON.stringify(config));
         const filename = path.join(directory, adapter === 'discord.js' ? 'bot.mjs' : 'bot.py');
-        const source = await readFile(filename, 'utf8');
+        let source = await readFile(filename, 'utf8');
+        const nativeStreamProbe = adapter === 'discord.py' && separator === '\u0085';
+        if (nativeStreamProbe) source = source.replace('import os\n', 'import os\nimport sys\n');
         const reply =
           adapter === 'discord.js'
             ? "await interaction.reply('Pong!');"
@@ -449,7 +455,15 @@ for (const adapter of ['discord.js', 'discord.py']) {
           filename,
           source.replace(
             reply,
-            `${reply}\n${adapter === 'discord.js' ? '      throw new Error(process.env.LOCAL_ACCESS_KEY);' : '        raise RuntimeError(os.environ["LOCAL_ACCESS_KEY"])'}`,
+            `${reply}\n${
+              adapter === 'discord.js'
+                ? '      throw new Error(process.env.LOCAL_ACCESS_KEY);'
+                : `${
+                    nativeStreamProbe
+                      ? '        print(f"Streams: {sys.stdout.encoding}/{sys.stdout.errors} {sys.stderr.encoding}/{sys.stderr.errors}", flush=True)\n        print(os.environ["LOCAL_ACCESS_KEY"], flush=True)\n'
+                      : ''
+                  }        raise RuntimeError(os.environ["LOCAL_ACCESS_KEY"])`
+            }`,
           ),
         );
         const exposures = [];
@@ -504,6 +518,22 @@ for (const adapter of ['discord.js', 'discord.py']) {
         for (const exposure of exposures)
           for (const value of forbidden)
             assert.equal(exposure.includes(value), false, 'A sensitive value prefix was retained');
+        if (nativeStreamProbe) {
+          assert.ok(
+            result.snapshot.output.some(
+              (entry) =>
+                entry.stream === 'stdout' &&
+                entry.text.includes('Streams: utf-8/backslashreplace utf-8/backslashreplace'),
+            ),
+            'Both native streams use UTF-8 while preserving their configured error policy',
+          );
+          assert.ok(
+            result.snapshot.output.some(
+              (entry) => entry.stream === 'stdout' && entry.text.includes('[REDACTED]'),
+            ),
+            'The actual callback stdout is retained with its known sensitive value redacted',
+          );
+        }
       }
     },
   );

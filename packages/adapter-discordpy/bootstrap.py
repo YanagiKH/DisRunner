@@ -188,6 +188,9 @@ def endpoint(value, scheme, label):
 
 def main():
     global bot_entry_started
+    # The runtime decodes native Bot output as UTF-8 on every platform.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors=stream.errors)
     if len(sys.argv) < 2 or not Path(sys.argv[1]).is_absolute():
         raise RuntimeError("The discord.py adapter requires an absolute Bot entry point.")
     entry = Path(sys.argv[1])
