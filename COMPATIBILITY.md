@@ -33,7 +33,7 @@ Prepare dependencies before an offline run. The SDK profiles require their exact
 | Capability                       | Supported path                             | Boundary                                                                                                                     |
 | -------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | State, virtual clock, seeded IDs | Core and version 1 scenarios               | Controls modeled code; not arbitrary Bot timers/randomness                                                                   |
-| Real Bot lifecycle               | Shared Desktop/CLI runtime                 | Start, ready, invoke/observe, cancel, stop, restart; bounded cleanup                                                         |
+| Real Bot lifecycle               | Shared Desktop/CLI runtime                 | Start, ready, invoke/observe, cancel, stop, restart; [platform cleanup limits](docs/runtime-lifecycle.md)                    |
 | Fixtures and workspaces          | Guild Editor and workspace files           | Guild/channel/DM/role/user/member/message resources, validation, atomic save, backup/recovery                                |
 | Commands                         | Local registry and Command Explorer        | Global/guild registration; typed options, subcommands/groups, choices, autocomplete, user/message targets                    |
 | Command registry v1              | Explicit compatibility profile             | Slash options remain restricted to empty arrays                                                                              |

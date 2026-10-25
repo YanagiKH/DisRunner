@@ -1,8 +1,10 @@
-# Runtime lifecycle cleanup (M1)
+# Runtime lifecycle cleanup
 
 This page describes how `BotRunner` (core) owns and terminates a bot process tree, and how the
-M1 lifecycle oracles L01–L13 check the shared `createSession()` runtime end to end. It covers
-Linux evidence only; Windows and macOS behaviour is pending until it is executed on those systems.
+lifecycle tests L01–L13 check the shared `createSession()` runtime end to end. These process-identity
+oracles use Linux procfs. Native package and installer jobs separately exercise normal startup,
+shutdown and installation; their results apply to the tested artifact. The Windows process-tree
+limitations below remain distinct from those application checks.
 
 ## BotRunner ownership model (core)
 
@@ -49,8 +51,9 @@ Linux evidence only; Windows and macOS behaviour is pending until it is executed
   is no automatic ownership-reset API. Deterministic mocked tests cover these control-flow
   boundaries only. Successful taskkill plus direct-child exit is not independent descendant-death
   evidence. A leader that exited before cleanup without a recorded failure still has no retained
-  Windows tree handle; no-op stops do not run taskkill. Unexpected-leader-exit descendant cleanup,
-  real Windows process-tree qualification and macOS execution remain pending.
+  Windows tree handle; no-op stops do not run taskkill. Cleanup of descendants after an unexpected
+  Windows leader exit is not guaranteed. Normal application shutdown checks do not independently
+  qualify descendant termination or macOS process-group behaviour.
 - Existing `start`, `stop`, `restart` and `snapshot` signatures are unchanged. Snapshots remain
   event-driven: terminal status and exit code are classified by Node's exit callback, never guessed.
   The additive `observeExit()` supervision method returns `alive`, `exited` or `unknown`; Linux
@@ -205,8 +208,8 @@ fixtures in `packages/core/tests/fixtures/bot-runner-lifecycle/`. They cover:
 - **D5's stale-event corruption** through the public API. A spawn failure (`ENOENT`) emits `error`
   but no `exit`. A post-spawn child `error` cannot be produced publicly. The generation guard and
   the retained ownership are covered by code review only.
-- **D3 real Windows `taskkill`**, and macOS process-tree behaviour. These are pending until
-  executed on those systems; mocked command/child events do not qualify a real Windows tree.
+- **Independent Windows descendant-termination qualification**, and macOS process-tree behaviour.
+  Normal application stops and mocked command/child events do not establish those guarantees.
 - **L04's "close every resource even if one fails"** and **L05's "failed cleanup is retried"**
   are not covered by real-process failures. They are covered by the injected cases in
   `cleanup-failures.test.mjs` (see above), which use the internal dependency seam.

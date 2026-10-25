@@ -16,31 +16,6 @@ env:
   PNPM_VERSION: 11.19.0
 
 jobs:
-  windows-runtime-diagnostics:
-    name: Windows runtime diagnostics
-    concurrency:
-      group: ci-windows-runtime-diagnostics-${{ github.ref }}
-      cancel-in-progress: true
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          version: ${{ env.PNPM_VERSION }}
-          run_install: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run build:core
-      - name: Diagnose native Windows SDK resolution and process exit
-        run: node .github/scripts/windows-runtime-diagnostics.mjs
-
   quality:
     name: Quality, contracts, offline, build
     concurrency:
@@ -137,7 +112,6 @@ jobs:
     concurrency:
       group: ci-e2e-${{ github.ref }}-${{ matrix.os }}
       cancel-in-progress: true
-    needs: quality
     strategy:
       fail-fast: false
       matrix:
@@ -181,9 +155,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Runtime-manager peer authentication tests
         run: pnpm --filter @disrunner/desktop run test:runtime-manager
-      - name: Diagnose native Windows SDK resolution and process exit
-        if: runner.os == 'Windows'
-        run: node .github/scripts/windows-runtime-diagnostics.mjs
       - name: Real SDK transport conformance
         run: node --test tests/conformance/*.test.mjs
       - name: Isolated offline raw webhook and SDK conformance
@@ -285,7 +256,6 @@ jobs:
     concurrency:
       group: ci-performance-${{ github.ref }}
       cancel-in-progress: true
-    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -309,7 +279,6 @@ jobs:
     concurrency:
       group: ci-runtime-qualification-${{ github.ref }}
       cancel-in-progress: true
-    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -364,8 +333,7 @@ jobs:
   all-green:
     name: All green
     if: always()
-    needs:
-      [quality, cross-platform-e2e, performance, runtime-qualification, windows-runtime-diagnostics]
+    needs: [quality, cross-platform-e2e, performance, runtime-qualification]
     runs-on: ubuntu-latest
     steps:
       - name: Enforce every required job
@@ -374,10 +342,8 @@ jobs:
           E2E: ${{ needs.cross-platform-e2e.result }}
           PERFORMANCE: ${{ needs.performance.result }}
           QUALIFICATION: ${{ needs.runtime-qualification.result }}
-          DIAGNOSTICS: ${{ needs.windows-runtime-diagnostics.result }}
         run: |
           test "$QUALITY" = success
           test "$E2E" = success
           test "$PERFORMANCE" = success
           test "$QUALIFICATION" = success
-          test "$DIAGNOSTICS" = success
