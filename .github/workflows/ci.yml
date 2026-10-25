@@ -154,6 +154,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Runtime-manager peer authentication tests
         run: pnpm --filter @disrunner/desktop run test:runtime-manager
+      - name: Diagnose native Windows SDK resolution and process exit
+        if: runner.os == 'Windows'
+        run: node .github/scripts/windows-runtime-diagnostics.mjs
       - name: Real SDK transport conformance
         run: node --test tests/conformance/*.test.mjs
       - name: Isolated offline raw webhook and SDK conformance
