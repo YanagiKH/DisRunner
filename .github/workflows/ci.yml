@@ -10,10 +10,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   CI: 1
   NODE_VERSION: 22.23.2
@@ -22,6 +18,9 @@ env:
 jobs:
   quality:
     name: Quality, contracts, offline, build
+    concurrency:
+      group: ci-quality-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -110,6 +109,9 @@ jobs:
 
   cross-platform-e2e:
     name: E2E (${{ matrix.os }})
+    concurrency:
+      group: ci-e2e-${{ github.ref }}-${{ matrix.os }}
+      cancel-in-progress: true
     needs: quality
     strategy:
       fail-fast: false
@@ -255,6 +257,9 @@ jobs:
 
   performance:
     name: Deterministic performance checks
+    concurrency:
+      group: ci-performance-${{ github.ref }}
+      cancel-in-progress: true
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -276,6 +281,9 @@ jobs:
 
   runtime-qualification:
     name: Runtime qualification
+    concurrency:
+      group: ci-runtime-qualification-${{ github.ref }}
+      cancel-in-progress: true
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 150
