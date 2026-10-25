@@ -438,7 +438,9 @@ async function gui() {
     }
     async function expectNoDiagnostics() {
       await visibleInspector(async () => {
-        const empty = page.getByRole('tabpanel');
+        const empty = page
+          .getByRole('tabpanel')
+          .getByText('No invocation diagnostics for this context.', { exact: true });
         await until(
           async () =>
             (await empty.isVisible()) &&
@@ -1307,6 +1309,7 @@ async function gui() {
       const before = await snapshot();
       // Unchanged guild roles are intentionally outside the display DTO.
       assert.equal(before.coreState?.truncated, true);
+      assert.equal(before.coreState.evidenceComplete, true);
       await send(`/feed-${operation}`);
       await until(
         async () =>
@@ -1364,10 +1367,10 @@ async function gui() {
       assert.equal(after.runId, before.runId);
       assert.equal(after.coreState.runId, after.runId);
       assert.equal(after.coreState.truncated, true);
-      assert.ok(
-        (
-          await page.getByRole('status', { name: 'Live message feed status' }).textContent()
-        ).includes('Showing the latest messages. Earlier messages may be omitted.'),
+      assert.equal(after.coreState.evidenceComplete, true);
+      assert.equal(
+        await page.getByRole('status', { name: 'Live message feed status' }).textContent(),
+        "Live messages. Messages follow the selected actor's visibility.",
       );
       assert.ok(after.revision > before.revision, 'Session publication revision advances');
       assert.ok(

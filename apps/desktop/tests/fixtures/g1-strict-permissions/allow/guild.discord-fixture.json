@@ -16,6 +16,12 @@
         "name": "Message bot",
         "permissions": "68608",
         "position": 1
+      },
+      {
+        "id": "1200",
+        "name": "Message observer",
+        "permissions": "1024",
+        "position": 2
       }
     ],
     "channels": [
@@ -59,7 +65,7 @@
       {
         "id": "3100",
         "user_id": "3000",
-        "roles": []
+        "roles": ["1200"]
       }
     ]
   }

@@ -136,7 +136,7 @@ test('strict child retains ordinary operation mapping and ephemeral diagnostic s
   assert.throws(() => validateRestBase('https://discord.com/api/v10', 1234));
 });
 
-test('three separate opt-in projects carry complete explicit, non-owner bot permission contexts', async () => {
+test('three separate opt-in projects keep bot permissions independent of human view access', async () => {
   for (const [name, deny] of [
     ['allow', '0'],
     ['missing-send', '2048'],
@@ -162,11 +162,12 @@ test('three separate opt-in projects carry complete explicit, non-owner bot perm
       [
         ['1000', '0'],
         ['1100', '68608'],
+        ['1200', '1024'],
       ],
     );
     assert.deepEqual(guild.members, [
       { id: '4100', user_id: '4000', roles: ['1100'] },
-      { id: '3100', user_id: '3000', roles: [] },
+      { id: '3100', user_id: '3000', roles: ['1200'] },
     ]);
     assert.deepEqual(guild.channels[1].permission_overwrites, [
       { id: '1100', type: 0, allow: '0', deny },
