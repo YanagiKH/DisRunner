@@ -76,6 +76,13 @@ function boundedMessage(source) {
   return selected.join('\n') || 'The Bot reported an error.';
 }
 
+function writeControlMessage(prefix, code, message) {
+  let line = `${prefix} ${JSON.stringify({ code, message })}\n`;
+  if (Buffer.byteLength(line) > 4_096)
+    line = `${prefix} ${JSON.stringify({ code, message: 'The error message exceeded the diagnostic limit.' })}\n`;
+  writeSync(1, line);
+}
+
 function emitDiagnostic(error) {
   try {
     if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
@@ -84,8 +91,7 @@ function emitDiagnostic(error) {
     }
     const source = error instanceof Error ? (error.stack ?? error.message) : String(error);
     const message = boundedMessage(source);
-    const line = `DISRUNNER_DIAGNOSTIC ${JSON.stringify({ code: 'bot-error', message })}\n`;
-    writeSync(1, line);
+    writeControlMessage('DISRUNNER_DIAGNOSTIC', 'bot-error', message);
   } catch {
     // Diagnostic delivery must not alter the process's native exception behavior.
   }
@@ -266,10 +272,7 @@ async function main() {
 main().catch((error) => {
   if (!botEntryStarted) {
     try {
-      writeSync(
-        1,
-        `DISRUNNER_ADAPTER_ERROR ${JSON.stringify({ code: 'unsupported', message: boundedMessage(error.message) })}\n`,
-      );
+      writeControlMessage('DISRUNNER_ADAPTER_ERROR', 'unsupported', boundedMessage(error.message));
     } catch {
       /* Preserve the startup failure. */
     }

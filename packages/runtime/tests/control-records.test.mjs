@@ -90,7 +90,13 @@ test(
 for (const finishes of [false, true]) {
   test(
     `Scenario v2 ${finishes ? 'accepts completed' : 'rejects unfinished'} Bot work started during shutdown`,
-    { timeout: 15_000 },
+    {
+      timeout: 15_000,
+      skip:
+        process.platform === 'win32'
+          ? 'Windows process termination does not deliver POSIX SIGTERM callbacks.'
+          : false,
+    },
     async (t) => {
       const { directory } = await project(t, finishes ? 'shutdown-complete' : 'shutdown-open');
       const session = createSession();

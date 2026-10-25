@@ -256,6 +256,32 @@ describe('pre-redaction Bot control records', () => {
     });
   }
 
+  it('rejects an unfinished handler when a real child exits naturally on any platform', async () => {
+    await fixture(async (directory) => {
+      const controls: BotProcessControl[] = [];
+      const runner = new BotRunner({ onControl: (record) => controls.push(record) });
+      try {
+        await runChild(
+          runner,
+          directory,
+          "console.log('DISRUNNER_HANDLER ' + JSON.stringify({id: 'js-' + process.pid + '-1', phase: 'start'}));",
+        );
+        expect(controls).toHaveLength(2);
+        expect(controls[0]).toMatchObject({ kind: 'handler', phase: 'start' });
+        expect(controls[1]).toEqual(protocolError);
+        expect(runner.evidence()).toMatchObject({
+          outputDrained: true,
+          outputDrainErrors: 0,
+          controlRecords: 1,
+          controlErrors: 1,
+          complete: false,
+        });
+      } finally {
+        await runner.stop(100);
+      }
+    });
+  });
+
   it('bounds active handler tracking and clears every control counter and identity on the next run', async () => {
     await fixture(async (directory) => {
       const controls: BotProcessControl[] = [];

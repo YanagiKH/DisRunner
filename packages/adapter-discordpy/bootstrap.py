@@ -81,7 +81,11 @@ def emit_diagnostic(source, code="bot-error", prefix="DISRUNNER_DIAGNOSTIC"):
         size += length
     message = "\n".join(reversed(selected)) or "The Bot reported an error."
     payload = json.dumps({"code": code, "message": message}, ensure_ascii=False, separators=(",", ":"))
-    os.write(1, (prefix + " " + payload + "\n").encode("utf-8", errors="replace"))
+    frame = (prefix + " " + payload + "\n").encode("utf-8", errors="replace")
+    if len(frame) > 4096:
+        payload = json.dumps({"code": code, "message": "The error message exceeded the diagnostic limit."}, separators=(",", ":"))
+        frame = (prefix + " " + payload + "\n").encode("utf-8")
+    os.write(1, frame)
 
 
 def begin_handler():

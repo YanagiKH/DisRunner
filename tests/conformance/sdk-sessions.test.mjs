@@ -281,6 +281,58 @@ async function timeoutProject(t, adapter, kind, fails) {
 
 for (const adapter of ['discord.js', 'discord.py']) {
   test(
+    `${adapter}: a delayed handler error with JSON-escaped text remains a valid diagnostic`,
+    { timeout: 15_000 },
+    async (t) => {
+      const directory = await project(t, adapter);
+      const filename = path.join(directory, adapter === 'discord.js' ? 'bot.mjs' : 'bot.py');
+      let source = await readFile(filename, 'utf8');
+      if (adapter === 'discord.py')
+        source = source.replace('import os\n', 'import os\nimport asyncio\n');
+      const reply =
+        adapter === 'discord.js'
+          ? "await interaction.reply('Pong!');"
+          : 'await interaction.response.send_message("Pong!")';
+      assert.ok(source.includes(reply));
+      await writeFile(
+        filename,
+        source.replace(
+          reply,
+          `${reply}\n${adapter === 'discord.js' ? "      await new Promise((resolve) => setTimeout(resolve, 350));\n      throw new Error('escaped-error-probe:' + String.fromCharCode(0).repeat(800));" : '    await asyncio.sleep(0.35)\n    raise RuntimeError("escaped-error-probe:" + chr(0) * 800)'}`,
+        ),
+      );
+      const result = await runBotScenarioV2(
+        {
+          version: 2,
+          name: 'Escaped diagnostic frame',
+          execution: { kind: 'bot', project: '.', clock: 'realtime', timeoutMs: 10_000 },
+          context: { actor: CONTEXT.actorId, guild: CONTEXT.guildId, channel: CONTEXT.channelId },
+          steps: [{ action: 'invoke-command', command: 'ping', saveAs: 'ping' }],
+          assertions: [{ type: 'message-content', interaction: '${ping.id}', equals: 'Pong!' }],
+          policy: { failOnSeverity: 'none' },
+        },
+        { baseDirectory: directory },
+      );
+      assert.equal(
+        result.status,
+        adapter === 'discord.js' ? 'runner-error' : 'failed',
+        JSON.stringify(result),
+      );
+      assert.equal(result.exitCode, adapter === 'discord.js' ? 3 : 1);
+      assert.ok(
+        result.observations.some(
+          (observation) => observation.result?.response?.data?.content === 'Pong!',
+        ),
+      );
+      assert.deepEqual(result.snapshot.diagnostics, [
+        { code: 'bot-error', message: 'The error message exceeded the diagnostic limit.' },
+      ]);
+      assert.equal(result.snapshot.activeHandlers, 0);
+      assert.equal(result.metadata.evidenceComplete, true);
+    },
+  );
+
+  test(
     `${adapter}: sensitive values matching reserved controls cannot hide pending SDK handlers`,
     { timeout: 30_000 },
     async (t) => {
