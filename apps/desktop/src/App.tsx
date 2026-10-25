@@ -17,6 +17,9 @@ import { RuntimeStrip } from './components/RuntimeStrip';
 import { TopBar } from './components/TopBar';
 import { WorkspaceRail } from './components/WorkspaceRail';
 import { FeatureSurface } from './features/FeatureSurface';
+import { ProjectSurface } from './features/ProjectSurface';
+import { ModalDialog } from './components/ModalDialog';
+import type { ProjectAction } from './state/project-workspace';
 import { createInitialState, simulationReducer } from './state/simulation';
 import { selectLiveMessages } from './state/live-messages';
 import type { Channel, Guild, Surface } from './types';
@@ -55,12 +58,31 @@ function findChannel(guild: Guild, channelId: string): Channel {
     guild.groups[0]!.channels[0]!
   );
 }
+function guildGroup(context: DisRunnerInvocationContext): string {
+  return context.guildId ?? 'direct-messages';
+}
 
 export default function App() {
   const desktopBridge = window.disrunnerDesktop;
   const desktop = desktopBridge !== undefined;
   const [state, dispatch] = useReducer(simulationReducer, createInitialState(!desktop));
   const [actorId, setActorId] = useState('');
+  const [scenarioActive, setScenarioActive] = useState(false);
+  const [viewerSnapshot, setViewerSnapshot] = useState<{
+    actorId: string;
+    snapshot: DisRunnerRuntimeState;
+  } | null>(null);
+  const [scopedCommands, setScopedCommands] = useState<{
+    actorId: string;
+    channelId: string;
+    runId: string;
+    commands: readonly Readonly<Record<string, unknown>>[];
+  } | null>(null);
+  const [modal, setModal] = useState<{
+    data: Readonly<Record<string, unknown>>;
+    context: DisRunnerInvocationContext;
+    runId: string;
+  } | null>(null);
   const [diagnosticIdentity, setDiagnosticIdentity] = useState<{
     sessionId: string;
     runId: string;
@@ -185,11 +207,16 @@ export default function App() {
   const resyncPending = useRef(false);
   const latestRuntime = useRef(EMPTY_RUNTIME_STATE);
   const [runtimeState, setRuntimeState] = useState<DisRunnerRuntimeState>(EMPTY_RUNTIME_STATE);
-  const controls = runtimeControls(
+  const baseControls = runtimeControls(
     runtimeState,
     resyncing ? 'sync' : operationPending,
     shutdownError !== null || actionError !== null,
   );
+  const controls = {
+    ...baseControls,
+    canStart: baseControls.canStart && !scenarioActive,
+    canSelect: baseControls.canSelect && !scenarioActive,
+  };
   useLayoutEffect(() => {
     const intent = recoveryFocus.current;
     if (!intent?.outcome || operationPending !== null) return;
@@ -210,19 +237,21 @@ export default function App() {
   }, [operationPending, runtimeState]);
   const pendingTimers = useRef<Set<number>>(new Set());
   const displayedBotStatus = desktop ? runtimeState.phase : state.botStatus;
-  const runtimeContext =
-    runtimeState.contexts.find(
-      (context) =>
-        context.guildId === state.guildId &&
-        context.channelId === state.channelId &&
-        context.actorId === actorId,
-    ) ??
-    runtimeState.contexts.find(
-      (context) => context.channelId === state.channelId && context.actorId === actorId,
-    ) ??
-    runtimeState.contexts.find((context) => context.channelId === state.channelId) ??
-    runtimeState.contexts.find((context) => context.actorId === actorId) ??
-    runtimeState.contexts[0];
+  const runtimeContext = useMemo(() => {
+    const first = runtimeState.contexts[0];
+    if (first === undefined) return undefined;
+    const requestedGuild = runtimeState.contexts.some((item) => guildGroup(item) === state.guildId)
+      ? state.guildId
+      : guildGroup(
+          runtimeState.contexts.find((item) => item.channelId === state.channelId) ?? first,
+        );
+    const inGuild = runtimeState.contexts.filter((item) => guildGroup(item) === requestedGuild);
+    const requestedChannel = inGuild.some((item) => item.channelId === state.channelId)
+      ? state.channelId
+      : inGuild[0]?.channelId;
+    const inChannel = inGuild.filter((item) => item.channelId === requestedChannel);
+    return inChannel.find((item) => item.actorId === actorId) ?? inChannel[0];
+  }, [runtimeState.contexts, state.guildId, state.channelId, actorId]);
   const selectedRuntimeContext = useRef(runtimeContext);
   useLayoutEffect(() => {
     selectedRuntimeContext.current = runtimeContext;
@@ -244,34 +273,65 @@ export default function App() {
     runtimeState.runId !== null &&
     runtimeContext !== undefined &&
     !operationPending &&
+    !scenarioActive &&
     !resyncing &&
     shutdownError === null &&
     actionError === null;
   const guilds = useMemo<readonly Guild[]>(
     () =>
       desktop
-        ? [...new Set(runtimeState.contexts.map((context) => context.guildId))].map((guildId) => ({
+        ? [...new Set(runtimeState.contexts.map(guildGroup))].map((guildId) => ({
             id: guildId,
-            name: `Project guild ${guildId}`,
+            name:
+              guildId === 'direct-messages'
+                ? 'Direct messages'
+                : (runtimeState.coreState?.resources.find(
+                    (item) => item.resourceType === 'guild' && item.id === guildId,
+                  )?.name ?? `Project guild ${guildId}`),
             accent: '#5865f2',
             mark: 'P',
-            members: [],
+            members: (runtimeState.coreState?.resources ?? [])
+              .filter(
+                (resource) =>
+                  resource.resourceType === 'user' &&
+                  (resource.bot ||
+                    runtimeState.contexts.some(
+                      (candidate) =>
+                        guildGroup(candidate) === guildId && candidate.actorId === resource.id,
+                    )),
+              )
+              .map((resource) => ({
+                id: resource.id,
+                name: resource.global_name ?? resource.username ?? resource.id,
+                role: resource.bot ? ('bot' as const) : ('member' as const),
+                status:
+                  runtimeState.phase === 'running' ? ('online' as const) : ('offline' as const),
+                color: resource.bot ? '#5865f2' : '#42d392',
+              })),
             groups: [
               {
                 id: `project-${guildId}`,
-                name: 'Validated project channels',
+                name: guildId === 'direct-messages' ? 'Direct messages' : 'Text channels',
                 channels: [
                   ...new Set(
                     runtimeState.contexts
-                      .filter((context) => context.guildId === guildId)
+                      .filter((context) => guildGroup(context) === guildId)
                       .map((context) => context.channelId),
                   ),
-                ].map((id) => ({ id, name: id, description: 'Validated project text channel' })),
+                ].map((id) => ({
+                  id,
+                  name:
+                    runtimeState.coreState?.resources.find(
+                      (item) => item.resourceType === 'channel' && item.id === id,
+                    )?.name ?? id,
+                  description:
+                    guildId === 'direct-messages' ? 'Private conversation' : 'Local text channel',
+                })),
               },
             ],
           }))
         : GUILDS,
-    [desktop, runtimeState.contexts],
+    [desktop, runtimeState.contexts, runtimeState.coreState, runtimeState.phase],
   );
   const emptyGuild: Guild = {
     id: '',
@@ -282,7 +342,9 @@ export default function App() {
     groups: [],
   };
   const guild = desktop
-    ? (guilds.find((item) => item.id === runtimeContext?.guildId) ?? emptyGuild)
+    ? (guilds.find(
+        (item) => runtimeContext !== undefined && item.id === guildGroup(runtimeContext),
+      ) ?? emptyGuild)
     : findGuild(state.guildId);
   const channel = desktop
     ? (guild.groups
@@ -330,7 +392,90 @@ export default function App() {
     },
     [observeStartupIdentity],
   );
-  const liveMessages = selectLiveMessages(runtimeState, resyncing ? undefined : runtimeContext);
+  useEffect(() => {
+    if (!desktopBridge?.dispatchAction || !runtimeContext || runtimeState.phase !== 'running')
+      return;
+    let active = true;
+    void desktopBridge
+      .getRuntimeState(runtimeContext.actorId)
+      .then((snapshot) => {
+        if (
+          active &&
+          snapshot.sessionId === runtimeState.sessionId &&
+          snapshot.runId === runtimeState.runId &&
+          snapshot.revision >= runtimeState.revision
+        )
+          setViewerSnapshot({ actorId: runtimeContext.actorId, snapshot });
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [
+    desktopBridge,
+    runtimeContext,
+    runtimeState.sessionId,
+    runtimeState.runId,
+    runtimeState.revision,
+    runtimeState.phase,
+  ]);
+  const viewerMatches =
+    viewerSnapshot !== null &&
+    runtimeContext !== undefined &&
+    viewerSnapshot.actorId === runtimeContext.actorId &&
+    viewerSnapshot.snapshot.sessionId === runtimeState.sessionId &&
+    viewerSnapshot.snapshot.runId === runtimeState.runId &&
+    viewerSnapshot.snapshot.coreState?.stateRevision === runtimeState.coreState?.stateRevision;
+  const displayedSnapshot = desktopBridge?.dispatchAction
+    ? viewerMatches && viewerSnapshot
+      ? viewerSnapshot.snapshot
+      : { ...runtimeState, coreState: null }
+    : runtimeState;
+  const liveMessages = selectLiveMessages(
+    displayedSnapshot,
+    resyncing ? undefined : runtimeContext,
+  );
+  useEffect(() => {
+    if (
+      !desktopBridge?.getCommands ||
+      !runtimeContext ||
+      !runtimeState.runId ||
+      runtimeState.phase !== 'running'
+    )
+      return;
+    let active = true;
+    const captured = runtimeContext;
+    const runId = runtimeState.runId;
+    void desktopBridge
+      .getCommands(captured, runId)
+      .then((commands) => {
+        if (active)
+          setScopedCommands({
+            actorId: captured.actorId,
+            channelId: captured.channelId,
+            runId,
+            commands,
+          });
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [
+    desktopBridge,
+    runtimeContext,
+    runtimeState.runId,
+    runtimeState.phase,
+    runtimeState.revision,
+  ]);
+  const visibleCommands = desktopBridge?.getCommands
+    ? runtimeState.phase === 'running' &&
+      scopedCommands?.actorId === runtimeContext?.actorId &&
+      scopedCommands?.channelId === runtimeContext?.channelId &&
+      scopedCommands?.runId === runtimeState.runId
+      ? scopedCommands.commands
+      : []
+    : (runtimeState.commands ?? []);
   const messages = desktop ? liveMessages.messages : (state.messages[channel.id] ?? []);
   const diagnosticMatches =
     !desktop ||
@@ -560,7 +705,7 @@ export default function App() {
     [desktopBridge, applyRuntimeState, controls.canStop, controls.recovery],
   );
 
-  const selectProject = async (): Promise<void> => {
+  const selectProject = async (directory?: string, example = false): Promise<void> => {
     if (
       desktopBridge === undefined ||
       operation.current ||
@@ -573,7 +718,11 @@ export default function App() {
     setOperationPending('select');
     setRuntimeNotice(null);
     try {
-      const selected = await desktopBridge.selectProject();
+      const selected = example
+        ? ((await desktopBridge.openExample?.()) ?? null)
+        : directory !== undefined && desktopBridge.openProject !== undefined
+          ? await desktopBridge.openProject(directory)
+          : await desktopBridge.selectProject();
       if (selected !== null) applyRuntimeState(selected);
     } catch {
       setActionError('Project selection failed. Check runtime diagnostics before continuing.');
@@ -607,6 +756,7 @@ export default function App() {
       'settings',
     ];
     const handler = (event: KeyboardEvent) => {
+      if (document.querySelector('[aria-modal="true"]')) return;
       if (event.altKey && /^Digit[1-6]$/u.test(event.code)) {
         const index = Number(event.code.slice(-1)) - 1;
         const surface = surfaces[index];
@@ -641,6 +791,16 @@ export default function App() {
 
   const submitComposer = (input: string) => {
     if (desktopBridge !== undefined) {
+      if (input.trim().startsWith('/') && runtimeContext?.guildId === undefined) {
+        setInvocationError(
+          'Use a server channel for application commands. Send a text message here to test direct message handlers.',
+        );
+        return;
+      }
+      if (!input.trim().startsWith('/') && desktopBridge.dispatchAction !== undefined) {
+        void dispatchProjectAction({ type: 'message', content: input });
+        return;
+      }
       if (
         resyncPending.current ||
         operation.current ||
@@ -693,7 +853,15 @@ export default function App() {
           )
             throw new Error('Runtime response identity does not match the submitted invocation.');
           setDiagnosticIdentity({ sessionId, runId: request.runId, context: request.context });
-          dispatch({ type: 'execute-runtime', input, result });
+          dispatch({
+            type: 'execute-runtime',
+            input,
+            result,
+            ...(runtimeState.project?.adapter === 'discord.js' ||
+            runtimeState.project?.adapter === 'discord.py'
+              ? { transport: 'gateway' as const }
+              : {}),
+          });
         })
         .catch((error: unknown) => {
           if (
@@ -722,6 +890,75 @@ export default function App() {
     if (isSlow && state.botStatus === 'running') scheduleFollowUp(executionId, state.channelId);
   };
 
+  const dispatchProjectAction = async (
+    action: ProjectAction,
+  ): Promise<DisRunnerInvocationResult | null> => {
+    const current = latestRuntime.current;
+    const context = selectedRuntimeContext.current;
+    if (
+      !desktopBridge?.dispatchAction ||
+      !canInvoke ||
+      current.runId === null ||
+      context === undefined
+    )
+      return null;
+    const request = {
+      runId: current.runId,
+      requestId: `${requestPrefix.current}-${++requestSequence.current}`,
+      context: { ...context },
+      action,
+    };
+    setInvocationError(null);
+    const epoch = responseEpoch.current;
+    const submittedContextEpoch = contextEpoch.current;
+    const isCurrent = () =>
+      epoch === responseEpoch.current &&
+      submittedContextEpoch === contextEpoch.current &&
+      latestRuntime.current.runId === request.runId &&
+      latestRuntime.current.sessionId === current.sessionId &&
+      latestRuntime.current.phase === 'running' &&
+      !latestRuntime.current.disposed &&
+      selectedRuntimeContext.current?.actorId === request.context.actorId &&
+      selectedRuntimeContext.current?.guildId === request.context.guildId &&
+      selectedRuntimeContext.current?.channelId === request.context.channelId;
+    try {
+      const result = await desktopBridge.dispatchAction(request);
+      if (!isCurrent()) return null;
+      if (
+        result.runId !== request.runId ||
+        result.requestId !== request.requestId ||
+        result.context.actorId !== request.context.actorId ||
+        result.context.guildId !== request.context.guildId ||
+        result.context.channelId !== request.context.channelId
+      )
+        throw new Error('Runtime response identity does not match the submitted action.');
+      if (!action.type.startsWith('message')) {
+        setDiagnosticIdentity({
+          sessionId: current.sessionId,
+          runId: request.runId,
+          context: request.context,
+        });
+        dispatch({
+          type: 'execute-runtime',
+          input: action.name ?? action.customId ?? action.type,
+          action,
+          result,
+          ...(current.project?.adapter === 'discord.js' || current.project?.adapter === 'discord.py'
+            ? { transport: 'gateway' as const }
+            : {}),
+        });
+      }
+      if (result.response?.type === 'modal')
+        setModal({ data: result.response.data, context: request.context, runId: request.runId });
+      if (!result.ok)
+        setInvocationError(result.error ?? 'The bot could not complete this interaction.');
+      return result;
+    } catch (error) {
+      if (isCurrent()) setInvocationError(error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  };
+
   const invokeFromExplorer = (commandName: string) => {
     if (desktopBridge !== undefined) {
       dispatch({ type: 'navigate', surface: 'simulator' });
@@ -734,6 +971,16 @@ export default function App() {
     dispatch({ type: 'execute', input: commandName });
     if (commandName === '/slow') scheduleFollowUp(executionId, state.channelId);
   };
+  const modalActive =
+    modal !== null &&
+    runtimeState.phase === 'running' &&
+    runtimeState.runId === modal.runId &&
+    runtimeContext?.actorId === modal.context.actorId &&
+    runtimeContext?.guildId === modal.context.guildId &&
+    runtimeContext?.channelId === modal.context.channelId;
+  useEffect(() => {
+    if (modal !== null && !modalActive) setModal(null);
+  }, [modal, modalActive]);
 
   const toastIcon =
     state.toast?.toLowerCase().includes('offline') ||
@@ -760,6 +1007,21 @@ export default function App() {
     runtimeNotice !== null ||
     showStartupHistory;
 
+  if (
+    desktopBridge === undefined &&
+    (window.location.protocol === 'file:' || window.navigator.userAgent.includes('Electron/'))
+  ) {
+    return (
+      <main className="desktop-unavailable">
+        <section role="alert">
+          <TriangleAlert size={32} />
+          <h1>Desktop connection unavailable</h1>
+          <p>Close and reopen DisRunner. If this continues, reinstall the application.</p>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <div className="app-shell">
       <TopBar
@@ -771,6 +1033,7 @@ export default function App() {
         stopButtonRef={stopButton}
         closeButtonRef={closeButton}
         controls={desktop ? controls : undefined}
+        runtime={desktop ? runtimeState : undefined}
       />
       <section className="runtime-panel" aria-label="Runtime status and controls">
         <RuntimeStrip desktop={desktop} runtime={runtimeState} />
@@ -820,18 +1083,16 @@ export default function App() {
         )}
         {desktop && (
           <section className="runtime-context" aria-label="Runtime invocation context">
-            <p className="runtime-context-note">
-              Real project runtime · channel messages are read-only retained state · other preview
-              panels are sample data
-            </p>
+            <p className="runtime-context-note">Local project · real bot process</p>
             <p role="status" aria-label="Live message feed status">
-              {liveMessages.status === 'unavailable'
-                ? 'Live messages unavailable. No retained message state is confirmed for this context.'
-                : liveMessages.status === 'truncated'
-                  ? 'Live messages · truncated retained snapshot. Missing messages are not evidence of deletion.'
-                  : 'Live messages · retained snapshot. Missing messages are not evidence of deletion.'}{' '}
-              Public interaction responses appear once posted; raw callback data, responses still
-              loading and ephemeral responses are not shown.
+              {desktopBridge?.dispatchAction && runtimeState.phase === 'running' && !viewerMatches
+                ? 'Loading messages for this actor…'
+                : liveMessages.status === 'unavailable'
+                  ? 'Live messages unavailable. Start the bot and select a channel.'
+                  : liveMessages.status === 'truncated'
+                    ? 'Showing the latest messages. Earlier messages may be omitted.'
+                    : 'Live messages.'}{' '}
+              Messages follow the selected actor's visibility.
             </p>
             <label className="runtime-actor">
               <span>Actor</span>
@@ -880,6 +1141,7 @@ export default function App() {
           onGuildSelect={(guildId) => dispatch({ type: 'select-guild', guildId })}
           selectedChannelId={channel.id}
           selectedGuild={guild}
+          live={desktop}
         />
         {!detailMode ? (
           <>
@@ -899,8 +1161,51 @@ export default function App() {
               channel={channel}
               messages={messages}
               onSubmit={submitComposer}
+              onSaveAttachment={
+                desktop
+                  ? (attachmentId) => {
+                      if (!desktopBridge?.saveAttachment || !runtimeContext || !runtimeState.runId)
+                        return;
+                      const context = { ...runtimeContext };
+                      const runId = runtimeState.runId;
+                      void desktopBridge
+                        .saveAttachment({ runId, attachmentId, context })
+                        .catch((error: unknown) => {
+                          if (
+                            latestRuntime.current.runId === runId &&
+                            selectedRuntimeContext.current?.actorId === context.actorId &&
+                            selectedRuntimeContext.current?.channelId === context.channelId
+                          )
+                            setInvocationError(
+                              error instanceof Error ? error.message : String(error),
+                            );
+                        });
+                    }
+                  : undefined
+              }
+              commands={
+                desktop
+                  ? (runtimeContext?.guildId === undefined ? [] : visibleCommands)
+                      .filter((command) => command.type === undefined || command.type === 1)
+                      .map((command) => ({
+                        name: `/${typeof command.name === 'string' ? command.name : ''}`,
+                        description:
+                          typeof command.description === 'string' ? command.description : '',
+                        response: '',
+                        shortcut: '',
+                        color: '#5865f2',
+                      }))
+                  : undefined
+              }
+              onAction={
+                desktop
+                  ? (action) => {
+                      void dispatchProjectAction(action);
+                    }
+                  : undefined
+              }
             />
-            <MemberList members={guild.members} />
+            <MemberList members={guild.members} live={desktop} />
             <div className="inspector-dock">
               {compactInspector && (
                 <button
@@ -924,6 +1229,7 @@ export default function App() {
                   activeTab={state.inspectorTab}
                   onSelectTab={(tab) => dispatch({ type: 'select-inspector-tab', tab })}
                   trace={state.interaction}
+                  runtime={desktop ? displayedSnapshot : undefined}
                   emptyMessage={
                     desktop && !diagnosticMatches
                       ? 'No invocation diagnostics for this context.'
@@ -933,7 +1239,7 @@ export default function App() {
               </div>
             </div>
           </>
-        ) : (
+        ) : desktop ? null : (
           <FeatureSurface
             guild={guild}
             onBack={() => dispatch({ type: 'navigate', surface: 'simulator' })}
@@ -945,7 +1251,47 @@ export default function App() {
             surface={state.surface}
           />
         )}
+        {desktop && (
+          <ProjectSurface
+            hidden={!detailMode}
+            surface={state.surface}
+            runtime={{ ...runtimeState, commands: visibleCommands }}
+            canInvoke={canInvoke}
+            canSelect={controls.canSelect}
+            context={runtimeContext}
+            onBack={() => dispatch({ type: 'navigate', surface: 'simulator' })}
+            onOpenProject={selectProject}
+            onOpenExample={() => selectProject(undefined, true)}
+            onAction={dispatchProjectAction}
+            onScenarioActivity={setScenarioActive}
+          />
+        )}
       </div>
+      {modal && modalActive && (
+        <ModalDialog
+          data={modal.data}
+          onCancel={() => setModal(null)}
+          onSubmit={async (fields) => {
+            if (!desktopBridge?.dispatchAction) return;
+            const captured = modal;
+            setModal(null);
+            try {
+              await desktopBridge.dispatchAction({
+                runId: captured.runId,
+                requestId: `${requestPrefix.current}-${++requestSequence.current}`,
+                context: captured.context,
+                action: {
+                  type: 'modal-submit',
+                  customId: String(captured.data['custom_id']),
+                  fields,
+                },
+              });
+            } catch (error) {
+              setInvocationError(error instanceof Error ? error.message : String(error));
+            }
+          }}
+        />
+      )}
       {state.toast && (
         <div className="toast" role="status">
           {toastIcon}

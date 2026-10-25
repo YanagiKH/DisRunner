@@ -132,6 +132,7 @@ async function harness({ enabled = true, guildIds = ['1000'] } = {}) {
   config.bot.entryPoint = 'src/registry-child.mjs';
   config.bot.startCommand = 'node src/registry-child.mjs';
   if (enabled) config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds };
+  else delete config.profile.commandRegistry;
   await writeFile(join(root, 'discord-simulator.config.json'), JSON.stringify(config));
   const runs = [],
     states = [],

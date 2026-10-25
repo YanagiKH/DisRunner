@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>Build deterministic Discord-shaped tests locally, without connecting DisRunner to Discord.</strong>
+  <strong>Run and test Discord bots locally, without a live Discord connection.</strong>
 </p>
 
 <p align="center">
@@ -16,30 +16,29 @@
 </p>
 
 > [!IMPORTANT]
-> **v0.1 is a Preview, not a complete Discord or Discord SDK replacement.** The tested product today is a deterministic core library and CLI, a signed raw-interaction-webhook example, and a narrow Electron path that starts that example and invokes its real local `/ping` handler. Most guild, command, scenario, inspector, and risk screens are visual previews.
+> **v1.0 supports raw interaction webhooks, discord.js 14.27.0, and discord.py 2.6.4.** Prepare your Bot dependencies first, then run with synthetic credentials and local REST/Gateway endpoints. The supported Discord API v10 profile is documented in [Compatibility](COMPATIBILITY.md).
 
-DisRunner's goal is to let existing bots exercise Discord-shaped interactions, events, permissions, limits, timing, and failure cases without a live Discord connection. The v0.1 Preview establishes the deterministic testing foundation; framework adapters and the fully connected desktop simulation remain roadmap work.
+DisRunner connects a local Bot process to an interactive desktop and a headless scenario runner. Create and save test fixtures, invoke commands and components, inspect actual responses, inject bounded faults, and use the same scenarios in CI. Core model tests retain virtual time and deterministic replay; real Bot runs use wall time and actual handlers.
 
 ![DisRunner visual concept](docs/assets/disrunner-readme-cover.jpg)
 
 DisRunner is independent software and is not affiliated with, endorsed by, or sponsored by Discord Inc. Discord is a trademark of Discord Inc. The project does not include Discord logos or proprietary client assets.
 
-## What works in v0.1
+## What works in v1.0
 
-- **Core library:** deterministic virtual state, Snowflake-like IDs, seeded randomness, virtual time, snapshots/state hashes, interaction lifecycle rules, permission calculation, intent filtering, rate-limit primitives, a partial Gateway/REST model, traces, assertions, and a small set of risk findings.
-- **CLI:** validate and run version 1 scenario files; record and verify deterministic replays; export JSON, JUnit, HTML, and SARIF reports.
-- **Raw webhook example:** a local Node.js process that verifies Ed25519 interaction requests and authenticates exact Discord-shaped response bytes with a protected per-run HMAC secret.
-- **Electron vertical slice:** validate a project config, start/stop the raw webhook process, capture bounded stdout/stderr, perform mutually authenticated readiness checks, send a real local `/ping`, and verify its response before rendering the callback.
-- **Desktop visual preview:** Discord-like multi-guild/channel fixtures and concept surfaces for the Guild Editor, Command Explorer, Scenario Lab, inspector, Risk Center, and Settings.
+- **Core library:** versioned state, seeded IDs/randomness, virtual time, snapshots, interaction lifecycle rules, permission and intent checks, rate limits, REST/Gateway transports, traces, assertions, and risk findings.
+- **CLI:** validate and run model scenarios or real Bot scenarios; cancel safely; record/replay model runs; export JSON, JUnit, HTML, SARIF, and redacted reproduction bundles.
+- **Bot integrations:** authenticated raw webhooks, pinned discord.js and discord.py adapters, genuine SDK cache/command synchronization, and local attachment upload/download.
+- **Desktop:** select/start/stop/restart projects, send messages and typed commands, operate buttons/selects/modals, switch actor views, and inspect live state and diagnostics.
+- **Saved workspaces:** edit fixtures and scenarios with undo/redo, atomic saves, backups, conflict detection, explicit recovery, and version checks.
 
-The following are **not** v0.1 compatibility claims:
+The following remain outside the v1.0 profile:
 
-- drop-in `discord.js` or `discord.py` execution;
-- a generic HTTP/WebSocket/stdio bot adapter;
-- persistent editing in the desktop Guild Editor or Scenario Lab;
-- end-to-end synchronization among desktop fixtures, REST state, and Gateway events;
-- desktop controls for arbitrary latency, packet duplication/drop/reorder, or process performance profiling;
-- complete Discord routes, events, object limits, permissions, rate limits, or client behavior.
+- arbitrary SDK versions or a generic Gateway/stdio adapter;
+- complete Components V2, voice, presence, reactions, advanced threads/forums, or Discord CDN simulation;
+- multi-Bot/sharded execution or arbitrary Bot memory checkpoints;
+- automatic dependency installation, automatic updates, or advanced CPU/event-loop profiling;
+- complete Discord route/client parity or an OS sandbox for imported code.
 
 See [Compatibility](COMPATIBILITY.md) for the support boundary.
 
@@ -47,19 +46,21 @@ See [Compatibility](COMPATIBILITY.md) for the support boundary.
 
 Source development requires Node.js `>=22.23.2 <23` and pnpm `11.19.0`.
 
-| Target                       | v0.1 status                                                   |
-| ---------------------------- | ------------------------------------------------------------- |
-| Windows 11 x64 / NSIS        | Preview target; support requires a green release run          |
-| macOS 14+ arm64/x64 / DMG    | Preview target; signing/notarization depends on release setup |
-| Ubuntu 24.04+ x64 / AppImage | Preview target; support requires a green release run          |
+| Target              | Installer                |
+| ------------------- | ------------------------ |
+| Windows 11 x64      | Signed NSIS installer    |
+| macOS 14+ arm64/x64 | Signed and notarized DMG |
+| Ubuntu 24.04+ x64   | AppImage                 |
 
-| Bot integration         | v0.1 status | Notes                                                               |
-| ----------------------- | ----------- | ------------------------------------------------------------------- |
-| Raw interaction webhook | Preview     | Bundled Node example and Electron `/ping` path are tested           |
-| `discord.js`            | Planned     | Rejected by v0.1 project validation; no compatible version declared |
-| `discord.py`            | Planned     | Rejected by v0.1 project validation; no compatible version declared |
-| Generic Gateway/stdio   | Planned     | Core transport/process primitives are not a public adapter contract |
-| Simulator SDK           | Planned     | No public SDK package in v0.1                                       |
+Download artifacts and their checksums/provenance from [Releases](https://github.com/YanagiKH/DisRunner/releases). Each release includes platform installation receipts; hosted CI operating systems and minimum OS targets are listed separately in [Installation](docs/installation.md).
+
+| Bot integration         | v1.0 profile     | Notes                                                                      |
+| ----------------------- | ---------------- | -------------------------------------------------------------------------- |
+| Raw interaction webhook | Supported        | Bundled Node example, Ed25519 requests and per-run response authentication |
+| `discord.js`            | 14.27.0          | Node 22; ESM and CommonJS entry points                                     |
+| `discord.py`            | 2.6.4            | Python 3.12; explicit interpreter or activated environment                 |
+| Generic Gateway/stdio   | Unsupported      | Use a supported adapter                                                    |
+| Simulator SDK           | Core/runtime API | Included in the offline CLI distribution                                   |
 
 ## Quick start
 
@@ -72,11 +73,13 @@ pnpm install --frozen-lockfile
 pnpm run verify
 ```
 
-Run a deterministic core scenario:
+Run a deterministic core scenario or a real Bot scenario:
 
 ```bash
 pnpm run cli -- run scenarios/interaction-lifecycle.discord-scenario.yml --seed 42
 pnpm run cli -- report scenarios/interaction-lifecycle.discord-scenario.yml --format json --out disrunner-report.json
+pnpm run cli -- test scenarios/v2/raw-ping.json
+pnpm run cli -- repro scenarios/v2/raw-ping.json --out reproduction.json
 ```
 
 Record and verify a replay:
@@ -86,13 +89,13 @@ pnpm run cli -- record scenarios/interaction-lifecycle.discord-scenario.yml --ou
 pnpm run cli -- replay recording.json --out verification.json
 ```
 
-Start the Electron preview:
+Start the desktop:
 
 ```bash
 pnpm run dev
 ```
 
-In **Settings → Runtime paths**, choose `examples/raw-webhook-bot`, start the bot, and invoke `/ping`. The browser-only renderer started by `pnpm run dev:web` uses synthetic data and cannot manage a real bot process.
+In **Settings → Runtime paths**, open the bundled example or choose your own configured project, start the Bot, and invoke `/ping`. The bundled example is copied to an editable local project. The browser renderer started by `pnpm run dev:web` is a labeled demo and cannot manage Bot processes.
 
 Read [Installation](docs/installation.md), [Getting started](docs/getting-started.md), and [Project configuration](docs/project-configuration.md) for the exact workflow.
 
@@ -102,28 +105,30 @@ DisRunner's own supported protocol path uses loopback endpoints, synthetic crede
 
 This is an application-level boundary, **not an operating-system sandbox for an imported bot**. A bot, dependency, install script, native module, or child process can open its own network connection. Run untrusted code only inside the documented [hard-isolation setup](docs/offline-mode.md#hard-isolation), and never provide a production token.
 
-## Architecture in this preview
+## Architecture
 
 ```text
-Scenario files ──> deterministic core ──> traces, assertions, reports
-                         │
-                         └──────────────> CLI record/replay
+Desktop / CLI / Scenario v2
+           │
+           └──> shared Session ──> authoritative state and diagnostics
+                       │
+                       └──> local REST / Gateway / signed webhook
+                                         │
+                                         └──> real Bot process
 
-Electron ──> validated raw-webhook project ──> signed request + HMAC-authenticated response
-    │
-    └──────> Discord-like visual preview (partly synthetic)
+Model scenarios ──> virtual clock + core ──> deterministic recording/replay
 ```
 
-The core contains additional REST, Gateway, permission, intent, and rate-limit primitives. In v0.1 they are primarily exercised directly by core/CLI tests; their presence does not mean every desktop or imported-bot path is wired end to end.
+Desktop and CLI use the same project loader, process lifecycle, transports, and result policy. Mutations update one state model; private replies and DMs remain bound to the selected actor. Unknown routes and unsupported profiles fail explicitly.
 
-The shared runtime also supports an explicit [ordinary-message permission opt-in](docs/project-configuration.md#ordinary-message-permission-opt-in) for CLI `bot-test` and Desktop projects. It requires a separate bot fixture and explicit guild membership; existing projects stay `legacy-unenforced`. This covers ordinary guild-text reads and own-message mutations, not full SDK permissions or viewer-filtered Desktop state.
+Existing raw projects retain their documented legacy permission profile unless they enable [ordinary-message enforcement](docs/project-configuration.md#ordinary-message-permission-opt-in). SDK projects enable the supported guild-text permission profile by default.
 
 ## Limits
 
 - Discord can change independently of this project.
 - The current REST and Gateway catalogs are partial.
-- Desktop fixtures and most inspector panels are not authoritative runtime state.
-- Generic fault injection and imported-process CPU/memory/event-loop profiling are planned.
+- Real Bot runs use actual process time; virtual time does not control arbitrary host timers or external services.
+- Faults are scoped and bounded; dropped/truncated evidence is reported and cannot produce a passing CI result.
 - Voice transport, encryption, audio, CDN behavior, regional routing, anti-abuse systems, and undocumented desktop behavior are out of scope.
 - Simulation reduces risk; it cannot guarantee production correctness or absence of vulnerabilities.
 
@@ -141,6 +146,6 @@ See [Known limitations](docs/limitations.md) and [Protocol compatibility](docs/p
 
 ## Project status
 
-DisRunner follows semantic versioning. Preview versions before `1.0.0` may change configuration and output contracts; only fields and behavior explicitly listed in [Compatibility](COMPATIBILITY.md) are commitments. Follow the [roadmap](ROADMAP.md) and [changelog](CHANGELOG.md), and pin CI to a known release.
+DisRunner follows semantic versioning. Versioned project/workspace/scenario formats preserve documented compatibility; only fields and behavior explicitly listed in [Compatibility](COMPATIBILITY.md) are commitments. Follow the [roadmap](ROADMAP.md) and [changelog](CHANGELOG.md), and pin CI to a known release.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing. Report security issues according to [SECURITY.md](SECURITY.md). DisRunner is available under the [MIT License](LICENSE).

@@ -19,6 +19,7 @@ export interface MessageDomainEvent {
     readonly type: MessageEventName;
     readonly message: ResourceRecord;
     readonly visibility: 'channel';
+    readonly componentSource?: boolean;
   };
 }
 
@@ -38,6 +39,7 @@ export function projectMessageWire(
           'channel_id',
           'guild_id',
           'content',
+          'nonce',
           'flags',
           'timestamp',
           'edited_timestamp',
@@ -48,6 +50,28 @@ export function projectMessageWire(
         ],
   );
   if (deleted) return wire;
+  if (isRecord(message['interaction_metadata'])) {
+    const metadata = message['interaction_metadata'];
+    wire['interaction_metadata'] = {
+      ...pick(metadata, ['id', 'type', 'original_response_message_id', 'interacted_message_id']),
+      ...(isRecord(metadata['user']) ? { user: projectUser(metadata['user']) } : {}),
+      ...(isRecord(metadata['authorizing_integration_owners'])
+        ? {
+            authorizing_integration_owners: pick(metadata['authorizing_integration_owners'], [
+              '0',
+              '1',
+            ]),
+          }
+        : {}),
+    };
+  }
+  if (isRecord(message['message_reference']))
+    wire['message_reference'] = pick(message['message_reference'], [
+      'message_id',
+      'channel_id',
+      'guild_id',
+      'type',
+    ]);
   if (isRecord(message['author'])) wire['author'] = projectUser(message['author']);
   for (const key of ['embeds', 'attachments', 'components', 'mentions', 'mention_roles']) {
     const value = message[key];
@@ -82,7 +106,7 @@ export function mapMessageEvent(event: MessageDomainEvent):
     event.payload.visibility !== 'channel' ||
     !isOrdinaryMessage(event.payload.message) ||
     (event.origin === 'interaction'
-      ? !isPublicInteractionMessage(event.payload.message)
+      ? !isPublicInteractionMessage(event.payload.message) && event.payload.componentSource !== true
       : event.payload.message['message_origin'] === 'interaction')
   )
     return undefined;

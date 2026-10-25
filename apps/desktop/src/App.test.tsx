@@ -5,6 +5,19 @@ import App from './App';
 import stylesheet from './styles.css?raw';
 
 describe('DisRunner desktop shell', () => {
+  it('shows a startup error instead of a simulated bot when the desktop connection is missing', () => {
+    const agent = vi
+      .spyOn(window.navigator, 'userAgent', 'get')
+      .mockReturnValue('DisRunner Electron/44.9.1');
+    try {
+      render(<App />);
+      expect(screen.getByRole('alert')).toHaveTextContent('Desktop connection unavailable');
+      expect(screen.queryByRole('button', { name: 'Start bot' })).not.toBeInTheDocument();
+      expect(screen.queryByText('Visual preview shell')).not.toBeInTheDocument();
+    } finally {
+      agent.mockRestore();
+    }
+  });
   it('starts the bot and executes an ephemeral slash command from the composer', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -420,10 +433,10 @@ describe('runtime cleanup recovery', () => {
       screen.getByText('Complete runtime recovery before invoking commands.'),
     ).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Command Explorer' }));
-    expect(screen.getByRole('button', { name: 'Invoke selected name' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Invoke command' })).not.toBeInTheDocument();
+    expect(screen.getByText(/No application commands are registered/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    await user.click(screen.getByRole('button', { name: 'Runtime paths' }));
-    expect(screen.getByRole('button', { name: 'Browse' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Browse folders' })).toBeDisabled();
   });
 
   it('offers explicit refresh after failed resync and then permits safe startup cancellation', async () => {
@@ -862,8 +875,7 @@ describe('runtime panel presentation regressions', () => {
     await user.click(await screen.findByRole('button', { name: 'Stop bot' }));
     expect(screen.getByText('Runtime cleanup completed.')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    await user.click(screen.getByRole('button', { name: 'Runtime paths' }));
-    await user.click(screen.getByRole('button', { name: 'Browse' }));
+    await user.click(screen.getByRole('button', { name: 'Browse folders' }));
     expect(screen.queryByText('Runtime cleanup completed.')).not.toBeInTheDocument();
     await act(async () => {
       rejectSelection(new Error('Missing executable'));
@@ -1287,7 +1299,7 @@ describe('live retained Desktop message feed', () => {
       coreState: { ...edited.coreState!, resources: [], truncated: true },
     });
     expect(screen.getByLabelText('Live message feed status')).toHaveTextContent(
-      'truncated retained snapshot. Missing messages are not evidence of deletion.',
+      'Showing the latest messages. Earlier messages may be omitted.',
     );
     expect(screen.queryByText('Edited retained message')).not.toBeInTheDocument();
     await publish({ ...edited, revision: 4, coreState: null });
@@ -1464,9 +1476,7 @@ describe('interaction responses in the live feed', () => {
     installBridge(vi.fn(), { getRuntimeState: () => Promise.resolve(liveSnapshot()) });
     render(<App />);
     const status = await screen.findByRole('status', { name: 'Live message feed status' });
-    expect(status).toHaveTextContent(
-      'Public interaction responses appear once posted; raw callback data, responses still loading and ephemeral responses are not shown.',
-    );
+    expect(status).toHaveTextContent("Messages follow the selected actor's visibility.");
     expect(status).not.toHaveTextContent(
       'Interaction callbacks remain diagnostic evidence, not channel messages.',
     );
@@ -1505,5 +1515,171 @@ describe('interaction responses in the live feed', () => {
       within(screen.getByRole('main')).queryByText('Raw callback only'),
     ).not.toBeInTheDocument();
     expect(within(screen.getByRole('main')).getAllByText('Original public.')).toHaveLength(1);
+  });
+});
+
+describe('direct message context', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'disrunnerDesktop');
+  });
+  it('sends a direct message without inventing a guild identity', async () => {
+    const dmContext = { actorId: '3000', channelId: '9000' };
+    const direct = { ...snapshot, contexts: [dmContext] };
+    const dispatchAction = vi.fn<NonNullable<DisRunnerDesktopBridge['dispatchAction']>>((request) =>
+      Promise.resolve({
+        ...request,
+        ok: true,
+        command: 'message',
+        interactionId: null,
+        durationMs: 1,
+        response: null,
+        error: null,
+      }),
+    );
+    installBridge(vi.fn(), { getRuntimeState: () => Promise.resolve(direct), dispatchAction });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(await screen.findByRole('textbox', { name: 'Message #9000' }), '!ping{Enter}');
+    expect(dispatchAction).toHaveBeenCalledOnce();
+    expect(dispatchAction.mock.calls[0]?.[0].context).toEqual(dmContext);
+    expect(dispatchAction.mock.calls[0]?.[0].action).toEqual({ type: 'message', content: '!ping' });
+    expect(screen.getAllByText('Direct messages').length).toBeGreaterThan(0);
+  });
+});
+
+describe('actor-scoped message projection', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'disrunnerDesktop');
+  });
+  it('clears the previous actor view while authorization is being refreshed', async () => {
+    const first = liveSnapshot();
+    const actorA = first.contexts[0]!;
+    const actorB = { ...actorA, actorId: '3001' };
+    const publicState = { ...first, contexts: [actorA, actorB] };
+    let finish!: (snapshot: DisRunnerRuntimeState) => void;
+    installBridge(vi.fn(), {
+      dispatchAction: vi.fn(),
+      getRuntimeState: (actorId) =>
+        actorId === '3001'
+          ? new Promise((resolve) => {
+              finish = resolve;
+            })
+          : Promise.resolve(publicState),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    expect(
+      await within(screen.getByRole('main')).findByText('Retained public message'),
+    ).toBeVisible();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3001');
+    expect(
+      within(screen.getByRole('main')).queryByText('Retained public message'),
+    ).not.toBeInTheDocument();
+    await act(async () => {
+      finish({
+        ...publicState,
+        coreState: {
+          ...publicState.coreState!,
+          resources: [],
+          truncated: true,
+          evidenceComplete: true,
+        },
+      });
+      await Promise.resolve();
+    });
+    expect(
+      within(screen.getByRole('main')).queryByText('Retained public message'),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Live message feed status')).not.toHaveTextContent('limits');
+  });
+});
+
+describe('typed interaction diagnostics', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'disrunnerDesktop');
+  });
+
+  const typedSnapshot = {
+    ...snapshot,
+    contexts: [context, { ...context, actorId: '3001' }],
+    commands: [{ id: '4000', name: 'ping', type: 1, description: 'Ping the bot' }],
+    traces: [
+      {
+        id: 'span-1',
+        traceId: 'trace-1',
+        kind: 'interaction' as const,
+        name: '/ping',
+        status: 'ok' as const,
+        startedAtMs: 1,
+        durationMs: 3,
+      },
+    ],
+  };
+
+  it('selects a typed callback in Inspector while keeping the feed authoritative', async () => {
+    installBridge(vi.fn(), {
+      getRuntimeState: () => Promise.resolve(typedSnapshot),
+      dispatchAction: (request) =>
+        Promise.resolve({
+          ...request,
+          command: 'ping',
+          ok: true,
+          interactionId: '4001',
+          durationMs: 3,
+          response: { type: 'message', data: { content: 'Typed callback' } },
+          error: null,
+        }),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Message #2000' });
+    await user.click(screen.getByRole('button', { name: 'Command Explorer' }));
+    await user.click(screen.getByRole('button', { name: 'Invoke command' }));
+    await user.click(screen.getByRole('button', { name: 'Back to simulator' }));
+    expect(screen.getByText('Typed callback')).toBeVisible();
+    expect(within(screen.getByRole('main')).queryByText('Typed callback')).not.toBeInTheDocument();
+    expect(screen.getByText('Observed spans')).toBeVisible();
+    await user.click(screen.getByRole('tab', { name: 'Payload' }));
+    expect(screen.getByLabelText('Interaction summary JSON')).toHaveTextContent('"action"');
+    expect(screen.getByLabelText('Interaction summary JSON')).toHaveTextContent('"name": "ping"');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3001');
+    expect(screen.getByText('No invocation diagnostics for this context.')).toBeVisible();
+    expect(screen.queryByText('Typed callback')).not.toBeInTheDocument();
+  });
+
+  it('drops a typed response after switching away from and back to its actor', async () => {
+    let finish!: (result: DisRunnerInvocationResult) => void;
+    let submitted!: Parameters<NonNullable<DisRunnerDesktopBridge['dispatchAction']>>[0];
+    installBridge(vi.fn(), {
+      getRuntimeState: () => Promise.resolve(typedSnapshot),
+      dispatchAction: (request) => {
+        submitted = request;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Message #2000' });
+    await user.click(screen.getByRole('button', { name: 'Command Explorer' }));
+    await user.click(screen.getByRole('button', { name: 'Invoke command' }));
+    await user.click(screen.getByRole('button', { name: 'Back to simulator' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3001');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Invocation actor' }), '3000');
+    await act(async () => {
+      finish({
+        ...submitted,
+        command: 'ping',
+        ok: true,
+        interactionId: '4001',
+        durationMs: 3,
+        response: { type: 'message', data: { content: 'Stale typed callback' } },
+        error: null,
+      });
+      await Promise.resolve();
+    });
+    expect(screen.getByText('No invocation diagnostics for this context.')).toBeVisible();
+    expect(screen.queryByText('Stale typed callback')).not.toBeInTheDocument();
   });
 });

@@ -1,0 +1,7 @@
+{
+  "name": "@disrunner/example-discordpy-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Discord.py example for local DisRunner sessions."
+}

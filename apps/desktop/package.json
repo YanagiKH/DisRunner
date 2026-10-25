@@ -1,6 +1,6 @@
 {
   "name": "@disrunner/desktop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "author": "YanagiKH",
   "description": "Secure Electron desktop shell for the DisRunner offline Discord bot simulator.",
@@ -57,6 +57,23 @@
       "dist/**/*",
       "dist-electron/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/@disrunner/adapter-discordjs/**/*",
+      "node_modules/@disrunner/adapter-discordpy/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../../examples/raw-webhook-bot",
+        "to": "examples/raw-webhook-bot",
+        "filter": [
+          "src/**/*",
+          "fixtures/**/*",
+          "discord-simulator.config.json",
+          "package.json",
+          "README.md"
+        ]
+      }
     ],
     "win": {
       "icon": "../../docs/assets/disrunner-logo.png",

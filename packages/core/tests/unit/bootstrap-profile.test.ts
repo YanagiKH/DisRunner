@@ -907,7 +907,7 @@ describe('HTTP behavior', () => {
           const response = await send(port, path, { authorization });
           expect(response.status).toBe(200);
           expect(JSON.parse(response.text)).toStrictEqual(expected);
-          expect(response.headers['content-type']).toBe('application/json; charset=utf-8');
+          expect(response.headers['content-type']).toBe('application/json');
           expect(response.headers['cache-control']).toBe('no-store');
           expect(response.headers['x-ratelimit-limit']).toBe('100');
           expect(response.headers['x-ratelimit-bucket']).toBe(bucket);

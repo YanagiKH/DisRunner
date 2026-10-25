@@ -1,3 +1,4 @@
+import type { LocalAttachmentMetadata, FaultPlan, FaultEvidence } from '@disrunner/core';
 export type RuntimePhase = 'idle' | 'ready' | 'starting' | 'running' | 'stopping' | 'error';
 
 export interface ProjectSummary {
@@ -81,10 +82,11 @@ export function emptyRuntimeState(): DesktopRuntimeState {
 
 export interface InvocationContext {
   readonly actorId: string;
-  readonly guildId: string;
+  readonly guildId?: string;
   readonly channelId: string;
 }
 export type SessionErrorCode =
+  | 'bot-error'
   | 'invalid'
   | 'cancelled'
   | 'timeout'
@@ -108,6 +110,22 @@ export class SessionError extends Error {
   }
 }
 export interface SessionSnapshot extends DesktopRuntimeState {
+  readonly inputs?: {
+    readonly schemaVersion: 1;
+    readonly fixtureHash: string;
+    readonly profileHash: string;
+    readonly sourceHash: string | null;
+  };
+  readonly activeHandlers?: number;
+  readonly diagnostics?: readonly SessionIssue[];
+  readonly evidenceComplete?: boolean;
+  readonly droppedOutput?: number;
+  readonly droppedTraces?: number;
+  readonly droppedRisks?: number;
+  readonly faults?: FaultEvidence;
+  readonly interactions?: readonly { readonly id: string; readonly status: string }[];
+  readonly commandsTruncated?: boolean;
+  readonly commands?: readonly Readonly<Record<string, unknown>>[];
   readonly coreState?: RuntimeCoreSnapshot | null;
   readonly schemaVersion: 1;
   readonly sessionId: string;
@@ -130,6 +148,32 @@ export interface InvocationRequest {
   readonly input: string;
   readonly context: InvocationContext;
 }
+export interface RuntimeAction {
+  readonly type:
+    | 'command'
+    | 'autocomplete'
+    | 'component'
+    | 'modal-submit'
+    | 'message'
+    | 'message-edit'
+    | 'message-delete';
+  readonly name?: string;
+  readonly options?: readonly Readonly<Record<string, unknown>>[];
+  readonly customId?: string;
+  readonly componentType?: number;
+  readonly values?: readonly string[];
+  readonly messageId?: string;
+  readonly content?: string;
+  readonly fields?: Readonly<Record<string, string>>;
+  readonly commandType?: number;
+  readonly targetId?: string;
+}
+export interface RuntimeActionRequest {
+  readonly runId: string;
+  readonly requestId: string;
+  readonly context: InvocationContext;
+  readonly action: RuntimeAction;
+}
 export interface SessionInvocationResult extends RuntimeInvocationResult {
   readonly runId: string;
   readonly requestId: string;
@@ -141,6 +185,16 @@ export interface ShutdownResult {
   readonly snapshot: SessionSnapshot;
 }
 export interface Session {
+  commandsForContext?(context: InvocationContext): readonly Readonly<Record<string, unknown>>[];
+  readAttachment?(
+    id: string,
+    context: InvocationContext,
+  ): Promise<{ metadata: LocalAttachmentMetadata; data: Uint8Array }>;
+  importAttachment?(
+    relativePath: string,
+    context: InvocationContext,
+  ): Promise<LocalAttachmentMetadata>;
+  setFaults(plans: readonly FaultPlan[]): void;
   selectProject(directory: string): Promise<SessionSnapshot>;
   validateContext(context: InvocationContext): InvocationContext;
   start(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<SessionSnapshot>;
@@ -149,6 +203,11 @@ export interface Session {
     options?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<SessionInvocationResult>;
   snapshot(): SessionSnapshot;
+  snapshotForActor(actorId: string): SessionSnapshot;
+  dispatch(
+    request: RuntimeActionRequest,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<SessionInvocationResult>;
   subscribe(listener: (event: SessionEvent) => void): () => void;
   stop(): Promise<ShutdownResult>;
   dispose(): Promise<ShutdownResult>;
@@ -164,6 +223,7 @@ export interface RuntimeCoreSnapshot {
   readonly resources: readonly RuntimeResourceView[];
   readonly totalResources: number;
   readonly truncated: boolean;
+  readonly evidenceComplete?: boolean;
 }
 
 /** Deliberately narrow display DTO. Arbitrary fixture fields never cross this boundary. */
@@ -175,7 +235,7 @@ export interface RuntimeAuthorView {
 }
 export interface RuntimeResourceView {
   readonly id: string;
-  readonly resourceType: 'guild' | 'channel' | 'user' | 'message';
+  readonly resourceType: 'guild' | 'channel' | 'user' | 'message' | 'role' | 'member';
   readonly name?: string;
   readonly username?: string;
   readonly global_name?: string | null;
@@ -185,7 +245,12 @@ export interface RuntimeResourceView {
   readonly type?: number;
   readonly content?: string;
   readonly flags?: number;
-  readonly visibility?: 'channel';
+  readonly visibility?: 'channel' | 'ephemeral';
+  readonly visibleTo?: string;
+  readonly interaction_id?: string;
+  readonly components?: readonly Readonly<Record<string, unknown>>[];
+  readonly embeds?: readonly Readonly<Record<string, unknown>>[];
+  readonly attachments?: readonly Readonly<Record<string, unknown>>[];
   readonly timestamp?: string;
   readonly edited_timestamp?: string | null;
   readonly author?: RuntimeAuthorView;

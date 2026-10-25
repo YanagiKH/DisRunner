@@ -1,3 +1,4 @@
+import type { LocalAttachmentMetadata, FaultPlan } from '@disrunner/core';
 import { randomUUID } from 'node:crypto';
 import type { RuntimeResourceDependencies } from './resource-lifecycle.js';
 import { DesktopRuntimeManager } from './runtime-manager.js';
@@ -5,6 +6,7 @@ import {
   SessionError,
   type InvocationContext,
   type InvocationRequest,
+  type RuntimeActionRequest,
   type RuntimeEndpoints,
   type Session,
   type SessionEvent,
@@ -61,7 +63,15 @@ class RuntimeSession implements Session {
   public snapshot(): SessionSnapshot {
     return {
       ...this.#manager.snapshot(),
+      ...this.#manager.captureEvidence(),
+      diagnostics: this.#manager.diagnostics(),
+      activeHandlers: this.#manager.activeHandlers(),
       coreState: this.#manager.coreState(),
+      commands: this.#manager.commands(),
+      commandsTruncated: this.#manager.commandsTruncated(),
+      ...(this.#manager.inputIdentity() ? { inputs: this.#manager.inputIdentity()! } : {}),
+      interactions: this.#manager.interactionStates(),
+      faults: this.#manager.faultEvidence(),
       schemaVersion: 1,
       sessionId: this.#sessionId,
       runId: this.#runId,
@@ -69,6 +79,77 @@ class RuntimeSession implements Session {
       disposed: this.#disposed,
       contexts: this.#manager.contexts(),
     };
+  }
+  public commandsForContext(
+    context: InvocationContext,
+  ): readonly Readonly<Record<string, unknown>>[] {
+    this.#assertUsable();
+    return this.#manager.commands(context);
+  }
+  public readAttachment(id: string, context: InvocationContext) {
+    this.#assertUsable();
+    return Promise.resolve(this.#manager.readAttachment(id, context));
+  }
+  public async importAttachment(
+    relativePath: string,
+    context: InvocationContext,
+  ): Promise<LocalAttachmentMetadata> {
+    this.#assertUsable();
+    if (this.#invoking || this.#stopping)
+      throw new SessionError('invalid', 'Wait for the active operation to finish.');
+    this.#invoking = true;
+    try {
+      const operation = this.#manager.importAttachment(relativePath, context);
+      this.#pendingInvocation = operation;
+      return await operation;
+    } finally {
+      this.#invoking = false;
+      this.#pendingInvocation = null;
+    }
+  }
+  public setFaults(plans: readonly FaultPlan[]): void {
+    this.#assertUsable();
+    this.#manager.setFaults(plans);
+  }
+  public snapshotForActor(actorId: string): SessionSnapshot {
+    this.#assertUsable();
+    if (!this.#manager.hasActor(actorId))
+      throw new SessionError('invalid', 'Select an existing actor.');
+    return { ...this.snapshot(), coreState: this.#manager.coreState(actorId) };
+  }
+  public async dispatch(
+    request: RuntimeActionRequest,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<SessionInvocationResult> {
+    this.#assertUsable();
+    checkOptions(options, 30000);
+    if (!request || !/^[A-Za-z0-9_-]{1,64}$/.test(request.requestId))
+      throw new SessionError('invalid', 'A valid request ID is required.');
+    const context = this.validateContext(request.context);
+    if (
+      request.runId !== this.#runId ||
+      this.snapshot().phase !== 'running' ||
+      this.#stopping !== null
+    )
+      throw new SessionError('not-running', 'Request does not target the current run.');
+    if (this.#invoking || this.#requests.has(request.requestId))
+      throw new SessionError('invalid', 'Concurrent or duplicate requests are not supported.');
+    this.#requests.add(request.requestId);
+    this.#invoking = true;
+    try {
+      const invocation = this.#manager.dispatch(request.action, context, options);
+      this.#pendingInvocation = invocation;
+      const result = await invocation;
+      return structuredClone({
+        ...result,
+        runId: request.runId,
+        requestId: request.requestId,
+        context,
+      });
+    } finally {
+      this.#invoking = false;
+      this.#pendingInvocation = null;
+    }
   }
   public subscribe(listener: (event: SessionEvent) => void): () => void {
     if (typeof listener !== 'function')

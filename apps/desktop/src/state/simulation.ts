@@ -1,5 +1,6 @@
 import { GUILDS, INITIAL_TRACE, SEED_MESSAGES } from '../data';
 import type { BotStatus, ChatMessage, InspectorTab, InteractionTrace, Surface } from '../types';
+import type { ProjectAction } from './project-workspace';
 
 export interface SimulatorState {
   readonly surface: Surface;
@@ -22,8 +23,10 @@ export type SimulatorAction =
   | { readonly type: 'execute'; readonly input: string }
   | {
       readonly type: 'execute-runtime';
+      readonly transport?: 'gateway';
       readonly input: string;
       readonly result: DisRunnerInvocationResult;
+      readonly action?: ProjectAction;
     }
   | {
       readonly type: 'runtime-failed';
@@ -333,11 +336,20 @@ function executeRuntime(
   state: SimulatorState,
   rawInput: string,
   result: DisRunnerInvocationResult,
+  transport?: 'gateway',
+  action?: ProjectAction,
 ): SimulatorState {
   const input = rawInput.trim();
   if (!input) return state;
   const executionId = state.executionCount + 1;
-  const command = `/${result.command}`;
+  const command =
+    action?.type === 'autocomplete'
+      ? `Autocomplete /${result.command}`
+      : action?.type === 'component'
+        ? `Component ${action.customId ?? result.command}`
+        : action?.type === 'modal-submit'
+          ? `Modal ${action.customId ?? result.command}`
+          : `/${result.command}`;
   const callbackContent = result.response?.data['content'];
   const responseType = result.response?.type;
   const callbackFlags = result.response?.data['flags'];
@@ -378,10 +390,13 @@ function executeRuntime(
     payload: {
       command,
       callbackType: responseType ?? null,
-      signed: result.ok,
+      ...(transport === 'gateway'
+        ? { transport: 'gateway', authenticated: result.ok }
+        : { signed: result.ok }),
       runId: result.runId,
       requestId: result.requestId,
       ...result.context,
+      ...(action ? { action } : {}),
     },
     details: content,
     recommendation: result.ok
@@ -459,7 +474,7 @@ export function simulationReducer(state: SimulatorState, action: SimulatorAction
     case 'execute':
       return execute(state, action.input);
     case 'execute-runtime':
-      return executeRuntime(state, action.input, action.result);
+      return executeRuntime(state, action.input, action.result, action.transport, action.action);
     case 'runtime-failed':
       return executeRuntime(state, action.request.input, {
         ...action.request,

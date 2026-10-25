@@ -1,7 +1,10 @@
 import type { GatewayDispatch } from './contracts.js';
+import type { ResourceRecord } from './contracts.js';
+import type { BootstrapUser } from './bootstrap-profile.js';
 import type { VirtualClock } from './clock.js';
-import { filterGatewayEvent, validateIdentifyIntents } from './intents.js';
+import { filterGatewayEvent, GatewayIntents, validateIdentifyIntents } from './intents.js';
 import type { SeededRandom, SnowflakeGenerator } from './random.js';
+import type { VirtualState } from './state.js';
 import { assertOfflineGatewayUrl } from './network-policy.js';
 import {
   assertSyntheticToken,
@@ -41,6 +44,13 @@ export interface GatewayIdentifyResult {
   readonly sessionId: string;
   readonly ready: GatewayDispatch;
   readonly resumeGatewayUrl: string;
+  readonly bootstrap?: readonly GatewayDispatch[];
+}
+
+export interface GatewayBootstrapProfile {
+  /** Read at IDENTIFY time so a restarted bot sees current fixture resources. */
+  readonly state: VirtualState;
+  readonly user?: BootstrapUser;
 }
 
 export interface GatewayResumeResult {
@@ -116,6 +126,7 @@ export interface GatewayEmulatorOptions {
   readonly maxReplayBytesPerSession?: number;
   /** Maximum retained replay-history bytes across all sessions. */
   readonly maxTotalReplayBytes?: number;
+  readonly bootstrap?: GatewayBootstrapProfile;
 }
 
 export class GatewayEmulator {
@@ -136,8 +147,12 @@ export class GatewayEmulator {
   readonly #maxDispatchBytes: number;
   readonly #maxReplayBytesPerSession: number;
   readonly #maxTotalReplayBytes: number;
+  readonly #bootstrap: GatewayBootstrapProfile | undefined;
   readonly #sessions = new Map<string, MutableSession>();
-  readonly #broadcastListeners = new Set<(sessionId: string, packet: GatewayDispatch) => void>();
+  readonly #broadcastListeners = new Set<
+    (sessionId: string, packet: GatewayDispatch, publicationId: number) => void
+  >();
+  #broadcastPublication = 0;
   #totalReplayBytes = 0;
   #identifyWindowStartedAtMs: number;
   #identifyCount = 0;
@@ -150,6 +165,17 @@ export class GatewayEmulator {
     this.#fakeToken = assertSyntheticToken(options.fakeToken ?? createOfflineSessionToken());
     this.#botUserId = options.botUserId ?? this.#snowflakes.generate();
     this.#applicationId = options.applicationId ?? this.#botUserId;
+    this.#bootstrap = options.bootstrap;
+    if (this.#bootstrap?.user !== undefined) {
+      const user = this.#bootstrap.user;
+      if (user.id !== this.#botUserId || user.bot !== true) {
+        throw new TypeError('Gateway bootstrap user must match the bot identity.');
+      }
+      this.#bootstrap = {
+        state: this.#bootstrap.state,
+        user: structuredClone(user),
+      };
+    }
     this.#portalEnabledPrivilegedIntents = options.portalEnabledPrivilegedIntents ?? 0n;
     this.#heartbeatIntervalMs = boundedPositiveInteger(
       options.heartbeatIntervalMs ?? 41_250,
@@ -205,6 +231,10 @@ export class GatewayEmulator {
     return this.#fakeToken;
   }
 
+  public get heartbeatIntervalMs(): number {
+    return this.#heartbeatIntervalMs;
+  }
+
   /** Bind the actual local transport before creating sessions that advertise it. */
   public bindTransportEndpoint(url: string): void {
     const endpoint = assertOfflineGatewayUrl(url).href;
@@ -243,17 +273,48 @@ export class GatewayEmulator {
       history: [],
       historyBytes: 0,
     };
-    const ready = this.#appendDispatch(session, 'READY', {
-      v: 10,
-      user: { id: this.#botUserId, username: 'DisRunner Bot', bot: true },
-      application: { id: this.#applicationId },
-      guilds: [],
-      session_id: sessionId,
-      resume_gateway_url: this.#resumeGatewayUrl,
-      shard: payload.shard ?? [0, 1],
-    });
-    this.#sessions.set(sessionId, session);
-    return { sessionId, ready, resumeGatewayUrl: this.#resumeGatewayUrl };
+    const user = this.#bootstrap?.user ?? {
+      id: this.#botUserId,
+      username: 'DisRunner Bot',
+      discriminator: '0',
+      avatar: null,
+      bot: true,
+    };
+    const guilds =
+      this.#bootstrap !== undefined && (intents & GatewayIntents.GUILDS) !== 0n
+        ? bootstrapGuilds(this.#bootstrap.state, user)
+        : [];
+    // Bootstrap is one authenticated publication. A capacity failure must not leave
+    // an unreachable session or leaked replay accounting behind.
+    const previousReplayBytes = this.#totalReplayBytes;
+    try {
+      const ready = this.#appendDispatch(session, 'READY', {
+        v: 10,
+        user:
+          this.#bootstrap === undefined
+            ? { id: this.#botUserId, username: 'DisRunner Bot', bot: true }
+            : user,
+        application:
+          this.#bootstrap === undefined
+            ? { id: this.#applicationId }
+            : { id: this.#applicationId, flags: 0 },
+        guilds: guilds.map((guild) => ({ id: guild['id'], unavailable: true })),
+        session_id: sessionId,
+        resume_gateway_url: this.#resumeGatewayUrl,
+        shard: payload.shard ?? [0, 1],
+      });
+      const bootstrap = guilds.map((guild) => this.#appendDispatch(session, 'GUILD_CREATE', guild));
+      this.#sessions.set(sessionId, session);
+      return {
+        sessionId,
+        ready,
+        resumeGatewayUrl: this.#resumeGatewayUrl,
+        ...(this.#bootstrap === undefined ? {} : { bootstrap }),
+      };
+    } catch (error) {
+      this.#totalReplayBytes = previousReplayBytes;
+      throw error;
+    }
   }
 
   public dispatch(
@@ -303,6 +364,9 @@ export class GatewayEmulator {
       return result;
     }
     const listeners = [...this.#broadcastListeners];
+    this.#broadcastPublication =
+      this.#broadcastPublication === Number.MAX_SAFE_INTEGER ? 1 : this.#broadcastPublication + 1;
+    const publicationId = this.#broadcastPublication;
     for (const sessionId of [...this.#sessions.keys()]) {
       let packet: GatewayDispatch | undefined;
       try {
@@ -318,7 +382,7 @@ export class GatewayEmulator {
       result.accepted += 1;
       for (const listener of listeners) {
         try {
-          listener(sessionId, cloneDispatch(packet));
+          listener(sessionId, cloneDispatch(packet), publicationId);
         } catch {
           result.transportFailed += 1;
         }
@@ -329,7 +393,7 @@ export class GatewayEmulator {
 
   /** Only broadcast packets are published here; direct dispatch remains caller-owned. */
   public subscribeBroadcast(
-    listener: (sessionId: string, packet: GatewayDispatch) => void,
+    listener: (sessionId: string, packet: GatewayDispatch, publicationId: number) => void,
   ): () => void {
     if (typeof listener !== 'function')
       throw new TypeError('Broadcast listener must be a function.');
@@ -337,8 +401,11 @@ export class GatewayEmulator {
       throw new RangeError('Gateway broadcast listener capacity exceeded.');
     }
     // Each subscription owns its own identity, even for the same callback.
-    const subscription = (sessionId: string, packet: GatewayDispatch): void =>
-      listener(sessionId, packet);
+    const subscription = (
+      sessionId: string,
+      packet: GatewayDispatch,
+      publicationId: number,
+    ): void => listener(sessionId, packet, publicationId);
     this.#broadcastListeners.add(subscription);
     return () => {
       this.#broadcastListeners.delete(subscription);
@@ -347,7 +414,10 @@ export class GatewayEmulator {
 
   public heartbeat(sessionId: string, sequence: number | null): GatewayPacket<null> | undefined {
     const session = this.#requireReadySession(sessionId);
-    if (sequence !== null && sequence !== session.sequence) {
+    if (
+      sequence !== null &&
+      (!Number.isSafeInteger(sequence) || sequence < 0 || sequence > session.sequence)
+    ) {
       throw new GatewayProtocolError(4007, 'Invalid sequence.');
     }
     if (session.awaitingHeartbeatAck) {
@@ -578,6 +648,175 @@ export class GatewayProtocolError extends Error {
     this.name = 'GatewayProtocolError';
     this.closeCode = closeCode;
   }
+}
+
+/** Discord wire projection of the supported small-guild fixture subset. */
+function bootstrapGuilds(
+  state: VirtualState,
+  bot: BootstrapUser,
+): readonly Readonly<Record<string, unknown>>[] {
+  const resources = state.list();
+  const users = new Map(
+    resources.filter((resource) => resource.resourceType === 'user').map((user) => [user.id, user]),
+  );
+  return resources
+    .filter((resource) => resource.resourceType === 'guild')
+    .map((guild) => {
+      const guildResources = resources.filter((resource) => resource['guild_id'] === guild.id);
+      const roles = guildResources
+        .filter((resource) => resource.resourceType === 'role')
+        .map((role) => ({
+          id: role.id,
+          name: fixtureString(role, 'name', 'Role'),
+          permissions: fixtureString(role, 'permissions', '0'),
+          position: fixtureNumber(role, 'position', 0),
+          color: fixtureNumber(role, 'color', 0),
+          hoist: role['hoist'] === true,
+          managed: role['managed'] === true,
+          mentionable: role['mentionable'] === true,
+          flags: fixtureNumber(role, 'flags', 0),
+        }));
+      if (!roles.some((role) => role.id === guild.id)) {
+        roles.unshift({
+          id: guild.id,
+          name: '@everyone',
+          permissions: '0',
+          position: 0,
+          color: 0,
+          hoist: false,
+          managed: false,
+          mentionable: false,
+          flags: 0,
+        });
+      }
+      const channels = guildResources
+        .filter((resource) => resource.resourceType === 'channel')
+        .map((channel) => ({
+          id: channel.id,
+          guild_id: guild.id,
+          type: fixtureNumber(channel, 'type', 0),
+          name: fixtureString(channel, 'name', 'channel'),
+          position: fixtureNumber(channel, 'position', 0),
+          parent_id: channel['parent_id'] ?? null,
+          topic: channel['topic'] ?? null,
+          nsfw: channel['nsfw'] === true,
+          rate_limit_per_user: fixtureNumber(channel, 'rate_limit_per_user', 0),
+          permission_overwrites: fixtureArray(channel, 'permission_overwrites'),
+          last_message_id: channel['last_message_id'] ?? null,
+        }));
+      const members = guildResources
+        .filter((resource) => resource.resourceType === 'member')
+        .map((member) => {
+          const userId = typeof member['user_id'] === 'string' ? member['user_id'] : member.id;
+          const user = users.get(userId);
+          if (user === undefined && userId !== bot.id) {
+            throw new GatewayProtocolError(
+              4002,
+              'Guild member references an unknown fixture user.',
+            );
+          }
+          return {
+            user: userId === bot.id ? { ...bot } : fixtureUser(user!),
+            roles: fixtureArray(member, 'roles'),
+            nick: member['nick'] ?? null,
+            joined_at: fixtureString(member, 'joined_at', '2015-01-01T00:00:00.000Z'),
+            deaf: member['deaf'] === true,
+            mute: member['mute'] === true,
+            flags: fixtureNumber(member, 'flags', 0),
+            pending: member['pending'] === true,
+          };
+        });
+      if (!members.some((member) => member.user.id === bot.id)) {
+        members.push({
+          user: { ...bot },
+          roles: [],
+          nick: null,
+          joined_at: '2015-01-01T00:00:00.000Z',
+          deaf: false,
+          mute: false,
+          flags: 0,
+          pending: false,
+        });
+      }
+      return {
+        id: guild.id,
+        name: fixtureString(guild, 'name', 'Guild'),
+        owner_id: fixtureString(guild, 'owner_id', bot.id),
+        icon: guild['icon'] ?? null,
+        splash: null,
+        discovery_splash: null,
+        banner: null,
+        description: guild['description'] ?? null,
+        features: fixtureArray(guild, 'features'),
+        preferred_locale: fixtureString(guild, 'preferred_locale', 'en-US'),
+        afk_channel_id: null,
+        afk_timeout: 300,
+        verification_level: 0,
+        default_message_notifications: 0,
+        explicit_content_filter: 0,
+        mfa_level: 0,
+        premium_tier: 0,
+        premium_subscription_count: 0,
+        system_channel_id: null,
+        system_channel_flags: 0,
+        rules_channel_id: null,
+        public_updates_channel_id: null,
+        safety_alerts_channel_id: null,
+        max_presences: null,
+        max_members: 250,
+        vanity_url_code: null,
+        nsfw_level: 0,
+        premium_progress_bar_enabled: false,
+        large: false,
+        unavailable: false,
+        joined_at: '2015-01-01T00:00:00.000Z',
+        member_count: members.length,
+        roles,
+        channels,
+        members,
+        emojis: [],
+        stickers: [],
+        threads: [],
+        stage_instances: [],
+        guild_scheduled_events: [],
+        voice_states: [],
+        presences: [],
+      };
+    });
+}
+
+function fixtureUser(resource: ResourceRecord): BootstrapUser {
+  return {
+    id: resource.id,
+    username: fixtureString(resource, 'username', 'User'),
+    discriminator: fixtureString(resource, 'discriminator', '0'),
+    avatar: null,
+    bot: resource['bot'] === true,
+  };
+}
+
+function fixtureString(resource: ResourceRecord, field: string, fallback: string): string {
+  const value = resource[field];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string')
+    throw new GatewayProtocolError(4002, `Fixture ${field} must be a string.`);
+  return value;
+}
+
+function fixtureNumber(resource: ResourceRecord, field: string, fallback: number): number {
+  const value = resource[field];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value))
+    throw new GatewayProtocolError(4002, `Fixture ${field} must be an integer.`);
+  return value;
+}
+
+function fixtureArray(resource: ResourceRecord, field: string): readonly unknown[] {
+  const value = resource[field];
+  if (value === undefined) return [];
+  if (!Array.isArray(value))
+    throw new GatewayProtocolError(4002, `Fixture ${field} must be an array.`);
+  return structuredClone(value);
 }
 
 function validateShard(shard: readonly [number, number] | undefined): void {

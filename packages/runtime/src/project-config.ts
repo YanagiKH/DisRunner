@@ -1,18 +1,21 @@
 import { open, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { parseCommandRegistryProfile } from '@disrunner/core';
+import { GatewayIntents, parseCommandRegistryProfile } from '@disrunner/core';
 import type { CommandRegistryProfile, OrdinaryMessagePermissionProfile } from '@disrunner/core';
 
+import { openWorkspace } from './workspace.js';
 import type { ProjectSummary } from './contracts.js';
 
 const CONFIG_NAME = 'discord-simulator.config.json';
 const MAX_CONFIG_BYTES = 1_048_576;
 const MAX_FIXTURE_BYTES = 8 * 1_048_576;
+// BotRunner's 256-entry envelope also includes up to four managed port/signing entries.
+const MAX_PROJECT_ENVIRONMENT_VARIABLES = 252;
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const EXECUTION_CONTROL_ENVIRONMENT =
   /^(?:PATH|PATHEXT|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.+)$/iu;
-const SUPPORTED_ADAPTER_TYPE = 'raw-interaction-webhook';
+const SUPPORTED_ADAPTERS = ['raw-interaction-webhook', 'discord.js', 'discord.py'];
 
 interface ResolvedAdapter {
   readonly type: string;
@@ -32,6 +35,8 @@ interface ResolvedProfile {
 }
 
 export interface ResolvedProjectConfiguration {
+  readonly entryPoint: string | null;
+  readonly workspaceIssue?: string;
   readonly botUserId?: string;
   readonly summary: ProjectSummary;
   readonly environment: Readonly<Record<string, string>>;
@@ -42,6 +47,7 @@ export interface ResolvedProjectConfiguration {
 
 export async function loadProjectConfiguration(
   selectedDirectory: string,
+  options: { allowInvalidWorkspace?: boolean } = {},
 ): Promise<ResolvedProjectConfiguration> {
   if (typeof selectedDirectory !== 'string' || selectedDirectory.trim() === '') {
     throw new TypeError('A project directory is required.');
@@ -106,9 +112,9 @@ export async function loadProjectConfiguration(
   const adapterRaw = requireRecord(config['adapter'], 'adapter');
   assertKeys(adapterRaw, ['type', 'interactionEndpoint', 'restBaseUrl', 'gatewayUrl'], 'adapter');
   const adapterType = requireString(adapterRaw['type'], 'adapter.type', 100);
-  if (adapterType !== SUPPORTED_ADAPTER_TYPE) {
+  if (!SUPPORTED_ADAPTERS.includes(adapterType)) {
     throw new TypeError(
-      `Unsupported adapter.type: ${adapterType}. The Desktop runtime only supports ${SUPPORTED_ADAPTER_TYPE}.`,
+      `Unsupported adapter.type: ${adapterType}. Supported adapters: ${SUPPORTED_ADAPTERS.join(', ')}.`,
     );
   }
   const adapter: ResolvedAdapter = {
@@ -121,20 +127,41 @@ export async function loadProjectConfiguration(
     ...optionalLoopbackTemplate(adapterRaw['restBaseUrl'], 'adapter.restBaseUrl', 'http:'),
     ...optionalLoopbackTemplate(adapterRaw['gatewayUrl'], 'adapter.gatewayUrl', 'ws:'),
   };
-  if (adapter.interactionEndpoint === undefined) {
+  if (adapterType === 'raw-interaction-webhook' && adapter.interactionEndpoint === undefined) {
     throw new TypeError('adapter.interactionEndpoint is required for raw-interaction-webhook.');
   }
 
+  if (
+    (adapterType === 'discord.js' && runtime !== 'node') ||
+    (adapterType === 'discord.py' && runtime !== 'python')
+  )
+    throw new TypeError('The SDK adapter must match bot.runtime.');
+  if (adapterType !== 'raw-interaction-webhook' && adapter.interactionEndpoint !== undefined)
+    throw new TypeError(
+      'SDK adapters use Gateway interactions and cannot set interactionEndpoint.',
+    );
+
   const environmentRaw =
     config['environment'] === undefined ? {} : requireRecord(config['environment'], 'environment');
+  if (Object.keys(environmentRaw).length > MAX_PROJECT_ENVIRONMENT_VARIABLES)
+    throw new TypeError(
+      'environment cannot contain more than 252 variables; four slots are reserved for runtime settings.',
+    );
   const environment: Record<string, string> = {};
+  let environmentBytes = 0;
   for (const [name, value] of Object.entries(environmentRaw)) {
-    if (!ENVIRONMENT_NAME.test(name))
+    if (!ENVIRONMENT_NAME.test(name) || Buffer.byteLength(name) > 256)
       throw new TypeError(`Invalid environment variable name: ${name}.`);
     if (EXECUTION_CONTROL_ENVIRONMENT.test(name)) {
       throw new TypeError(`environment.${name} may not alter executable or module resolution.`);
     }
     environment[name] = requireString(value, `environment.${name}`, 32_768, true);
+    const valueBytes = Buffer.byteLength(environment[name]);
+    if (valueBytes > 65_536)
+      throw new TypeError(`environment.${name} cannot exceed 65,536 UTF-8 bytes.`);
+    environmentBytes += Buffer.byteLength(name) + valueBytes;
+    if (environmentBytes > 1_048_576)
+      throw new TypeError('environment cannot exceed 1,048,576 total UTF-8 bytes.');
     if (looksLikeDiscordCredential(environment[name])) {
       throw new TypeError(
         `environment.${name} looks like a Discord credential and is not allowed offline.`,
@@ -168,7 +195,9 @@ export async function loadProjectConfiguration(
   }
   const ordinaryMessagePermissions =
     profileRaw['ordinaryMessagePermissions'] === undefined
-      ? 'legacy-unenforced'
+      ? adapterType === 'raw-interaction-webhook'
+        ? 'legacy-unenforced'
+        : 'guild-text-own-messages-v1'
       : requireEnum(
           profileRaw['ordinaryMessagePermissions'],
           ['legacy-unenforced', 'guild-text-own-messages-v1'] as const,
@@ -183,12 +212,30 @@ export async function loadProjectConfiguration(
     throw new TypeError('profile.networkPolicy must be offline.');
   }
   const intents = optionalStringArray(profileRaw['intents'], 'profile.intents');
+  if (intents.some((name) => !Object.hasOwn(GatewayIntents, name)))
+    throw new TypeError('profile.intents contains an unsupported intent name.');
   if (new Set(intents).size !== intents.length)
     throw new TypeError('profile.intents must be unique.');
   const hotReload = profileRaw['hotReload'] ?? false;
   if (typeof hotReload !== 'boolean') throw new TypeError('profile.hotReload must be a boolean.');
+  if (hotReload)
+    throw new TypeError(
+      'profile.hotReload is not supported. Stop and restart the bot after changes.',
+    );
 
-  const resources = await loadFixtures(root, config['fixtures'], ordinaryMessagePermissions);
+  const fixtureResources = await loadFixtures(
+    root,
+    config['fixtures'],
+    ordinaryMessagePermissions,
+    adapterType !== 'raw-interaction-webhook',
+  );
+  const workspace = await openWorkspace(root);
+  if (
+    !options.allowInvalidWorkspace &&
+    (workspace.status === 'future' || workspace.status === 'corrupt')
+  )
+    throw new TypeError(workspace.error ?? 'Workspace cannot be read.');
+  const resources = workspace.document?.resources ?? fixtureResources;
   if (commandRegistry !== undefined) {
     const guildIds = new Set(
       resources
@@ -200,10 +247,16 @@ export async function loadProjectConfiguration(
     }
   }
   const botUserId =
-    ordinaryMessagePermissions === 'guild-text-own-messages-v1'
-      ? (resources.at(-1)?.['id'] as string)
+    ordinaryMessagePermissions === 'guild-text-own-messages-v1' ||
+    adapterType !== 'raw-interaction-webhook'
+      ? (resources.find((r) => r['resourceType'] === 'user' && r['bot'] === true)?.['id'] as
+          string | undefined)
       : undefined;
   return {
+    entryPoint,
+    ...(workspace.status === 'corrupt' || workspace.status === 'future'
+      ? { workspaceIssue: workspace.error ?? 'Workspace cannot be read.' }
+      : {}),
     ...(botUserId === undefined ? {} : { botUserId }),
     summary: {
       root,
@@ -213,16 +266,16 @@ export async function loadProjectConfiguration(
       args,
       cwd,
       adapter: adapterType,
-      mode,
-      seed,
+      mode: workspace.document?.options.mode ?? mode,
+      seed: workspace.document?.options.seed ?? seed,
       environmentNames: Object.keys(environment).sort(),
     },
     environment,
     adapter,
     profile: {
       ...(commandRegistry === undefined ? {} : { commandRegistry }),
-      mode,
-      seed,
+      mode: workspace.document?.options.mode ?? mode,
+      seed: workspace.document?.options.seed ?? seed,
       intents,
       networkPolicy: 'offline',
       hotReload,
@@ -236,14 +289,15 @@ async function loadFixtures(
   root: string,
   input: unknown,
   profile: OrdinaryMessagePermissionProfile,
+  structured = false,
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
   const strict = profile === 'guild-text-own-messages-v1';
   if (input === undefined && !strict) return [];
   const fixtures = requireRecord(input, 'fixtures');
   assertKeys(fixtures, ['guild', 'user', 'bot'], 'fixtures');
-  if (strict && fixtures['bot'] === undefined)
+  if (strict && !structured && fixtures['bot'] === undefined)
     throw new TypeError('fixtures.bot is required for guild-text-own-messages-v1.');
-  if (!strict && fixtures['bot'] !== undefined)
+  if (!strict && !structured && fixtures['bot'] !== undefined)
     throw new TypeError('fixtures.bot requires guild-text-own-messages-v1.');
   const resources: Readonly<Record<string, unknown>>[] = [];
   for (const kind of ['guild', 'user', 'bot'] as const) {
@@ -279,7 +333,7 @@ async function loadFixtures(
     const guild = requireRecord(fixture['guild'], 'guild fixture guild');
     const { roles, channels, ...legacyFields } = guild;
     const { members, ...strictFields } = legacyFields;
-    const guildFields = strict ? strictFields : legacyFields;
+    const guildFields = strict || structured ? strictFields : legacyFields;
     const guildResource = toResource(guildFields, 'guild');
     resources.push(guildResource);
     for (const role of requireOptionalRecordArray(roles, 'guild fixture roles')) {
@@ -287,13 +341,39 @@ async function loadFixtures(
     }
     for (const channel of requireOptionalRecordArray(channels, 'guild fixture channels')) {
       resources.push(
-        toResource(nestedResource(channel, guildResource['id'], strict, 'channel'), 'channel'),
+        toResource(
+          nestedResource(
+            structured ? { permission_overwrites: [], ...channel } : channel,
+            guildResource['id'],
+            strict,
+            'channel',
+          ),
+          'channel',
+        ),
       );
     }
-    if (strict) {
+    if (strict || structured) {
       for (const member of requireOptionalRecordArray(members, 'guild fixture members')) {
         resources.push(
-          toResource(nestedResource(member, guildResource['id'], true, 'member'), 'member'),
+          toResource(
+            nestedResource(
+              structured && member['id'] === undefined
+                ? {
+                    ...member,
+                    id:
+                      member['user_id'] ??
+                      (member['user'] as Record<string, unknown> | undefined)?.['id'],
+                    user_id:
+                      member['user_id'] ??
+                      (member['user'] as Record<string, unknown> | undefined)?.['id'],
+                  }
+                : member,
+              guildResource['id'],
+              true,
+              'member',
+            ),
+            'member',
+          ),
         );
       }
     }
@@ -375,6 +455,18 @@ async function resolveExecutable(
   command: string,
 ): Promise<string> {
   const base = path.basename(command).toLowerCase();
+  if (runtime !== 'executable' && path.isAbsolute(command)) {
+    const resolved = await realpath(command);
+    if (!(await stat(resolved)).isFile())
+      throw new TypeError('Runtime path must identify an executable file.');
+    if (
+      runtime === 'node'
+        ? !/^node(?:\.exe)?$/u.test(base)
+        : !/^(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?$/u.test(base)
+    )
+      throw new TypeError('Runtime path must identify the configured Node or Python executable.');
+    return path.resolve(command);
+  }
   if (runtime === 'node') {
     if ((base !== 'node' && base !== 'node.exe') || command.toLowerCase() !== base) {
       throw new TypeError(

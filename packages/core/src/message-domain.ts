@@ -1,3 +1,4 @@
+import { validateInteractionMessagePayload } from './interaction-message-domain.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -45,6 +46,7 @@ export interface MessageMutationResult {
   readonly delivery: MessageDelivery;
 }
 export interface MessageDomainOptions {
+  readonly sdkCompatibility?: boolean;
   readonly ordinaryMessagePermissions?: OrdinaryMessagePermissionProfile;
   readonly state: VirtualState;
   readonly gateway: GatewayEmulator;
@@ -55,6 +57,8 @@ export interface MessageDomainOptions {
 
 /** Ordinary channel messages only. No generic store-change or interaction-event bridge. */
 export class MessageDomainService {
+  readonly #sdkCompatibility: boolean;
+  readonly #nonces = new Map<string, { messageId: string; expires: number }>();
   readonly #state: VirtualState;
   readonly #permissions: OrdinaryMessagePolicy;
   readonly #gateway: GatewayEmulator;
@@ -63,6 +67,7 @@ export class MessageDomainService {
   readonly #mode: SimulationMode;
 
   public constructor(options: MessageDomainOptions) {
+    this.#sdkCompatibility = options.sdkCompatibility ?? false;
     this.#state = options.state;
     this.#permissions = new OrdinaryMessagePolicy(
       options.state,
@@ -177,10 +182,94 @@ export class MessageDomainService {
       }
       if (type === 'MESSAGE_CREATE' && payload['tts'] === true && !permission.tts)
         missingOrdinaryMessagePermissions();
+      if (
+        type !== 'MESSAGE_DELETE' &&
+        payload['flags'] !== undefined &&
+        ![0, 4, 4096, 4100].includes(payload['flags'] as number)
+      )
+        throw new DiscordApiError(400, 50035, 'Unsupported ordinary message flags.');
+      let nonce: string | undefined;
+      let nonceKey: string | undefined;
+      if (
+        this.#sdkCompatibility &&
+        (payload['nonce'] !== undefined || payload['enforce_nonce'] === true)
+      ) {
+        if (
+          type !== 'MESSAGE_CREATE' ||
+          !['string', 'number'].includes(typeof payload['nonce']) ||
+          String(payload['nonce']).length < 1 ||
+          String(payload['nonce']).length > 25 ||
+          (typeof payload['nonce'] === 'number' && !Number.isSafeInteger(payload['nonce'])) ||
+          (payload['enforce_nonce'] !== undefined && typeof payload['enforce_nonce'] !== 'boolean')
+        )
+          throw new DiscordApiError(400, 50035, 'Invalid message nonce.');
+        nonce = String(payload['nonce']);
+        nonceKey = JSON.stringify([channelId, author['id'], nonce]);
+        for (const [key, entry] of this.#nonces)
+          if (entry.expires <= this.#state.now()) this.#nonces.delete(key);
+        if (payload['enforce_nonce'] === true) {
+          const entry = this.#nonces.get(nonceKey);
+          const prior = entry ? this.#state.get('message', entry.messageId) : undefined;
+          if (prior)
+            return {
+              message: prior,
+              stateRevision: beforeRevision,
+              eventId: null,
+              delivery: {
+                status: 'unchanged',
+                accepted: 0,
+                filtered: 0,
+                failed: 0,
+                transportFailed: 0,
+              },
+            };
+        }
+      }
+      let selected = payload;
+      let reference: Record<string, unknown> | undefined;
+      if (this.#sdkCompatibility) {
+        const supplied = payload['message_reference'];
+        if (supplied !== undefined) {
+          if (
+            !isRecord(supplied) ||
+            typeof supplied['message_id'] !== 'string' ||
+            Object.keys(supplied).some(
+              (k) =>
+                !['message_id', 'channel_id', 'guild_id', 'fail_if_not_exists', 'type'].includes(k),
+            )
+          )
+            throw new DiscordApiError(400, 50035, 'Invalid message reference.');
+          const referenced = this.#state.require('message', supplied['message_id']);
+          if (referenced['channel_id'] !== channelId || referenced['visibility'] !== 'channel')
+            throw new DiscordApiError(403, 50013, 'Referenced message is unavailable.');
+          reference = {
+            message_id: referenced.id,
+            channel_id: channelId,
+            ...(guildId ? { guild_id: guildId } : {}),
+          };
+        }
+        selected = Object.fromEntries(
+          Object.entries(payload).filter(
+            ([key, value]) =>
+              key !== 'message_reference' &&
+              key !== 'flags' &&
+              key !== 'enforce_nonce' &&
+              key !== 'nonce' &&
+              !(type === 'MESSAGE_UPDATE' && key === 'tts' && value === false),
+          ),
+        );
+      }
       const changes =
         type === 'MESSAGE_DELETE'
           ? {}
-          : validatePayload(payload, this.#mode, type === 'MESSAGE_UPDATE');
+          : this.#sdkCompatibility
+            ? {
+                ...validateInteractionMessagePayload(selected, 1_048_576, current, false, true),
+                ...(payload['flags'] === undefined ? {} : { flags: payload['flags'] }),
+                ...(reference ? { message_reference: reference } : {}),
+                ...(nonce === undefined ? {} : { nonce }),
+              }
+            : validatePayload(payload, this.#mode, type === 'MESSAGE_UPDATE');
       if (
         current !== undefined &&
         type === 'MESSAGE_UPDATE' &&
@@ -287,6 +376,10 @@ export class MessageDomainService {
       }
       // Evidence failure cannot change a committed mutation into a retryable failure.
       recordMessageEvidence(this.#state, event, delivery, [this.#gateway.sessionToken]);
+      if (nonceKey) {
+        if (this.#nonces.size >= 10000) this.#nonces.delete(this.#nonces.keys().next().value!);
+        this.#nonces.set(nonceKey, { messageId: message.id, expires: this.#state.now() + 300000 });
+      }
       return { message, stateRevision, eventId: event.eventId, delivery };
     });
   }

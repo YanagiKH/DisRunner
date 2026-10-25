@@ -37,3 +37,10 @@ export type {
 export type { OrdinaryMessagePermissionProfile } from './ordinary-message-permissions.js';
 export * from './application-command-profile.js';
 export * from './application-command-registry.js';
+
+export * from './fault-policy.js';
+export * from './local-attachments.js';
+
+export * from './resource-domain.js';
+
+export * from './interaction-controls.js';

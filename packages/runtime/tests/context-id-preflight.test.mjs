@@ -13,6 +13,23 @@ async function withFixture(context, run) {
   const session = createSession();
   try {
     await cp(project, directory, { recursive: true });
+    const configFile = join(directory, 'discord-simulator.config.json');
+    const config = JSON.parse(await readFile(configFile, 'utf8'));
+    config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds: [] };
+    config.bot.entryPoint = 'src/legacy-context-entry.mjs';
+    config.bot.startCommand = 'node src/legacy-context-entry.mjs';
+    await writeFile(configFile, JSON.stringify(config));
+    // Keep the original signed transport and handler without v2 command registration.
+    await writeFile(
+      join(directory, config.bot.entryPoint),
+      `import {createWebhookServer,loadServerOptionsFromEnvironment} from './server.mjs';
+const options=loadServerOptionsFromEnvironment();
+const server=createWebhookServer(options);
+server.listen(options.port,options.host);
+const shutdown=()=>{server.close(()=>{process.exitCode=0;});setTimeout(()=>server.closeAllConnections(),1000).unref();};
+process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
+`,
+    );
     const userFile = join(directory, 'fixtures/developer.discord-fixture.json');
     const user = JSON.parse(await readFile(userFile, 'utf8'));
     user.user.id = context.actorId;

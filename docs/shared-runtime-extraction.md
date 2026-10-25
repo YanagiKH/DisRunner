@@ -2,17 +2,17 @@
 
 ## Current-state correction
 
-The sections below describe the original extraction checkpoint, not the current
-combined M1 API or acceptance status. Current source exports `createSession`,
-explicit invocation contexts, subscription snapshots, cancellation and `dispose`;
-Electron routes its real bridge through Session and the executable CLI provides
-`bot-test`. Those later changes do not themselves prove real renderer/CLI parity.
-See [G1 acceptance](g1-acceptance.md) for the bounded parity harness and its
-explicitly pending GUI execution. No SDK or all-platform qualification follows.
+This page retains the original extraction history. Current CLI and Desktop use
+`createSession`, explicit actor contexts, subscription snapshots, cancellation,
+and awaited disposal. Scenario v2 runs real raw/SDK Bots through the same runner;
+`bot-test` retains the older case format. For current features and limits, see
+[Architecture](architecture.md), [SDK adapters](sdk-adapters.md), and
+[Scenario v2](scenario-v2.md). Historical checkpoint results are not a platform
+or SDK compatibility declaration.
 
 ## Historical extraction scope
 
-`@disrunner/runtime` is a private, Node-only ESM workspace package. Its only production dependency is `@disrunner/core`; it has no Electron or React dependency. CLI and Desktop use its shared `createSession()` API rather than separate child-process launchers.
+`@disrunner/runtime` is a private, Node-only ESM workspace package with no Electron or React dependency. The initial extraction depended only on `@disrunner/core`; the current package also uses the built-in SDK adapters and YAML parsing. CLI and Desktop use its shared `createSession()` API rather than separate child-process launchers.
 
 ## Extraction history and current API
 
@@ -22,14 +22,15 @@ The package still exports `RuntimeManager` as an alias of `DesktopRuntimeManager
 
 The current `createSession()` facade provides:
 
-- Project selection and validation of an explicit actor/guild/text-channel context.
+- Project selection and validation of an explicit actor/channel context, with a guild for guild interactions and explicit recipients for DMs.
 - Start and invoke operations with cancellation signals and bounded timeouts.
 - Invocation requests carrying a run ID, unique request ID, input and context; concurrent or duplicate requests and stale run IDs are rejected.
 - Exact normalized authenticated responses for case evaluation, rejecting responses changed by export redaction or truncation rather than treating transformed content as exact.
 - Versioned snapshots and snapshot events with session/run identity and increasing sequence numbers.
+- Structured action dispatch, current command registration, actor-specific private views, local attachments, and session-scoped faults.
 - Awaited `stop()` and `dispose()` results with structured cleanup issues. Disposal prevents further selection, startup and invocation; repeated disposal remains available for cleanup.
 
-The package also exports `parseBotCase`, `evaluateBotStep` and their case/assertion types. The CLI's implemented [bot-test command](bot-test.md) runs local Bot cases through Session, handles SIGINT/SIGTERM and writes its final report after disposal. The existing model-based `run` and `test` commands remain separate.
+The package also exports `parseBotCase`, `evaluateBotStep`, the Scenario v2 parser/runner/reporters, workspace APIs, and diagnostic reproduction bundle APIs. The [bot-test command](bot-test.md) retains its version 1 case contract. CLI `run` and `test` select model execution for version 1 scenarios and real Session execution for version 2; cancellation and final reporting include cleanup.
 
 Electron main caches a dynamic ESM import and creates a Session before exposing the window. It forwards runtime snapshot events and IPC operations to that session, stops it on window closure and awaits disposal before completing application quit. Desktop retains sender checks, renderer origin restrictions, preload and window handling; these are not moved into the Node runtime package. Desktop re-exports runtime DTOs and retains its window/application types.
 
@@ -43,8 +44,8 @@ The headless checks cover import, construction, selection, snapshot isolation, r
 
 ## Security and qualification limits
 
-The shared runtime uses the offline raw-interaction-webhook adapter. Offline transport is not an OS sandbox for arbitrary local Bot code. It does not imply support for real Discord connections, token configuration or SDK compatibility.
+The shared runtime supports the raw adapter and the exact SDK/runtime versions in [Compatibility](../COMPATIBILITY.md). Offline transport is not an OS sandbox for arbitrary local Bot code. It does not enable real Discord connections, live tokens, or other SDK versions.
 
-Shared source and successful headless checks do not establish real CLI/Desktop parity, packaged interactive Desktop acceptance, Gate G1 or SDK certification. Linux lifecycle evidence does not qualify Windows or macOS behavior. Process-group cleanup does not own a descendant that escapes that group, and uncertain process identity or cleanup must not be treated as confirmed termination. Consult the lifecycle documentation for the more specific platform limits and untested failure paths.
+Headless import checks establish only the Node package boundary. Real-child conformance, renderer tests, and packaged distribution tests establish their own narrower results; consult completed platform jobs before making a platform claim. Process-group cleanup does not own a descendant that escapes that group, and uncertain process identity or cleanup is not confirmed termination. See [Runtime lifecycle cleanup](runtime-lifecycle.md) and [Release process](release-process.md).
 
-This extraction and its subsequent M1 APIs do not change compiler/model semantics or establish a dependency-version upgrade. The initial extraction-only checks remain historical evidence of the package boundary, not acceptance evidence for later cancellation, disposal or real-child behavior.
+The initial extraction preserved model semantics. Its checks remain historical evidence of the package boundary; later Session, adapter, and lifecycle behavior has separate contracts and tests.

@@ -1,5 +1,7 @@
 # Scenario format
 
+This page describes version 1 model scenarios. Use [Scenario v2](scenario-v2.md) to execute a real Bot with Desktop or CLI, bounded waits/faults, and explicit failure policy.
+
 Scenarios are versioned YAML or JSON programs that initialize virtual state, schedule actions, and assert evidence. YAML files use the `.discord-scenario.yml` suffix. Version 1 accepts two equivalent input styles: a concise absolute-time `actions` dialect and the canonical engine `steps` dialect. Supply exactly one of `steps` and `actions`, even when either array is empty; supplying both is an error. Either array accepts the supported action forms below, including normalized `timeline-*` forms returned by the parser.
 
 The JSON Schema is [docs/schemas/discord-scenario.schema.json](schemas/discord-scenario.schema.json).

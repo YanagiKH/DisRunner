@@ -1,6 +1,8 @@
-# Offline raw-Bot case tests
+# Offline Bot case tests
 
-`bot-test` executes a real local child through the shared `createSession` API. It does not reinterpret the existing model-based `run` or `test` commands, install dependencies, connect to real Discord, or accept tokens. Offline transport is not an OS sandbox.
+`bot-test` preserves the compact version-1 Bot case format. For typed actions, DM messages, faults, and four-format reports, use [Scenario v2](scenario-v2.md).
+
+`bot-test` executes a real local child through the shared `createSession` API. Version 1 model scenarios retain their separate semantics; it does not install dependencies, connect to real Discord, or accept tokens. Offline transport is not an OS sandbox.
 
 ## Case v1
 
@@ -26,17 +28,17 @@ The selected project must contain the actor, guild, and text channel, and the ch
 
 ## Ordinary message permissions
 
-`bot-test` loads the same [project permission profile](project-configuration.md#ordinary-message-permission-opt-in) as Desktop. There is no CLI permission override. Omitted `profile.ordinaryMessagePermissions` remains `legacy-unenforced`; `guild-text-own-messages-v1` requires `fixtures.bot` and uses explicit guild membership/roles/overwrites for the bot's ordinary REST requests. The human `fixtures.user` remains the invocation actor, and selecting the configured bot as `actorId` is invalid.
+`bot-test` loads the same [project permission profile](project-configuration.md#ordinary-message-permission-opt-in) as Desktop. There is no CLI permission override. For raw projects, omitted `profile.ordinaryMessagePermissions` remains `legacy-unenforced`; `guild-text-own-messages-v1` requires `fixtures.bot` and uses explicit guild membership/roles/overwrites for the bot's ordinary REST requests. The human `fixtures.user` remains the invocation actor, and selecting the configured bot as `actorId` is invalid.
 
 Permission-negative fixtures may start successfully and return ordinary REST `403` responses. Case v1 still asserts the webhook response type and content, not arbitrary REST permissions: a test bot can make an ordinary REST request and report its outcome in its callback. Interaction-token routes keep their existing authorization; an ordinary-message denial does not itself imply a callback failure. This is shared-runtime behavior, not SDK conformance.
 
 ## Application-command registration
 
-`bot-test` also loads the shared [command registry project opt-in](project-configuration.md#command-registry-opt-in). Omission leaves registration disabled; `guildIds: []` enables only global registration, and guild registration requires an explicit allowlist backed by loaded fixtures. There is no CLI registry override. This setting is independent of ordinary message permissions and does not add an adapter.
+`bot-test` also loads the shared [command registry project opt-in](project-configuration.md#command-registry-opt-in). For raw projects, omission leaves registration disabled; `guildIds: []` enables only global registration, and guild registration requires an explicit allowlist backed by loaded fixtures. There is no CLI registry override. This setting is independent of ordinary message permissions and does not add an adapter.
 
 A supervised raw-webhook child can discover its application through authenticated `GET /oauth2/applications/@me` and register through the existing injected REST URL and synthetic Bot credential. Each run owns its command state; a successful restart starts fresh and the child must register again. Signed readiness and authenticated webhook responses are still required.
 
-Case v1 remains an assertion of webhook response type and exact content, not a direct registry HTTP assertion format. A child reporting success is not independent proof of the registration status, response body or state revision. Registering a name does not connect it to a handler, change the invocation grammar, add options support, or make invocation look up the registry. SDK and Command Explorer integration remain unsupported.
+Case v1 remains an assertion of webhook response type and exact content, not a direct registry HTTP assertion format. A child reporting success is not independent proof of the registration status, response body or state revision. Registering a name does not connect it to a handler, change the invocation grammar, add options support, or make invocation look up the registry. Typed SDK commands and Command Explorer use the separate extended runtime profile described in [SDK adapters](sdk-adapters.md).
 
 ## Result and cleanup
 
@@ -44,7 +46,7 @@ The module exports `runBotTest(options, dependencies?)`. Its only injectable dep
 
 The overall deadline covers preflight, startup and all steps, defaults to 30,000 ms, and accepts integers 1–300,000. Caller cancellation gives `cancelled` and exit 130 or 143. Deadline expiry is `runner-error`/1, not user cancellation. Disposal uses the shared runtime's independent shutdown window and is always awaited, including after partial startup. The module never installs global signal handlers or calls `process.exit`.
 
-The exact report keys are `version`, `execution`, `adapter`, `name`, `runId`, `status`, `context`, `assertions`, `error`, and `cleanupErrors`. Version is 1, execution is `bot`, and adapter is `raw-interaction-webhook`. Success exits 0; mismatch or runner error 1; invalid input/project/context 2. Cleanup issues demote a pass to runner-error/1 and preserve earlier failed/invalid/cancelled outcomes and primary errors. Output failure is runner-error/1 except that cancellation retains 130/143. Prior primary issues are retained in `cleanupErrors`. Reports never include environment, authentication headers, runtime console output or arbitrary exception text.
+The exact report keys are `version`, `execution`, `adapter`, `name`, `runId`, `status`, `context`, `assertions`, `error`, and `cleanupErrors`. Version is 1, execution is `bot`, and adapter identifies the selected project (or `null` before startup). Success exits 0; mismatch or runner error 1; invalid input/project/context 2. Cleanup issues demote a pass to runner-error/1 and preserve earlier failed/invalid/cancelled outcomes and primary errors. Output failure is runner-error/1 except that cancellation retains 130/143. Prior primary issues are retained in `cleanupErrors`. Reports never include environment, authentication headers, runtime console output or arbitrary exception text.
 
 With `outPath`, JSON is serialized only after disposal into an exclusive mode-0600 same-directory temporary file and renamed. Owned temporary files are removed on failure. An existing destination that cannot be replaced is not claimed as this run's result; callers must print the returned report, not read old output files.
 

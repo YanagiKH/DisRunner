@@ -15,11 +15,17 @@ GitHub repository settings are part of the release security boundary. The live c
 - Require the branch to be up to date, signed commits where the repository policy supports them, and linear history.
 - Block force pushes and branch deletion, including for administrators except documented emergency bypasses.
 
+`All green` includes the runtime qualification job. Pull requests run three lifecycle cycles per adapter and a 15-second smoke measurement; main pushes and manual CI runs require 100 cycles per adapter and a two-hour soak. Only a clean, unchanged exact-commit receipt with a passing full verdict can qualify a release. Publication downloads that receipt from a successful canonical `push`/`main` CI run, verifies the rebuilt runtime digests, and includes the receipt in checksums and provenance.
+
 ## Release tags and environment
 
 - A repository ruleset targeting `v*.*.*` tags must block tag updates and deletions after creation. Release tags are annotated and point to the exact current `main` commit.
 - The `release`, `release-windows`, `release-macos`, and `release-linux` environments limit deployment branches/tags to the release policy. Signing secrets, when configured, are environment-scoped.
 - Existing GitHub Releases and their assets are immutable. A correction uses a new patch version.
+
+Stable releases require the Windows and Apple signing identities before packaging. Configure `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD` in `release-windows`; configure `MACOS_CSC_LINK`, `MACOS_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` in `release-macos`. Missing values fail the stable build before packaging. The workflow separately verifies Authenticode signatures, Apple signing identity, Gatekeeper assessment, and stapled notarization, and includes the resulting receipts in the checksum and provenance manifests.
+
+Tags ending in `-beta`, `-beta.N`, or `-rc.N` use the prerelease channel. They retain the same source-identity and trusted-check gates, are published with GitHub's prerelease flag, and never replace the latest stable release. Signing is mandatory for the stable channel; a prerelease does not constitute platform qualification.
 
 ## Drift audit
 

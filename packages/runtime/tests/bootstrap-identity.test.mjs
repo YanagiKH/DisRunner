@@ -26,11 +26,25 @@ function copyFixture(directory) {
   const configPath = join(directory, 'discord-simulator.config.json');
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
   config.bot.name = 'Project name must not own bootstrap display';
+  config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds: [] };
+  config.bot.entryPoint = 'src/legacy-session-entry.mjs';
+  config.bot.startCommand = 'node src/legacy-session-entry.mjs';
   writeFileSync(configPath, JSON.stringify(config));
+  // Keep this transport oracle on the legacy profile without the example's v2 registration.
+  writeFileSync(
+    join(directory, 'src/legacy-session-entry.mjs'),
+    `import {createWebhookServer,loadServerOptionsFromEnvironment} from './server.mjs';
+const options=loadServerOptionsFromEnvironment();
+const server=createWebhookServer(options);
+server.listen(options.port,options.host);
+const shutdown=()=>{server.close(()=>{process.exitCode=0;});setTimeout(()=>server.closeAllConnections(),1000).unref();};
+process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
+`,
+  );
 
   const serverPath = join(directory, 'src/server.mjs');
   const source = readFileSync(serverPath, 'utf8');
-  const anchor = '        handleInteraction(sendAuthenticated, interaction);';
+  const anchor = '        void handleInteraction(sendAuthenticated, interaction, {';
   assert.equal(source.split(anchor).length, 2, 'one authenticated fixture handler insertion point');
   // Keep the fixture's signature gate and response peer authentication intact. Independently
   // reconstruct SPKI and verify original and byte-tampered messages, returning only safe facts.

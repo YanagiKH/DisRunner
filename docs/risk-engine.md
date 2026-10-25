@@ -1,12 +1,12 @@
 # Risk engine
 
-The v0.1 risk collector turns selected core/desktop evidence into findings. Its rule catalog is intentionally small. Absence of a finding does not prove that a bot is safe, correct, or production-ready.
+The risk collector turns selected core/runtime evidence into findings. Its rule catalog is intentionally small. Absence of a finding does not prove that a Bot is safe, correct, or production-ready.
 
 ## Finding shape
 
 Implemented findings contain a rule ID, severity, confidence, title, evidence, impact, and recommendation. Trace/event/source/reproduction/documentation/suppression/timestamp fields are optional and appear only when the emitting path supplies them.
 
-v0.1 does not implement a persistent baseline, suppression editor, owner/expiry policy, historical trend store, or automatic CI severity threshold. A CLI run fails for failed assertions; findings fail it only when the scenario asserts that the finding must be absent.
+Persistent baselines, suppression editing, owner/expiry policies, and historical trends are not available. Version 1 model runs fail for failed assertions; findings affect that verdict when assertions require them to be absent. Scenario v2 additionally enforces `policy.failOnSeverity`, defaulting to `high`. Expected request errors do not disable that independent policy. Unexpected structured SDK handler failures and incomplete evidence fail the run regardless of the chosen severity threshold.
 
 ## Implemented rule IDs
 
@@ -21,15 +21,14 @@ Rules listed elsewhere as design ideas—such as event-loop lag, memory growth, 
 
 ## Timing evidence
 
-Core interaction timing is evaluated from virtual receipt to a valid initial response. Trace analysis can flag an interaction span at or beyond the configured deadline and a bot-handler span above its blocking threshold. Electron `/ping` records host duration and runtime timeout evidence, but the desktop does not yet separate handler, queue, dependency, REST, delivery, and render spans end to end.
+Core model timing is evaluated from virtual receipt to a valid initial response. Trace analysis can flag an interaction span at or beyond the configured deadline and a bot-handler span above its blocking threshold. Real raw/SDK sessions use host time. Desktop does not separate handler, queue, dependency, REST, delivery, and render durations end to end.
 
-CPU, memory, event-loop, queue, and imported-process throughput measurements are planned. The current core performance suite is a deterministic workload guard, not host-process profiling.
+CPU, memory, event-loop, queue, and imported-process throughput are not profiled. The core performance suite is a deterministic workload guard, not host-process profiling.
 
 ## Reports and UI
 
-- JSON/HTML include current findings.
-- JUnit represents scenario/assertion outcomes.
-- SARIF converts current findings into result entries; source location exists only when the finding provides one.
-- Risk Center can display runtime findings in Electron. Its score trend, export, baseline, suppression, and historical workflows are preview-only.
+- Version 1 JSON/HTML include findings, JUnit represents assertion outcomes, and SARIF converts findings into results. Source locations exist only when supplied by the emitting rule.
+- Scenario v2 exports JSON/JUnit/HTML/SARIF with its actual assertion, runtime, severity-policy, and completeness verdicts; retained runtime findings are available in its snapshot.
+- Risk Center displays runtime findings in Electron. Historical scores, persistent baselines, and suppression workflows are not implemented.
 
 Recommendations should stay specific to collected evidence. New rules require a deterministic reproducer, negative case, severity rationale, bounded evidence, and a declaration of which layer—core, CLI, or Electron—emits them.

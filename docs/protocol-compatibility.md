@@ -1,54 +1,52 @@
 # Protocol compatibility
 
-DisRunner v0.1 implements selected Discord-shaped contracts for deterministic local tests. It does not claim full API, Gateway, SDK, or desktop-client parity.
+DisRunner's local profile uses Discord API v10 and a single-shard JSON Gateway. The same session state drives Desktop, CLI, REST, Gateway, and version 2 assertions. SDK support applies to the exact versions listed in [Compatibility](../COMPATIBILITY.md).
 
-## Evidence layers
+## Execution paths
 
-| Layer            | What v0.1 evidence covers                                                          |
-| ---------------- | ---------------------------------------------------------------------------------- |
-| Core/CLI         | In-process state, timing, interactions, selected REST/Gateway behavior, assertions |
-| Electron runtime | Raw-webhook lifecycle, signed requests, HMAC-authenticated responses, and `/ping`  |
-| Desktop renderer | Mainly seeded visual fixtures; only explicitly labeled runtime values are evidence |
+| Path                  | Behavior                                                                                                        |
+| --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Version 1 core model  | Virtual clock, controlled state and model actions; no imported Bot process                                      |
+| Raw webhook           | Separate process, Ed25519-signed requests, per-run response HMAC, actual callback observation                   |
+| JavaScript/Python SDK | Separate process with version-checked bootstrap, local REST/Gateway, normal SDK handlers/cache/collectors/Views |
+| Desktop               | Actions and views over the shared session; saved workspace resources and scenarios                              |
 
-A core unit test does not establish that the equivalent desktop/imported-bot path is connected.
+Request signing, raw peer authentication, interaction-token authorization, and synthetic Bot authorization are different protocol boundaries. An accepted TCP connection alone does not establish Bot readiness or a valid callback.
 
 ## Timing contracts
 
-- Core simulation profile: initial interaction response deadline `3,000 ms` under virtual time.
-- Core interaction token lifetime: `900,000 ms` from receipt under virtual time.
-- CLI scenarios can exercise exact virtual-time boundaries when represented by supported actions.
-- Electron raw-webhook invocation uses a 3-second host-time abort. It does not expose a controllable 15-minute desktop token lifecycle.
-- UI render timing is not bot-handler, network, or core virtual time.
+The model accepts an initial callback at 2,999 ms and rejects it at 3,000 ms. Its token is valid at 899,999 ms and expired at 900,000 ms. Version 1 tests can exercise those exact virtual boundaries.
 
-## Receive paths
+Real Bot sessions use a realtime clock and separate host deadlines/cancellation. SDK timers are not accelerated. A deferred response acknowledges the interaction; completing the original response, fetching it, and sending a followup remain separate operations. UI animation and rendering duration are not handler or transport duration.
 
-- **Core Gateway:** partial lifecycle and dispatch/intent primitives, plus a local WebSocket transport. Desktop fixtures are not bootstrapped or synchronized as a supported imported-bot environment.
-- **Raw interaction webhook:** Ed25519-signed local HTTP request with body/timestamp/replay controls, followed by per-run HMAC verification of the response status and exact bytes before callback validation. Transport peer authentication and Discord-shaped callback validation are distinct failure stages. This is the supported Electron adapter in v0.1.
-- **Core REST:** partial local routes for gateway discovery, bot user, guild/channel/message resources, interaction callbacks, and follow-ups. Application-command registration is available only through the explicit [core registry profile](application-command-registry.md), not the default/shared runtime; many Discord routes remain absent.
+## Receive paths and state
 
-These paths have different authentication, retry, state, and failure semantics and must not be treated as interchangeable.
+Gateway bootstrap supplies the selected Bot/application and fixture guild/channel/role/member data through READY and GUILD_CREATE. Requested intents are validated against known bits and the local privileged-intent allowlist. MESSAGE_CONTENT filtering distinguishes guild messages, mentions, DMs, and own messages. Reconnect/resume uses the actual dynamic URL and bounded retained sequence history.
 
-## Strict and lenient behavior
+REST supports discovery, bootstrap identities, command registration, the declared resource/message operations, interaction callback, original/followup routes, and bounded local attachments. Messages use one authoritative state model. Public committed messages can emit Gateway events; ephemeral messages remain actor/token-bound and do not broadcast to the guild.
 
-Strict/lenient handling is currently local to the parser or validator being exercised:
+PATCH preserves omitted fields, distinguishes explicit clearing, and does not revive deleted messages. Routes validate resource/message/application ownership and token expiry before accepting mutation. See [REST emulator](rest-emulator.md) and [Interaction engine](interaction-engine.md) for exact profiles and errors.
 
-- invalid interaction lifecycle transitions still fail;
-- selected REST message validation can reject in strict mode or return validator warnings in lenient mode;
-- lenient REST warnings are not yet propagated consistently to reports or desktop UI;
-- scenario parsing normalizes supported fields and does not promise preservation of unknown fields.
+## Configuration and payload validation
 
-Do not use `mode: lenient` as a security bypass or assume it turns permission/timing failures into success.
+Project configuration, workspace envelopes, and scenario actions reject unknown closed fields. Resource payloads and protocol extension fields follow their specific validators. Version 2 does not accept model actions that directly specify a fabricated Bot response.
 
-## Saved-format status
+Strict/lenient mode applies to the selected payload validators. It does not disable authentication, change legal callback transitions, grant permissions, or extend token lifetimes. Unlisted routes and unsupported fields do not receive empty success responses.
 
-CLI recording files have an explicit kind and format version and are verified during replay. Scenario version 1 and the project config version are explicit. Raw report/trace/snapshot envelopes do not all carry a public format version in v0.1; treat them as Preview formats and pin the DisRunner version that produced them.
+## Commands and components
+
+`command-registry-v1` preserves the earlier restricted registration contract. `command-registry-v2` supports the documented typed options, nested subcommands, choices, autocomplete and context-command subset. SDK projects select v2 by default; raw projects opt in explicitly.
+
+Legacy message buttons/selects and text-input modals use real interaction payloads and the SDK dispatch pipeline. Disabled/link buttons do not produce component interactions, and cancelling a modal does not produce a submission. Components V2, new modal controls, and user-installed command contexts are outside this profile.
+
+## Saved formats and results
+
+Project configs and workspaces use version 1 envelopes. Version 1 scenarios retain model semantics; [version 2](scenario-v2.md) explicitly selects a real Bot and realtime clock. Recordings carry their own format version. Version 2 reports identify run ID, adapter, normalized scenario hash, completeness, and fault receipts.
+
+Version 2 returns 0 for pass, 1 for behavior failure, 2 for invalid/unsupported input, 3 for runtime/cleanup/output failure, 130 for SIGINT cancellation, and 143 for SIGTERM cancellation. Expected negative behavior requires an explicit assertion; an unconsumed error or unused declared fault cannot be silently treated as success.
 
 ## Drift management
 
-1. Reduce drift to a minimal anonymized public-contract fixture.
-2. Add a contract test at the affected layer.
-3. Document the old/new behavior and whether desktop wiring is included.
-4. Provide migration handling before promoting a saved format to stable.
-5. Update [COMPATIBILITY.md](../COMPATIBILITY.md) and the changelog.
+Reduce a discrepancy to a redacted fixture and record the DisRunner, SDK, and interpreter versions. Add a check at the affected transport/state/UI boundary and update the documented profile before expanding support. A core unit test alone does not establish an installed desktop or SDK path.
 
-Latency, CDN behavior, regional routing, platform incidents, anti-abuse systems, undocumented rendering, and rollout differences are not reproduced. Voice transport/audio/encryption is out of scope. See [Known limitations](limitations.md).
+Regional routing, CDN behavior, anti-abuse systems, platform incidents, arbitrary process timing, voice systems, and undocumented client behavior are not reproduced.

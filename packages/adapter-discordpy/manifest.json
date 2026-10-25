@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "discord.py",
+  "sdk": "discord.py",
+  "sdkVersion": "2.6.4",
+  "runtime": "python",
+  "runtimeMajor": 3,
+  "runtimeMinor": 12,
+  "clock": "realtime",
+  "transport": "gateway-json-api-v10",
+  "readiness": "DISRUNNER_ADAPTER_READY"
+}

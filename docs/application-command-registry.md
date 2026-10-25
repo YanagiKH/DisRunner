@@ -1,8 +1,8 @@
 # Application command registry
 
-`command-registry-v1` is an explicit REST opt-in for local application-command registration. It stores global and guild commands in `VirtualState`; it does not invoke them. Its Discord-shaped responses are a bounded simulator contract, not complete Discord API parity.
+The local registry stores global and guild commands in the shared `VirtualState`. `command-registry-v1` preserves the earlier restricted payload contract; `command-registry-v2` adds the command/option profile used by supported SDKs. Registration stays local and does not publish commands to Discord.
 
-The shared runtime used by Desktop and CLI `bot-test` supports this profile through optional project configuration. It remains disabled by default, with no SDK registration integration or Command Explorer wiring. Registration emits no Gateway command events. Existing interaction execution is a separate surface; registering a command does not connect it to a handler.
+Desktop and CLI use the same registry. Raw-webhook projects enable it explicitly. SDK projects default to v2 for global commands and loaded guilds, allowing `commands.set` and `CommandTree.sync` through the real SDK. Command Explorer reads current registration, and the action driver validates invocation options against those definitions. Registration itself emits no Gateway command event and does not execute a handler.
 
 ## Project enablement and raw-Bot registration
 
@@ -17,9 +17,9 @@ Add this descriptor inside the existing `profile` in `discord-simulator.config.j
 }
 ```
 
-This is a profile fragment, not a complete project. Guild `1000` must exist in the loaded guild fixture. Use `guildIds: []` for global-only registration, which needs no guild fixture. Omit `commandRegistry` to disable it; `null`, booleans and implicit defaults are not supported. See [project configuration](project-configuration.md#command-registry-opt-in) for validation and fixture requirements.
+This is a profile fragment, not a complete project. Guild `1000` must exist in the loaded guild fixture. Use `guildIds: []` for global-only registration, which needs no guild fixture. For a raw project, omit `commandRegistry` to disable it; `null` and booleans are not descriptors. SDK projects use the v2 default when omitted. See [project configuration](project-configuration.md#command-registry-opt-in) for validation and fixture requirements.
 
-The setting is independent of `profile.mode` and `profile.ordinaryMessagePermissions`. It does not install the bot into every fixture guild or infer installation from membership or permissions. `raw-interaction-webhook` remains the only supported adapter, and the existing signed readiness and response-authentication requirements still apply.
+The setting is independent of `profile.mode` and `profile.ordinaryMessagePermissions`. It does not install the bot into every fixture guild or infer installation from membership or permissions. Raw-webhook projects retain signed readiness and response authentication; the supported SDK adapters use Gateway interactions.
 
 The supervised child uses the existing `DISCORD_API_BASE_URL` and `DISRUNNER_FAKE_TOKEN` environment values. Discover the authoritative application ID with authenticated `GET /oauth2/applications/@me`, then use that ID in registration routes. For example, this code runs inside the supervised Node raw-webhook process; it is not a standalone adapter:
 
@@ -40,6 +40,14 @@ if (!registration.ok) throw new Error('Local command registration failed.');
 ```
 
 Do not supply a production credential, invent an application-ID environment variable, or use a fixture user/bot ID as the application ID. Runtime REST uses the same per-run bootstrap application identity as Gateway READY and signed interactions. A valid authenticated registry route without the opt-in returns `501` with `Command registry profile is not enabled.`
+
+## Version 2 command profile
+
+Choose `"profile": "command-registry-v2"` in the same descriptor to enable typed slash options (string, integer, boolean, user, channel, role, mentionable, number, and local attachment), subcommands/groups, required options, choices, autocomplete definitions, and user/message context commands. Supported SDK registration fields are validated rather than silently dropped. Command option trees and payload sizes are bounded. User-installed contexts, Components V2, commerce, and unlisted fields remain unsupported.
+
+SDK registration/sync runs over the local REST service; command invocation still arrives through the normal SDK interaction pipeline. The action driver supplies resolved local users, roles, channels, messages, and attachments and rejects unknown option names or incorrect types. See [SDK adapters](sdk-adapters.md) and [Scenario v2](scenario-v2.md).
+
+The detailed empty-options payload/response catalog below describes v1 where labeled; it is retained for existing integrations. Shared identity, route, atomic replacement, and capacity rules also apply to v2.
 
 ## Core enablement and identity
 
@@ -121,7 +129,7 @@ Nonempty options are unsupported regardless of their contents. Choices, subcomma
 
 Core inputs must be descriptor-inspectable plain JSON records/arrays. Proxies, accessors, symbols, custom prototypes, inherited payload fields, cycles, repeated object references, sparse arrays, pollution keys, and excessive nesting are rejected without invoking caller getters or Proxy traps. Inspection is bounded to depth 16, 8,192 visited values, arrays of at most 1,024 entries, and 64 KiB of string data. These are input safety bounds, not support for recursive command options.
 
-## Canonical responses
+## Legacy v1 canonical responses
 
 Every command contains exactly these common wire fields:
 

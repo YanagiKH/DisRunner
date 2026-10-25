@@ -24,6 +24,7 @@ interface TopBarProps {
   readonly startButtonRef?: Ref<HTMLButtonElement>;
   readonly stopButtonRef?: Ref<HTMLButtonElement>;
   readonly closeButtonRef?: Ref<HTMLButtonElement>;
+  readonly runtime?: DisRunnerRuntimeState | undefined;
 }
 
 export function TopBar({
@@ -35,6 +36,7 @@ export function TopBar({
   startButtonRef,
   stopButtonRef,
   closeButtonRef,
+  runtime,
 }: TopBarProps) {
   const desktop = window.disrunnerDesktop !== undefined;
   const controlWindow = (action: 'minimize' | 'maximize' | 'close') => {
@@ -57,7 +59,7 @@ export function TopBar({
       <div className="brand-lockup" aria-label="DisRunner">
         <BrandMark className="brand-mark" size={30} />
         <strong>DisRunner</strong>
-        <span className="preview-label">Visual preview shell</span>
+        <span className="preview-label">{desktop ? 'Offline' : 'Visual preview shell'}</span>
       </div>
       <div className="top-divider" />
       <button className="workspace-switcher" disabled type="button">
@@ -71,14 +73,22 @@ export function TopBar({
       </div>
       <button className="mode-control" disabled type="button">
         <ShieldCheck size={16} />
-        <span>Profile preview · Strict</span>
+        <span>
+          {desktop ? `Profile · ${runtime?.project?.mode ?? 'strict'}` : 'Profile preview · Strict'}
+        </span>
       </button>
-      <div className="seed-control" title="Sample deterministic random seed">
-        Sample seed 42042
+      <div
+        className="seed-control"
+        title={desktop ? 'Simulation seed' : 'Sample deterministic random seed'}
+      >
+        {desktop ? `Seed ${runtime?.project?.seed ?? '—'}` : 'Sample seed 42042'}
       </div>
-      <div className="virtual-clock" aria-label="Sample virtual time controls">
-        <span>Sample time</span>
-        <output>12:34:56</output>
+      <div
+        className="virtual-clock"
+        aria-label={desktop ? 'Bot clock' : 'Sample virtual time controls'}
+      >
+        <span>{desktop ? 'Clock' : 'Sample time'}</span>
+        <output>{desktop ? 'Realtime' : '12:34:56'}</output>
         <button aria-label="Virtual time playback unavailable" disabled type="button">
           <Play fill="currentColor" size={16} />
         </button>

@@ -54,6 +54,27 @@ export interface BotRunnerOptions {
   readonly onOutput?: (entry: BotProcessOutput) => void;
 }
 
+export interface BotOutputEvidence {
+  /** UTF-8 bytes received from the decoded stdout/stderr streams. */
+  readonly receivedBytes: number;
+  readonly recordedEntries: number;
+  readonly retainedEntries: number;
+  readonly retainedBytes: number;
+  readonly evictedEntries: number;
+  /** Bytes of redacted entries removed from the retained history. */
+  readonly evictedBytes: number;
+  readonly truncatedLines: number;
+  /** Decoded bytes drained after an oversized line's first truncated entry. */
+  readonly discardedBytes: number;
+  /** Decoded source bytes omitted by string/line limits before entries enter history. */
+  readonly clippedBytes: number;
+  readonly redactionTruncatedEntries: number;
+  readonly observerFailures: number;
+  readonly complete: boolean;
+}
+
+const OUTPUT_REDACTION_LIMIT_CHARACTERS = 100_000;
+
 export class BotRunner {
   readonly #now: () => number;
   readonly #maxOutputEntries: number;
@@ -67,6 +88,15 @@ export class BotRunner {
       stderr: { text: '', dropping: false },
     };
   #outputBytes = 0;
+  #receivedBytes = 0;
+  #recordedEntries = 0;
+  #evictedEntries = 0;
+  #evictedBytes = 0;
+  #truncatedLines = 0;
+  #discardedBytes = 0;
+  #clippedBytes = 0;
+  #redactionTruncatedEntries = 0;
+  #observerFailures = 0;
   #outputCallbackEnabled = true;
   #sensitiveValues: readonly string[] = [];
   #child: ChildProcessWithoutNullStreams | undefined;
@@ -163,6 +193,15 @@ export class BotRunner {
     this.#status = 'starting';
     this.#output.length = 0;
     this.#outputBytes = 0;
+    this.#receivedBytes = 0;
+    this.#recordedEntries = 0;
+    this.#evictedEntries = 0;
+    this.#evictedBytes = 0;
+    this.#truncatedLines = 0;
+    this.#discardedBytes = 0;
+    this.#clippedBytes = 0;
+    this.#redactionTruncatedEntries = 0;
+    this.#observerFailures = 0;
     this.#outputCallbackEnabled = true;
     this.#pendingOutput.stdout = { text: '', dropping: false };
     this.#pendingOutput.stderr = { text: '', dropping: false };
@@ -171,6 +210,13 @@ export class BotRunner {
     this.#exitCode = undefined;
     this.#signal = undefined;
     this.#sensitiveValues = [
+      ...Object.entries(config.env ?? {})
+        .filter(([key]) =>
+          /(?:^|_)(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY|ACCESS_KEY|AUTHORIZATION|CREDENTIAL)$/iu.test(
+            key,
+          ),
+        )
+        .flatMap(([, value]) => (typeof value === 'string' && value !== '' ? [value] : [])),
       fakeToken,
       ...(interactionPeerSecret === undefined ? [] : [interactionPeerSecret]),
     ];
@@ -303,6 +349,28 @@ export class BotRunner {
     };
   }
 
+  /** Capture completeness for the current run; reading snapshots does not change it. */
+  public evidence(): BotOutputEvidence {
+    return {
+      receivedBytes: this.#receivedBytes,
+      recordedEntries: this.#recordedEntries,
+      retainedEntries: this.#output.length,
+      retainedBytes: this.#outputBytes,
+      evictedEntries: this.#evictedEntries,
+      evictedBytes: this.#evictedBytes,
+      truncatedLines: this.#truncatedLines,
+      discardedBytes: this.#discardedBytes,
+      clippedBytes: this.#clippedBytes,
+      redactionTruncatedEntries: this.#redactionTruncatedEntries,
+      observerFailures: this.#observerFailures,
+      complete:
+        this.#evictedEntries === 0 &&
+        this.#truncatedLines === 0 &&
+        this.#redactionTruncatedEntries === 0 &&
+        this.#observerFailures === 0,
+    };
+  }
+
   /** Non-mutating supervision observation; snapshot stays event-driven until Node reaps the child. */
   public observeExit(): 'alive' | 'exited' | 'unknown' {
     const child = this.#child;
@@ -407,19 +475,20 @@ export class BotRunner {
   }
 
   #consumeOutput(stream: BotProcessOutput['stream'], raw: string): void {
+    this.#receivedBytes += Buffer.byteLength(raw);
     const pending = this.#pendingOutput[stream];
     let input = raw;
     while (input.length > 0) {
       const newline = input.indexOf('\n');
       const part = newline < 0 ? input : input.slice(0, newline + 1);
       input = newline < 0 ? '' : input.slice(newline + 1);
+      if (pending.dropping) this.#discardedBytes += Buffer.byteLength(part);
       if (!pending.dropping) pending.text += part;
       if (!pending.dropping && Buffer.byteLength(pending.text) > this.#maxOutputLineBytes) {
-        const redacted = redactString(pending.text, { sensitiveValues: this.#sensitiveValues });
-        this.#recordOutput(
-          stream,
-          `${truncateUtf8(redacted, this.#maxOutputLineBytes)}…[TRUNCATED]\n`,
-        );
+        this.#truncatedLines += 1;
+        // A later chunk may complete a secret already present in this prefix.
+        this.#clippedBytes += Buffer.byteLength(pending.text);
+        this.#recordOutput(stream, '[TRUNCATED]\n', true);
         pending.text = '';
         pending.dropping = newline < 0;
       } else if (newline >= 0) {
@@ -437,14 +506,31 @@ export class BotRunner {
     pending.dropping = false;
   }
 
-  #recordOutput(stream: BotProcessOutput['stream'], raw: string): void {
-    const text = redactString(raw, { sensitiveValues: this.#sensitiveValues });
+  #redactOutput(raw: string): string {
+    if (raw.length > OUTPUT_REDACTION_LIMIT_CHARACTERS) {
+      this.#redactionTruncatedEntries += 1;
+      this.#clippedBytes += Buffer.byteLength(raw.slice(OUTPUT_REDACTION_LIMIT_CHARACTERS));
+    }
+    const redacted = redactString(raw, {
+      sensitiveValues: this.#sensitiveValues,
+      maxStringLength: OUTPUT_REDACTION_LIMIT_CHARACTERS,
+    });
+    if (redacted === '[REDACTION_SENSITIVE_VALUES_LIMIT]') {
+      if (raw.length <= OUTPUT_REDACTION_LIMIT_CHARACTERS) this.#redactionTruncatedEntries += 1;
+      this.#clippedBytes += Buffer.byteLength(raw.slice(0, OUTPUT_REDACTION_LIMIT_CHARACTERS));
+    }
+    return redacted;
+  }
+
+  #recordOutput(stream: BotProcessOutput['stream'], raw: string, sanitized = false): void {
+    const text = sanitized ? raw : this.#redactOutput(raw);
     const entry: BotProcessOutput = { stream, text, atMs: this.#now() };
     this.#appendOutput(entry);
     if (!this.#outputCallbackEnabled || this.#onOutput === undefined) return;
     try {
       this.#onOutput({ ...entry });
     } catch {
+      this.#observerFailures += 1;
       this.#outputCallbackEnabled = false;
       this.#appendOutput({
         stream: 'stderr',
@@ -455,6 +541,7 @@ export class BotRunner {
   }
 
   #appendOutput(entry: BotProcessOutput): void {
+    this.#recordedEntries += 1;
     const entryBytes = Buffer.byteLength(entry.text);
     this.#output.push(entry);
     this.#outputBytes += entryBytes;
@@ -463,7 +550,12 @@ export class BotRunner {
       (this.#output.length > this.#maxOutputEntries || this.#outputBytes > this.#maxOutputBytes)
     ) {
       const removed = this.#output.shift();
-      if (removed !== undefined) this.#outputBytes -= Buffer.byteLength(removed.text);
+      if (removed !== undefined) {
+        const removedBytes = Buffer.byteLength(removed.text);
+        this.#outputBytes -= removedBytes;
+        this.#evictedEntries += 1;
+        this.#evictedBytes += removedBytes;
+      }
     }
   }
 }
@@ -659,15 +751,6 @@ function boundedEnvironmentEntries(
     output.push([name, entryValue]);
   }
   return output;
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
-  const buffer = Buffer.from(value);
-  if (buffer.byteLength <= maxBytes) return value;
-  return buffer
-    .subarray(0, maxBytes)
-    .toString('utf8')
-    .replace(/\uFFFD$/, '');
 }
 
 function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {

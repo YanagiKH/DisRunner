@@ -423,7 +423,7 @@ async function gui() {
       asarSha256: await digest(packageIdentity.appPath),
     });
     const visibleMessageContents = () =>
-      page.locator('.chat-message:visible .message-content').allTextContents();
+      page.locator('.chat-message:not(.ephemeral):visible .message-content').allTextContents();
     async function visibleInspector(check) {
       const expand = page.getByRole('button', { name: 'Expand inspector', exact: true });
       const restoreCollapsed = (await expand.count()) === 1;
@@ -636,7 +636,7 @@ async function gui() {
                 `.chat-message[data-message-id="${reachabilityMessageId}"] .message-content`,
               ),
             ],
-        ['composer', page.getByRole('textbox', { name: 'Message #2001', exact: true })],
+        ['composer', page.locator('.composer input')],
       ];
       if (await page.locator('#invocation-unavailable').count())
         targets.push(['explanation', page.locator('#invocation-unavailable')]);
@@ -877,7 +877,7 @@ async function gui() {
       }
     }
     async function inspectorUx(label) {
-      const composer = page.getByRole('textbox', { name: 'Message #2001', exact: true });
+      const composer = page.locator('.composer input');
       await composer.fill('');
       assert.equal(await control('Send local event').isDisabled(), true);
       // Diagnostic checks can leave focus inside the wide inspector. Compact resizing
@@ -1045,8 +1045,7 @@ async function gui() {
         dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selected] });
       }, directory);
       await page.keyboard.press('Alt+Digit6');
-      await page.getByRole('button', { name: 'Runtime paths', exact: true }).click();
-      await page.getByRole('button', { name: 'Browse', exact: true }).click();
+      await page.getByRole('button', { name: 'Browse folders', exact: true }).click();
       await until(
         async () => (await snapshot()).phase === (invalid ? 'error' : 'ready'),
         'UI project selection',
@@ -1064,7 +1063,7 @@ async function gui() {
         [],
         'project selection clears retained feed',
       );
-      const first = page.getByRole('button', { name: '2000', exact: true });
+      const first = page.locator('.channel-row[data-channel-id="2000"]');
       if (await first.count()) await first.click();
     }
     async function start() {
@@ -1084,8 +1083,8 @@ async function gui() {
       return state;
     }
     async function send(command = '/ping') {
-      await page.getByRole('button', { name: '2001', exact: true }).click();
-      const composer = page.getByRole('textbox', { name: 'Message #2001', exact: true });
+      await page.locator('.channel-row[data-channel-id="2001"]').click();
+      const composer = page.locator('.composer input');
       await composer.fill(command);
       await composer.press('Enter');
     }
@@ -1113,7 +1112,7 @@ async function gui() {
       await select(directory, '3000');
       if (mode === 'normal') await compact(() => contrast('Start bot', 'ux-start'));
       if (mode === 'exit-startup-0')
-        await page.getByRole('button', { name: '2001', exact: true }).click();
+        await page.locator('.channel-row[data-channel-id="2001"]').click();
       if (mode.startsWith('exit-startup-')) {
         await page.getByRole('button', { name: 'Start bot', exact: true }).click();
         await until(async () => (await snapshot()).phase === 'error', 'pre-ready exit');
@@ -1136,13 +1135,13 @@ async function gui() {
           'signed UI command',
         );
         if (mode === 'delayed-reply') {
-          await page.getByRole('button', { name: '2000', exact: true }).click();
+          await page.locator('.channel-row[data-channel-id="2000"]').click();
           await until(
             async () => (await trace(directory)).some((event) => event.event === 'callback'),
             'delayed callback',
           );
           assert.deepEqual(await visibleMessageContents(), []);
-          await page.getByRole('button', { name: '2001', exact: true }).click();
+          await page.locator('.channel-row[data-channel-id="2001"]').click();
           // Completion was observed in the real child's trace before switching back.
           // Returning to the old context must not restore its discarded diagnostics.
           await expectNoDiagnostics();
@@ -1238,7 +1237,7 @@ async function gui() {
     await select(nextProject, '3001');
     const next = await start();
     assert.notEqual(next.runId, old.runId);
-    await page.getByRole('button', { name: '2001', exact: true }).click();
+    await page.locator('.channel-row[data-channel-id="2001"]').click();
     await new Promise((resolve) => setTimeout(resolve, 1000));
     assert.deepEqual(
       await visibleMessageContents(),
@@ -1263,7 +1262,7 @@ async function gui() {
     // Original raw example is a separate unchanged project, not copied/mutated source.
     await select(path.join(root, 'examples/raw-webhook-bot'), '3000');
     await start();
-    const composer = page.getByRole('textbox', { name: 'Message #2000', exact: true });
+    const composer = page.locator('.composer input');
     await composer.fill('/ping');
     await composer.press('Enter');
     await expectDiagnostic('Pong! Offline and deterministic.', '3000', '2000');
@@ -1368,9 +1367,7 @@ async function gui() {
       assert.ok(
         (
           await page.getByRole('status', { name: 'Live message feed status' }).textContent()
-        ).includes(
-          'Live messages · truncated retained snapshot. Missing messages are not evidence of deletion.',
-        ),
+        ).includes('Showing the latest messages. Earlier messages may be omitted.'),
       );
       assert.ok(after.revision > before.revision, 'Session publication revision advances');
       assert.ok(
@@ -1410,14 +1407,14 @@ async function gui() {
     const liveRun = await start();
     await expectNoDiagnostics();
     const createdId = await ordinaryOperation(liveProject, 'create', 'G1 public message created.');
-    await page.getByRole('button', { name: '2000', exact: true }).click();
+    await page.locator('.channel-row[data-channel-id="2000"]').click();
     assert.deepEqual(
       await visibleMessageContents(),
       [],
       'other channel excludes the real ordinary row',
     );
     await expectNoDiagnostics();
-    await page.getByRole('button', { name: '2001', exact: true }).click();
+    await page.locator('.channel-row[data-channel-id="2001"]').click();
     assert.deepEqual(await visibleMessageContents(), ['G1 public message created.']);
     await expectNoDiagnostics();
     reachabilityMessageId = createdId;

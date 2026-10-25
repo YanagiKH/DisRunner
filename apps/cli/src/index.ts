@@ -1,8 +1,17 @@
 #!/usr/bin/env node
-import { open, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { open, realpath, rename, unlink } from 'node:fs/promises';
+import { dirname, basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseScenario, runScenario, sanitizeScenarioRunResult } from '@disrunner/core';
+import {
+  parseBotScenarioV2,
+  runBotScenarioV2,
+  renderBotScenarioV2Report,
+  scenarioVersion,
+  createReproductionBundle,
+  type BotScenarioV2Result,
+} from '@disrunner/runtime';
 import { runBotTest } from './bot-test.js';
 import { demoScenario } from './demo.js';
 import { sanitizeOutputText, stringifyForExport } from './output.js';
@@ -13,7 +22,16 @@ const MAX_INPUT_BYTES = 16 * 1_024 * 1_024;
 
 interface CliOptions {
   readonly command:
-    'bot-test' | 'demo' | 'run' | 'test' | 'validate' | 'report' | 'record' | 'replay' | 'help';
+    | 'bot-test'
+    | 'demo'
+    | 'run'
+    | 'test'
+    | 'validate'
+    | 'report'
+    | 'record'
+    | 'replay'
+    | 'repro'
+    | 'help';
   readonly file?: string;
   readonly format: ReportFormat;
   readonly formatSpecified: boolean;
@@ -37,9 +55,11 @@ Usage:
   disrunner report <scenario.yml> --format html|json|junit|sarif --out path [--seed number]
   disrunner record <scenario.yml> --out recording.json [--seed number]
   disrunner replay <recording.json> [--out verification.json]
+  disrunner repro <scenario.yml> --out bundle.json
 
-All simulation commands run offline. Assertion or replay mismatches exit with code 1;
-invalid arguments, files, scenarios, or recording formats exit with code 2.
+Version 1 scenarios use the virtual model. Version 2 runs the configured real Bot.
+Assertion or replay mismatches exit 1; invalid input exits 2. Version 2 runtime
+failures exit 3, SIGINT exits 130, and SIGTERM exits 143 after cleanup.
 `;
 }
 
@@ -47,6 +67,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   const normalizedArgv = argv[0] === '--' ? argv.slice(1) : argv;
   const [rawCommand = 'help', ...rest] = normalizedArgv;
   if (rawCommand === 'bot-test') return parseBotTestArgs(rest);
+  if (rawCommand === 'repro') return parseReproArgs(rest);
   const allowed = new Set([
     'demo',
     'run',
@@ -55,6 +76,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     'report',
     'record',
     'replay',
+    'repro',
     'help',
   ]);
   if (!allowed.has(rawCommand)) throw new Error(`Unknown command: ${rawCommand}`);
@@ -107,6 +129,15 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   };
   validateCommandOptions(options);
   return options;
+}
+
+function parseReproArgs(argv: readonly string[]): CliOptions {
+  const [file, flag, output, ...extra] = argv;
+  if (!file || file.startsWith('-')) throw new Error('repro requires a version 2 scenario file');
+  if (flag !== '--out' || !output || output.startsWith('-') || extra.length > 0)
+    throw new Error('repro requires exactly one --out path and accepts no other options');
+  assertDistinctPaths(file, output);
+  return { command: 'repro', file, output, format: 'json', formatSpecified: false };
 }
 
 function parseBotTestArgs(argv: readonly string[]): CliOptions {
@@ -219,6 +250,50 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         assertDistinctPaths(file, output);
         return await runAndRender(await readInputFile(file), options);
       }
+      case 'repro': {
+        const file = requireFile(options);
+        const output = requireOutput(options);
+        assertDistinctPaths(file, output);
+        let outputIdentity: string;
+        try {
+          outputIdentity = await realpath(resolve(output));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          outputIdentity = resolve(output);
+        }
+        assertDistinctPaths(await realpath(resolve(file)), outputIdentity);
+        const source = await readInputFile(file);
+        const scenario = parseBotScenarioV2(source);
+        const result = await runV2(source, options);
+        let contents: string;
+        try {
+          const project = resolve(dirname(resolve(file)), scenario.execution.project);
+          const projectRoot =
+            basename(project) === 'discord-simulator.config.json' ? dirname(project) : project;
+          const bundle = await createReproductionBundle(projectRoot, source, result);
+          contents = `${JSON.stringify(bundle, null, 2)}\n`;
+        } catch (error) {
+          writeStderr(
+            `Reproduction bundle could not be created: ${errorMessage(error, 'Export failed')}\n`,
+          );
+          return result.status === 'cancelled'
+            ? result.exitCode
+            : result.status === 'invalid'
+              ? 2
+              : 3;
+        }
+        try {
+          // The runtime has already redacted and hashed this object. Preserve those bytes.
+          await writeAtomicResult(output, contents);
+          writeStdout(`Wrote ${resolve(output)}\n`);
+        } catch (error) {
+          writeStderr(
+            `Reproduction bundle could not be saved: ${errorMessage(error, 'Output failed')}\n`,
+          );
+          return result.status === 'cancelled' ? result.exitCode : 3;
+        }
+        return result.exitCode;
+      }
       case 'record': {
         const file = requireFile(options);
         const output = requireOutput(options);
@@ -250,6 +325,16 @@ async function runAndRender(source: string, options: CliOptions): Promise<number
   if (options.file !== undefined && options.output !== undefined) {
     assertDistinctPaths(options.file, options.output);
   }
+  if (scenarioVersion(source) === 2) {
+    const result = await runV2(source, options);
+    try {
+      await writeResult(options.output, renderBotScenarioV2Report(result, options.format));
+    } catch (error) {
+      writeStderr(`Report could not be saved: ${errorMessage(error, 'Output failed')}\n`);
+      return result.status === 'cancelled' ? result.exitCode : 3;
+    }
+    return result.exitCode;
+  }
   const result = sanitizeScenarioRunResult(
     await runScenario(
       source,
@@ -261,6 +346,20 @@ async function runAndRender(source: string, options: CliOptions): Promise<number
 }
 
 async function runTests(source: string, options: CliOptions): Promise<number> {
+  if (scenarioVersion(source) === 2) {
+    const result = await runV2(source, options);
+    const passed = result.assertions.filter((assertion) => assertion.passed).length;
+    writeStdout(
+      `${result.status === 'passed' ? 'PASS' : 'FAIL'} ${result.name} — ${passed}/${result.assertions.length} assertions · real Bot\n`,
+    );
+    for (const assertion of result.assertions)
+      writeStdout(
+        `${assertion.passed ? 'PASS' : 'FAIL'} ${assertion.description}: ${assertion.message}\n`,
+      );
+    for (const issue of [...result.issues, ...result.cleanupErrors])
+      writeStderr(`${issue.code}: ${issue.message}\n`);
+    return result.exitCode;
+  }
   const scenario = parseScenario(source);
   const result = sanitizeScenarioRunResult(
     await runScenario(
@@ -281,6 +380,11 @@ async function runTests(source: string, options: CliOptions): Promise<number> {
 }
 
 function validateScenario(source: string): number {
+  if (scenarioVersion(source) === 2) {
+    const scenario = parseBotScenarioV2(source);
+    writeStdout(`Valid Bot scenario v2: ${scenario.name}\n`);
+    return 0;
+  }
   const scenario = parseScenario(source);
   writeStdout(`Valid scenario: ${scenario.name}\n`);
   return 0;
@@ -312,8 +416,54 @@ async function writeResult(output: string | undefined, contents: string): Promis
     return;
   }
   const outputPath = resolve(output);
-  await writeFile(outputPath, safeContents, { encoding: 'utf8', flag: 'w' });
+  await writeAtomicResult(outputPath, safeContents);
   writeStdout(`Wrote ${outputPath}\n`);
+}
+
+async function writeAtomicResult(output: string, contents: string): Promise<void> {
+  const outputPath = resolve(output);
+  const temporary = join(dirname(outputPath), `.${basename(outputPath)}.${randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await open(temporary, 'wx', 0o600);
+    await handle.writeFile(contents, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporary, outputPath);
+  } finally {
+    await handle?.close();
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+async function runV2(source: string, options: CliOptions): Promise<BotScenarioV2Result> {
+  if (options.seed !== undefined)
+    throw new TypeError('Version 2 uses the project seed; --seed applies only to model scenarios.');
+  const controller = new AbortController();
+  let cancellationExitCode: 130 | 143 = 130;
+  const interrupt = (): void => {
+    cancellationExitCode = 130;
+    controller.abort();
+  };
+  const terminate = (): void => {
+    cancellationExitCode = 143;
+    controller.abort();
+  };
+  process.on('SIGINT', interrupt);
+  process.on('SIGTERM', terminate);
+  try {
+    return await runBotScenarioV2(source, {
+      baseDirectory: dirname(resolve(requireFile(options))),
+      signal: controller.signal,
+      get cancellationExitCode() {
+        return cancellationExitCode;
+      },
+    });
+  } finally {
+    process.off('SIGINT', interrupt);
+    process.off('SIGTERM', terminate);
+  }
 }
 
 function validateCommandOptions(options: CliOptions): void {
@@ -323,6 +473,7 @@ function validateCommandOptions(options: CliOptions): void {
     'report',
     'record',
     'replay',
+    'repro',
   ]);
   if (requireScenarioFile.has(options.command) && options.file === undefined) {
     throw new Error(`${options.command} requires an input file`);
@@ -331,7 +482,7 @@ function validateCommandOptions(options: CliOptions): void {
     throw new Error(`${options.command} does not accept an input file`);
   }
   if (
-    (options.command === 'report' || options.command === 'record') &&
+    (options.command === 'report' || options.command === 'record' || options.command === 'repro') &&
     options.output === undefined
   ) {
     throw new Error(`${options.command} requires --out`);
@@ -344,6 +495,7 @@ function validateCommandOptions(options: CliOptions): void {
       options.command === 'validate' ||
       options.command === 'record' ||
       options.command === 'replay' ||
+      options.command === 'repro' ||
       options.command === 'help') &&
     options.formatSpecified
   ) {
@@ -359,6 +511,7 @@ function validateCommandOptions(options: CliOptions): void {
     (options.command === 'demo' ||
       options.command === 'validate' ||
       options.command === 'replay' ||
+      options.command === 'repro' ||
       options.command === 'help') &&
     options.seed !== undefined
   ) {

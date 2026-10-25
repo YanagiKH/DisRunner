@@ -9,7 +9,7 @@ export interface RedactionOptions {
   readonly maxEntriesPerContainer?: number;
   /** UTF-8 byte budget shared by source-derived output property names and string values. */
   readonly maxTotalStringBytes?: number;
-  /** Exact runtime-only values (for example generated session tokens) to remove. */
+  /** Runtime-only values; literal, JSON-escaped and individual line forms are removed. */
   readonly sensitiveValues?: readonly string[];
 }
 
@@ -22,6 +22,8 @@ interface NormalizedRedactionOptions {
   readonly maxEntriesPerContainer: number;
   readonly maxTotalStringBytes: number;
   readonly sensitiveValues: readonly string[];
+  readonly sensitiveValuesOverflow: boolean;
+  readonly maxSensitiveValueLength: number;
 }
 
 interface RedactionState {
@@ -48,14 +50,19 @@ const REDACTION_MAX_ENTRIES = '[REDACTION_MAX_ENTRIES]';
 const REDACTION_CIRCULAR = '[REDACTION_CIRCULAR]';
 const REDACTION_ACCESSOR = '[REDACTION_ACCESSOR]';
 const REDACTION_UNSUPPORTED = '[REDACTION_UNSUPPORTED]';
+const REDACTION_SENSITIVE_VALUES_LIMIT = '[REDACTION_SENSITIVE_VALUES_LIMIT]';
 const DEFAULT_MAX_NODES = 100_000;
 const DEFAULT_MAX_ENTRIES_PER_CONTAINER = 10_000;
 const DEFAULT_MAX_TOTAL_STRING_BYTES = 16 * 1_024 * 1_024;
 const MAX_REDACTION_NODES = 1_000_000;
 const MAX_REDACTION_ENTRIES_PER_CONTAINER = 100_000;
 const MAX_REDACTION_TOTAL_STRING_BYTES = 64 * 1_024 * 1_024;
-const MAX_SENSITIVE_VALUES = 256;
-const MAX_SENSITIVE_VALUE_LENGTH = 4_096;
+const MAX_SENSITIVE_VALUES = 512;
+const MAX_SENSITIVE_VALUE_LENGTH = 65_536;
+const MAX_SENSITIVE_VALUE_BYTES = 2 * 1_024 * 1_024;
+const MAX_SENSITIVE_VARIANTS = 4_096;
+const MAX_SENSITIVE_VARIANT_CHARACTERS = 16 * 1_024 * 1_024;
+const MAX_SENSITIVE_MATCHES = 65_536;
 const MAX_REPLACEMENT_LENGTH = 1_024;
 const MAX_RETAINED_BIGINT_MAGNITUDE = 1n << 256n;
 
@@ -202,14 +209,8 @@ export function redactString(value: string, options: RedactionOptions = {}): str
 
 function redactStringCore(value: string, options: NormalizedRedactionOptions): string {
   const replacement = options.replacement;
-  const clipped =
-    value.length > options.maxStringLength
-      ? `${value.slice(0, options.maxStringLength)}${REDACTION_STRING_TRUNCATED}`
-      : value;
-  let result = clipped;
-  for (const sensitiveValue of options.sensitiveValues) {
-    if (sensitiveValue.length >= 4) result = result.split(sensitiveValue).join(replacement);
-  }
+  if (options.sensitiveValuesOverflow) return REDACTION_SENSITIVE_VALUES_LIMIT;
+  let result = redactKnownValues(value, options);
   result = result
     .replace(DISCORD_WEBHOOK, replacement)
     .replace(AUTHORIZATION, (_match, scheme: string) => `${scheme} ${replacement}`)
@@ -222,6 +223,46 @@ function redactStringCore(value: string, options: NormalizedRedactionOptions): s
       .replace(IPV4, (address) => (isLoopbackAddress(address) ? address : '[REDACTED_IP]'));
   }
   return result;
+}
+
+function redactKnownValues(value: string, options: NormalizedRedactionOptions): string {
+  const retainedLength = Math.min(value.length, options.maxStringLength);
+  // Read enough lookahead to recognize a value that crosses the retained source boundary.
+  const searchable = value.slice(
+    0,
+    retainedLength + Math.max(0, options.maxSensitiveValueLength - 1),
+  );
+  const matches: [number, number][] = [];
+  for (const sensitiveValue of options.sensitiveValues) {
+    let offset = 0;
+    while (offset < retainedLength) {
+      const start = searchable.indexOf(sensitiveValue, offset);
+      if (start < 0 || start >= retainedLength) break;
+      if (matches.length >= MAX_SENSITIVE_MATCHES) return REDACTION_SENSITIVE_VALUES_LIMIT;
+      matches.push([start, Math.min(start + sensitiveValue.length, retainedLength)]);
+      // Overlaps also belong to the secret; advancing by the match length can expose a suffix.
+      offset = start + 1;
+    }
+  }
+  matches.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    if (match === undefined || match[0] < cursor) continue;
+    let end = match[1];
+    while (index + 1 < matches.length) {
+      const next = matches[index + 1];
+      if (next === undefined || next[0] > end) break;
+      end = Math.max(end, next[1]);
+      index += 1;
+    }
+    chunks.push(value.slice(cursor, match[0]), options.replacement);
+    cursor = end;
+  }
+  chunks.push(value.slice(cursor, retainedLength));
+  if (value.length > retainedLength) chunks.push(REDACTION_STRING_TRUNCATED);
+  return chunks.join('');
 }
 
 export function containsLikelySecret(value: unknown): boolean {
@@ -258,16 +299,58 @@ function normalizeOptions(options: RedactionOptions): NormalizedRedactionOptions
     throw new RangeError(`replacement cannot exceed ${MAX_REPLACEMENT_LENGTH} characters.`);
   }
   const sensitiveValues = options.sensitiveValues ?? [];
+  if (!Array.isArray(sensitiveValues)) throw new TypeError('sensitiveValues must be an array.');
   if (sensitiveValues.length > MAX_SENSITIVE_VALUES) {
     throw new RangeError(
       `sensitiveValues cannot contain more than ${MAX_SENSITIVE_VALUES} values.`,
     );
   }
-  for (const sensitiveValue of sensitiveValues) {
+  let sensitiveBytes = 0;
+  const variants = new Set<string>();
+  let variantCharacters = 0;
+  let sensitiveValuesOverflow = false;
+  let maxSensitiveValueLength = 0;
+  const addVariant = (value: string): void => {
+    if (value.length === 0 || variants.has(value) || sensitiveValuesOverflow) return;
+    if (
+      variants.size >= MAX_SENSITIVE_VARIANTS ||
+      variantCharacters + value.length > MAX_SENSITIVE_VARIANT_CHARACTERS
+    ) {
+      sensitiveValuesOverflow = true;
+      variants.clear();
+      return;
+    }
+    variants.add(value);
+    variantCharacters += value.length;
+    maxSensitiveValueLength = Math.max(maxSensitiveValueLength, value.length);
+  };
+  for (let index = 0; index < sensitiveValues.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(sensitiveValues, String(index));
+    if (
+      descriptor === undefined ||
+      !('value' in descriptor) ||
+      typeof descriptor.value !== 'string'
+    )
+      throw new TypeError('sensitiveValues must contain only string data properties.');
+    const sensitiveValue = descriptor.value;
     if (sensitiveValue.length > MAX_SENSITIVE_VALUE_LENGTH) {
       throw new RangeError(
         `A sensitive value cannot exceed ${MAX_SENSITIVE_VALUE_LENGTH} characters.`,
       );
+    }
+    sensitiveBytes += Buffer.byteLength(sensitiveValue);
+    if (sensitiveBytes > MAX_SENSITIVE_VALUE_BYTES) {
+      throw new RangeError(
+        `sensitiveValues cannot exceed ${MAX_SENSITIVE_VALUE_BYTES} UTF-8 bytes.`,
+      );
+    }
+    if (sensitiveValuesOverflow) continue;
+    addVariant(sensitiveValue);
+    addVariant(JSON.stringify(sensitiveValue).slice(1, -1));
+    for (const line of sensitiveValue.split(/[\r\n\u2028\u2029]+/u)) {
+      addVariant(line);
+      addVariant(JSON.stringify(line).slice(1, -1));
+      if (sensitiveValuesOverflow) break;
     }
   }
   return {
@@ -298,7 +381,9 @@ function normalizeOptions(options: RedactionOptions): NormalizedRedactionOptions
       Buffer.byteLength(REDACTION_TRUNCATED),
       MAX_REDACTION_TOTAL_STRING_BYTES,
     ),
-    sensitiveValues: [...sensitiveValues],
+    sensitiveValues: [...variants],
+    sensitiveValuesOverflow,
+    maxSensitiveValueLength,
   };
 }
 

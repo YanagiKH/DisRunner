@@ -1,0 +1,20 @@
+{
+  "name": "@disrunner/adapter-discordjs",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./bootstrap": "./bootstrap.cjs"
+  },
+  "files": [
+    "index.mjs",
+    "bootstrap.cjs",
+    "handler-tracking.cjs",
+    "manifest.json"
+  ],
+  "engines": {
+    "node": ">=22.23.2 <23"
+  }
+}

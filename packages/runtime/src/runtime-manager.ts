@@ -1,4 +1,21 @@
-import { generateKeyPairSync, randomUUID, type KeyObject } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
+import { canViewChannel } from './viewer-permissions.js';
+import { adapterCommand } from './adapter-host.js';
+import { RuntimeActionDriver } from './runtime-actions.js';
+import {
+  FaultPolicy,
+  type FaultPlan,
+  type FaultEvidence,
+  projectMessageWire,
+  GatewayIntents,
+  type GatewayEmulator,
+  type VirtualState,
+  type VirtualClock,
+  type InteractionEngine,
+  type LocalAttachmentMetadata,
+  type LocalRestEmulator,
+} from '@disrunner/core';
+import { createHash, generateKeyPairSync, randomUUID, type KeyObject } from 'node:crypto';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -15,6 +32,7 @@ import {
   SessionError,
   type SessionIssue,
   type InvocationContext,
+  type RuntimeAction,
   type DesktopRuntimeState,
   type RuntimeEndpoints,
   type RuntimeInvocationResult,
@@ -36,19 +54,21 @@ const CORE_SPECIFIER: string = '@disrunner/core';
 const MAX_RENDERER_OUTPUT = 200;
 const MAX_RENDERER_OUTPUT_BYTES = 1_048_576;
 const MAX_RENDERER_OUTPUT_ENTRY_BYTES = 32_768;
-const MAX_RENDERER_TRACES = 100;
+const MAX_RENDERER_TRACES = 1000;
 const MAX_RENDERER_RISKS = 100;
 const MAX_INTERACTION_INPUT_BYTES = 2_000;
 const CLEANUP_PENDING_SELECT =
   'Previous run cleanup is not confirmed. Stop again to retry cleanup before selecting a project.';
 
 interface TraceCollectorLike {
+  evidence?(): Readonly<Record<string, unknown>>;
   start(kind: string, name: string, metadata?: Readonly<Record<string, unknown>>): unknown;
   end(handle: unknown, status?: string, metadata?: Readonly<Record<string, unknown>>): unknown;
   spans(limit?: number): readonly unknown[];
 }
 
 interface RiskCollectorLike {
+  evidence?(): Readonly<Record<string, unknown>>;
   add(finding: unknown): unknown;
   all(limit?: number): readonly unknown[];
 }
@@ -114,6 +134,24 @@ export class DesktopRuntimeManager {
   #expectedStop = false;
   #generation = 0;
   #coreOwner: RetainedCoreState | null = null;
+  #driver: RuntimeActionDriver | null = null;
+  #inputs:
+    | { schemaVersion: 1; fixtureHash: string; profileHash: string; sourceHash: string | null }
+    | undefined;
+  #sdkReady = false;
+  #adapterIssue: SessionError | null = null;
+  #faultPolicy = new FaultPolicy();
+  #retainedFaultEvidence: FaultEvidence | null = null;
+  #droppedOutput = 0;
+  #diagnostics: SessionIssue[] = [];
+  #activeHandlers = new Set<string>();
+  #droppedDiagnostics = 0;
+  #captureSnapshot: {
+    evidenceComplete: boolean;
+    droppedOutput: number;
+    droppedTraces: number;
+    droppedRisks: number;
+  } | null = null;
 
   public get failure(): SessionError | null {
     return this.#failure;
@@ -137,14 +175,19 @@ export class DesktopRuntimeManager {
   public contexts(): InvocationContext[] {
     return this.#coreOwner !== null
       ? this.#coreOwner.contexts()
-      : contextsFromResources(this.#configuration?.resources ?? [], this.#configuration?.botUserId);
+      : contextsFromResources(
+          this.#configuration?.resources ?? [],
+          this.#configuration?.botUserId,
+          this.#configuration?.profile.ordinaryMessagePermissions !== 'legacy-unenforced',
+        );
   }
 
   public validateContext(context: InvocationContext): InvocationContext {
     if (
       context === null ||
       typeof context !== 'object' ||
-      ![context.actorId, context.guildId, context.channelId].every(isCanonicalSnowflake)
+      ![context.actorId, context.channelId].every(isCanonicalSnowflake) ||
+      (context.guildId !== undefined && !isCanonicalSnowflake(context.guildId))
     ) {
       throw new SessionError(
         'invalid',
@@ -164,7 +207,11 @@ export class DesktopRuntimeManager {
         'Invocation context must identify an existing user, guild and supported guild text channel.',
       );
     }
-    return { actorId: context.actorId, guildId: context.guildId, channelId: context.channelId };
+    return {
+      actorId: context.actorId,
+      ...(context.guildId === undefined ? {} : { guildId: context.guildId }),
+      channelId: context.channelId,
+    };
   }
   public assertLive(): void {
     const bot = this.#bot?.snapshot();
@@ -213,8 +260,104 @@ export class DesktopRuntimeManager {
     this.#dependencies = freezeResourceDependencies(dependencies);
   }
 
-  public coreState(): RuntimeCoreSnapshot | null {
-    return this.#coreOwner?.snapshot() ?? null;
+  public coreState(actorId?: string): RuntimeCoreSnapshot | null {
+    return this.#coreOwner?.snapshot(actorId) ?? null;
+  }
+  #checkAdapterIssue(): void {
+    const issue = this.#adapterIssue;
+    if (issue !== null) throw issue;
+  }
+  public inputIdentity() {
+    return this.#inputs === undefined ? undefined : { ...this.#inputs };
+  }
+  public commands(context?: InvocationContext): readonly Readonly<Record<string, unknown>>[] {
+    if (context) {
+      const selected = this.validateContext(context);
+      return selected.guildId === undefined
+        ? []
+        : (this.#coreOwner?.commands(selected.guildId) ?? []);
+    }
+    return this.#coreOwner?.commands() ?? [];
+  }
+  public commandsTruncated(): boolean {
+    return (this.#coreOwner?.commandCount() ?? 0) > 100;
+  }
+  public hasActor(id: string): boolean {
+    return (
+      (this.#coreOwner?.actor(id) ??
+        this.#configuration?.resources.find(
+          (r) => r['resourceType'] === 'user' && r['id'] === id,
+        )) !== undefined
+    );
+  }
+  public activeHandlers(): number {
+    return this.#activeHandlers.size;
+  }
+  public diagnostics(): readonly SessionIssue[] {
+    return structuredClone(this.#diagnostics);
+  }
+  public captureEvidence() {
+    return this.#captureSnapshot
+      ? { ...this.#captureSnapshot }
+      : this.#measureCapture(this.#trace, this.#risks, this.#bot);
+  }
+  #measureCapture(
+    traceSource: TraceCollectorLike | null,
+    riskSource: RiskCollectorLike | null,
+    botSource: BotRunnerLike | null,
+  ) {
+    const trace = traceSource?.evidence?.();
+    const risks = riskSource?.evidence?.();
+    const output = botSource?.evidence?.();
+    const droppedTraces =
+      Number(trace?.['droppedSpans'] ?? 0) +
+      Math.max(
+        0,
+        Number(trace?.['retainedSpans'] ?? traceSource?.spans().length ?? 0) - MAX_RENDERER_TRACES,
+      );
+    const droppedRisks =
+      Number(risks?.['droppedFindings'] ?? 0) +
+      Math.max(
+        0,
+        Number(risks?.['retainedFindings'] ?? riskSource?.all().length ?? 0) - MAX_RENDERER_RISKS,
+      );
+    const droppedOutput =
+      this.#droppedOutput +
+      Number(output?.['evictedEntries'] ?? 0) +
+      Number(output?.['truncatedLines'] ?? 0) +
+      Number(output?.['observerFailures'] ?? 0);
+    return {
+      evidenceComplete:
+        trace?.['complete'] !== false &&
+        risks?.['complete'] !== false &&
+        output?.['complete'] !== false &&
+        droppedTraces === 0 &&
+        droppedRisks === 0 &&
+        droppedOutput === 0 &&
+        this.#droppedDiagnostics === 0 &&
+        this.faultEvidence().complete,
+      droppedOutput,
+      droppedTraces,
+      droppedRisks,
+    };
+  }
+  public setFaults(plans: readonly FaultPlan[]): void {
+    if (this.#state.phase !== 'running')
+      throw new SessionError('not-running', 'Start a run before configuring faults.');
+    this.#retainedFaultEvidence = null;
+    this.#faultPolicy.set(plans);
+  }
+  public faultEvidence() {
+    return this.#retainedFaultEvidence ?? this.#faultPolicy.evidence();
+  }
+  public interactionStates(): readonly { id: string; status: string }[] {
+    const engine = this.#interactions as unknown as InteractionEngine | null;
+    return (
+      engine
+        ?.list()
+        .slice(-1000)
+        .map(({ id, status }) => ({ id, status })) ?? []
+    );
   }
 
   public snapshot(): DesktopRuntimeState {
@@ -229,7 +372,7 @@ export class DesktopRuntimeManager {
     // replacing it, and leave ownership, state and recorded failures untouched.
     if (this.hasResources) throw new SessionError('invalid', CLEANUP_PENDING_SELECT);
     try {
-      const project = await loadProjectConfiguration(directory);
+      const project = await loadProjectConfiguration(directory, { allowInvalidWorkspace: true });
       this.#configuration = structuredClone(project);
       this.#failure = null;
       this.#publish({
@@ -293,6 +436,13 @@ export class DesktopRuntimeManager {
     this.#unexpectedExit = false;
     this.#failure = null;
     this.#cleanupIssues = [];
+    this.#retainedFaultEvidence = null;
+    this.#captureSnapshot = null;
+    this.#droppedOutput = 0;
+    this.#diagnostics = [];
+    this.#droppedDiagnostics = 0;
+    this.#activeHandlers.clear();
+    this.#faultPolicy.clear();
     this.#publish({
       ...this.#state,
       phase: 'starting',
@@ -305,6 +455,8 @@ export class DesktopRuntimeManager {
     try {
       signal.throwIfAborted();
       configuration = this.#configuration;
+      if (configuration.workspaceIssue)
+        throw new SessionError('invalid', configuration.workspaceIssue);
       this.#publish({ ...this.#state, project: configuration.summary });
       const core = await loadCore();
       signal.throwIfAborted();
@@ -314,21 +466,40 @@ export class DesktopRuntimeManager {
           '@disrunner/core does not export LocalGatewayServer. Desktop startup is fail-closed until the core gateway transport is available.',
         );
       }
+      let sourceHash: string | null = null;
+      if (
+        configuration.entryPoint !== null &&
+        (await stat(configuration.entryPoint)).size <= 16 * 1_048_576
+      )
+        sourceHash = createHash('sha256')
+          .update(await readFile(configuration.entryPoint))
+          .digest('hex');
+      signal.throwIfAborted();
+      this.#inputs = {
+        schemaVersion: 1,
+        fixtureHash: createHash('sha256')
+          .update(JSON.stringify(configuration.resources))
+          .digest('hex'),
+        profileHash: createHash('sha256')
+          .update(JSON.stringify(configuration.profile))
+          .digest('hex'),
+        sourceHash,
+      };
       const sessionToken = core.createOfflineSessionToken();
-      const interactionCredentials =
-        configuration.adapter.type === 'raw-interaction-webhook'
-          ? createInteractionCredentials()
-          : null;
-      if (interactionCredentials === null) {
-        throw new Error(
-          'Shared runtime bootstrap requires raw-interaction-webhook signing credentials.',
-        );
-      }
+      const interactionCredentials = createInteractionCredentials();
       const interactionPeerSecret =
-        interactionCredentials === null ? null : createWebhookPeerSecret();
+        configuration.adapter.type === 'raw-interaction-webhook' ? createWebhookPeerSecret() : null;
+      const configuredSensitiveValues = Object.entries(configuration.environment)
+        .filter(([key]) =>
+          /(?:^|_)(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY|ACCESS_KEY|AUTHORIZATION|CREDENTIAL)$/iu.test(
+            key,
+          ),
+        )
+        .map(([, value]) => value);
       this.#sanitizeForExport = (value: unknown) =>
         core.sanitizeForExport(value, {
           sensitiveValues: [
+            ...configuredSensitiveValues,
             sessionToken,
             ...(interactionPeerSecret === null ? [] : [interactionPeerSecret]),
           ],
@@ -372,7 +543,9 @@ export class DesktopRuntimeManager {
         state,
         clock,
         this.#sanitizeForExport,
-        configuration.botUserId,
+        botUserId,
+        true,
+        configuration.profile.ordinaryMessagePermissions !== 'legacy-unenforced',
       );
       this.#coreOwner = owner;
       owner.subscribe(() => {
@@ -389,6 +562,44 @@ export class DesktopRuntimeManager {
         avatar: null,
         bot: true,
       };
+      if (
+        (configuration.adapter.type !== 'raw-interaction-webhook' ||
+          configuration.profile.commandRegistry?.profile === 'command-registry-v2') &&
+        !(state as VirtualState).get('user', botUserId)
+      )
+        (state as VirtualState).create('user', botUser);
+      if (
+        configuration.adapter.type !== 'raw-interaction-webhook' ||
+        configuration.profile.commandRegistry?.profile === 'command-registry-v2'
+      )
+        for (const guild of (state as VirtualState).list('guild')) {
+          if (!(state as VirtualState).get('role', guild.id))
+            (state as VirtualState).create('role', {
+              id: guild.id,
+              guild_id: guild.id,
+              name: '@everyone',
+              permissions: '68608',
+              position: 0,
+            });
+          if (
+            !(state as VirtualState)
+              .list('member')
+              .some(
+                (member) =>
+                  member['guild_id'] === guild.id &&
+                  (member['user_id'] === botUserId || member.id === botUserId),
+              )
+          )
+            (state as VirtualState).create('member', {
+              guild_id: guild.id,
+              user_id: botUserId,
+              roles: [],
+              flags: 0,
+              joined_at: new Date(0).toISOString(),
+              deaf: false,
+              mute: false,
+            });
+        }
       const gatewayPort = await reserveLoopbackPort();
       signal.throwIfAborted();
       const expectedGatewayUrl = `ws://127.0.0.1:${gatewayPort}/gateway`;
@@ -400,6 +611,13 @@ export class DesktopRuntimeManager {
         resumeGatewayUrl: expectedGatewayUrl,
         applicationId,
         botUserId,
+        portalEnabledPrivilegedIntents: configuration.profile.intents.reduce(
+          (bits, name) => bits | (GatewayIntents[name as keyof typeof GatewayIntents] ?? 0n),
+          0n,
+        ),
+        ...(configuration.adapter.type === 'raw-interaction-webhook'
+          ? {}
+          : { bootstrap: { state, user: botUser } }),
       });
       // Shared state, Gateway and the bootstrap bot exist before the engine; the engine and
       // the REST emulator share one message run so both origins use one ordered record.
@@ -419,7 +637,7 @@ export class DesktopRuntimeManager {
       });
       this.#interactions = interactions;
       // Own the real resource before wrapping it: if wrapping throws, cleanup still reaches it.
-      this.#gatewayServer = new GatewayServer({ gateway, trace });
+      this.#gatewayServer = new GatewayServer({ gateway, trace, faultPolicy: this.#faultPolicy });
       const gatewayServer = this.#dependencies.wrapGateway(this.#gatewayServer);
       this.#gatewayServer = gatewayServer;
       const gatewayStartResult = await gatewayServer.start(gatewayPort);
@@ -440,9 +658,19 @@ export class DesktopRuntimeManager {
         },
       ]);
       const rest = new core.LocalRestEmulator({
+        faultPolicy: this.#faultPolicy,
         state,
         ...(configuration.profile.commandRegistry === undefined
-          ? {}
+          ? configuration.adapter.type === 'raw-interaction-webhook'
+            ? {}
+            : {
+                commandRegistry: {
+                  profile: 'command-registry-v2',
+                  guildIds: configuration.resources
+                    .filter((r) => r['resourceType'] === 'guild')
+                    .map((r) => r['id']),
+                },
+              }
           : { commandRegistry: configuration.profile.commandRegistry }),
         ordinaryMessagePermissions: configuration.profile.ordinaryMessagePermissions,
         messageDomain: { runId, clockDomain: 'realtime' },
@@ -493,16 +721,156 @@ export class DesktopRuntimeManager {
       this.#notifyEndpoints(endpoints);
       signal.throwIfAborted();
 
+      this.#driver = new RuntimeActionDriver({
+        state: state as VirtualState,
+        clock: clock as VirtualClock,
+        gateway: gateway as GatewayEmulator,
+        interactions: interactions as unknown as InteractionEngine,
+        applicationId,
+        projectRoot: configuration.summary.root,
+        attachments: (rest as LocalRestEmulator).localAttachments(),
+        requireRegisteredCommands:
+          configuration.adapter.type !== 'raw-interaction-webhook' ||
+          configuration.profile.commandRegistry?.profile === 'command-registry-v2',
+        enforcePermissions:
+          configuration.profile.ordinaryMessagePermissions !== 'legacy-unenforced',
+        assertLive: () => this.assertLive(),
+        ...(configuration.adapter.type === 'raw-interaction-webhook'
+          ? {
+              transport: async (
+                payload: Readonly<Record<string, unknown>>,
+                requestSignal: AbortSignal,
+              ) => {
+                if (
+                  !this.#interactionEndpoint ||
+                  !this.#interactionPrivateKey ||
+                  !this.#interactionPeerSecret
+                )
+                  throw new SessionError('transport', 'Webhook transport is unavailable.');
+                const effect = await this.#faultPolicy.applyHttp(
+                  { method: 'POST', route: '/interactions' },
+                  { signal: requestSignal },
+                );
+                if (effect?.kind === 'timeout')
+                  throw new SessionError('timeout', 'Injected webhook timeout.');
+                if (effect?.kind === 'http-status')
+                  throw new SessionError('transport', `Injected webhook HTTP ${effect.status}.`);
+                const callback = await sendSignedInteraction(
+                  this.#interactionEndpoint,
+                  this.#interactionPrivateKey,
+                  this.#interactionPeerSecret,
+                  payload,
+                  { signal: requestSignal },
+                );
+                const normalized = normalizeInteractionCallback(callback, 'interactions-v1');
+                if (normalized.type === 'pong')
+                  throw new SessionError('transport', 'Unexpected PONG callback.');
+                return { type: normalized.type, data: normalized.data };
+              },
+            }
+          : {}),
+      });
+      this.#sdkReady = false;
+      this.#adapterIssue = null;
       const output: RuntimeOutputEntry[] = [];
       let outputBytes = 0;
       const bot = new core.BotRunner({
-        maxOutputEntries: MAX_RENDERER_OUTPUT,
+        maxOutputEntries: 1000,
         maxOutputBytes: MAX_RENDERER_OUTPUT_BYTES,
         maxOutputLineBytes: 65_536,
         onOutput: (entry: unknown) => {
-          if (generation !== this.#generation || this.#expectedStop) return;
-          const sanitized = sanitizeOutput(entry);
+          if (generation !== this.#generation) return;
+          let sanitized = sanitizeOutput(entry);
           if (sanitized === null) return;
+          if (
+            isRecord(entry) &&
+            typeof entry['text'] === 'string' &&
+            Buffer.byteLength(entry['text']) > MAX_RENDERER_OUTPUT_ENTRY_BYTES
+          )
+            this.#droppedOutput += 1;
+          if (sanitized.text.startsWith('DISRUNNER_ADAPTER_ERROR ')) {
+            try {
+              const issue: unknown = JSON.parse(
+                sanitized.text.slice('DISRUNNER_ADAPTER_ERROR '.length),
+              );
+              if (
+                isRecord(issue) &&
+                issue['code'] === 'unsupported' &&
+                typeof issue['message'] === 'string'
+              ) {
+                const cleaned = this.#sanitizeForExport?.({ message: issue['message'] });
+                const message =
+                  isRecord(cleaned) && typeof cleaned['message'] === 'string'
+                    ? cleaned['message']
+                    : 'The configured SDK or language runtime is unsupported.';
+                this.#adapterIssue = new SessionError('invalid', message);
+                sanitized = { ...sanitized, stream: 'stderr', text: message + '\n' };
+              }
+            } catch {
+              this.#droppedDiagnostics += 1;
+            }
+          }
+          if (sanitized.text.startsWith('DISRUNNER_HANDLER ')) {
+            try {
+              const marker: unknown = JSON.parse(sanitized.text.slice('DISRUNNER_HANDLER '.length));
+              if (
+                !isRecord(marker) ||
+                typeof marker['id'] !== 'string' ||
+                !/^[A-Za-z0-9_-]{1,64}$/u.test(marker['id']) ||
+                !['start', 'end'].includes(String(marker['phase']))
+              )
+                throw new Error('Invalid handler marker.');
+              if (marker['phase'] === 'start') {
+                if (this.#activeHandlers.size >= 1000 || this.#activeHandlers.has(marker['id']))
+                  throw new Error('Handler marker capacity exceeded.');
+                this.#activeHandlers.add(marker['id']);
+              } else if (!this.#activeHandlers.delete(marker['id']))
+                throw new Error('Unknown handler marker.');
+            } catch {
+              this.#droppedDiagnostics += 1;
+            }
+            this.#publish(this.#state);
+            return;
+          }
+          if (sanitized.text.trim() === 'DISRUNNER_ADAPTER_READY') {
+            this.#sdkReady = true;
+            return;
+          }
+          if (sanitized.text.startsWith('DISRUNNER_DIAGNOSTIC ')) {
+            try {
+              const diagnostic: unknown = JSON.parse(
+                sanitized.text.slice('DISRUNNER_DIAGNOSTIC '.length),
+              );
+              if (
+                isRecord(diagnostic) &&
+                diagnostic['code'] === 'bot-error' &&
+                typeof diagnostic['message'] === 'string'
+              ) {
+                const cleaned = this.#sanitizeForExport?.({ message: diagnostic['message'] });
+                const safeMessage =
+                  isRecord(cleaned) && typeof cleaned['message'] === 'string'
+                    ? cleaned['message']
+                    : 'The bot reported a handler error.';
+                sanitized = { ...sanitized, stream: 'stderr', text: safeMessage + '\n' };
+                this.#diagnostics.push({
+                  code: 'bot-error',
+                  message: truncateUtf8(safeMessage, 8192),
+                });
+                if (this.#diagnostics.length > 100) {
+                  this.#diagnostics.shift();
+                  this.#droppedDiagnostics += 1;
+                }
+                try {
+                  const diagnosticSpan = trace.start('bot-handler', 'Handler error');
+                  trace.end(diagnosticSpan, 'error', { message: safeMessage });
+                } catch {
+                  this.#droppedDiagnostics += 1;
+                }
+              }
+            } catch {
+              this.#droppedDiagnostics += 1;
+            }
+          }
           outputBytes += Buffer.byteLength(sanitized.text);
           output.push(sanitized);
           while (
@@ -510,6 +878,7 @@ export class DesktopRuntimeManager {
             (output.length > MAX_RENDERER_OUTPUT || outputBytes > MAX_RENDERER_OUTPUT_BYTES)
           ) {
             const removed = output.shift();
+            this.#droppedOutput += 1;
             if (removed !== undefined) outputBytes -= Buffer.byteLength(removed.text);
           }
           this.#publish({ ...this.#state, output: [...output] });
@@ -524,7 +893,7 @@ export class DesktopRuntimeManager {
         interactionEndpoint === undefined ? '' : new URL(interactionEndpoint).port;
       const processSnapshot = await ownedBot.start({
         executable: configuration.summary.executable,
-        args: configuration.summary.args,
+        args: adapterCommand(configuration),
         cwd: configuration.summary.cwd,
         workspaceRoot: configuration.summary.root,
         env: {
@@ -556,6 +925,22 @@ export class DesktopRuntimeManager {
           () => this.assertLive(),
         );
       }
+      if (configuration.adapter.type !== 'raw-interaction-webhook') {
+        while (
+          !this.#sdkReady ||
+          !(gateway as GatewayEmulator).sessions().some((session) => session.state === 'ready') ||
+          this.#activeHandlers.size !== 0
+        ) {
+          signal.throwIfAborted();
+          this.#checkAdapterIssue();
+          if (this.#diagnostics.length > 0)
+            throw new SessionError('bot-error', 'The Bot reported an error during startup.');
+          this.assertLive();
+          await delay(10, undefined, { signal });
+        }
+        if (this.#diagnostics.length > 0)
+          throw new SessionError('bot-error', 'The Bot reported an error during startup.');
+      }
       signal.throwIfAborted();
       this.assertLive();
       this.#trace = trace;
@@ -571,7 +956,9 @@ export class DesktopRuntimeManager {
       signal.throwIfAborted();
       this.#startPolling();
     } catch (error) {
-      this.#failure = operationFailure(error, signal, 'start-failed');
+      this.#failure = signal.aborted
+        ? operationFailure(error, signal, 'start-failed')
+        : (this.#adapterIssue ?? operationFailure(error, signal, 'start-failed'));
       const rawFailure = this.#failure.message;
       const sanitizedFailure = this.#sanitizeForExport?.({ message: rawFailure });
       const primaryFailure =
@@ -584,14 +971,17 @@ export class DesktopRuntimeManager {
       } catch (cleanupError) {
         cleanupFailure = errorMessage(cleanupError);
       }
+      if (this.#adapterIssue && !signal.aborted) this.#failure = this.#adapterIssue;
+      const reportedFailure =
+        this.#adapterIssue && !signal.aborted ? this.#adapterIssue.message : primaryFailure;
       this.#publish({
         ...this.#state,
         phase: 'error',
         project: configuration?.summary ?? this.#state.project,
         error:
           cleanupFailure === null
-            ? primaryFailure
-            : `${primaryFailure} Cleanup also failed: ${cleanupFailure}`,
+            ? reportedFailure
+            : `${reportedFailure} Cleanup also failed: ${cleanupFailure}`,
         pid: null,
         endpoints: null,
       });
@@ -656,6 +1046,62 @@ export class DesktopRuntimeManager {
     return this.snapshot();
   }
 
+  public readAttachment(id: string, context: InvocationContext) {
+    if (!this.#driver || this.#state.phase !== 'running')
+      throw new SessionError('not-running', 'Start a run before reading attachments.');
+    return this.#driver.readAttachment(id, this.validateContext(context));
+  }
+  public async importAttachment(
+    relativePath: string,
+    context: InvocationContext,
+  ): Promise<LocalAttachmentMetadata> {
+    if (!this.#driver || this.#state.phase !== 'running')
+      throw new SessionError('not-running', 'Start a run before importing attachments.');
+    return this.#driver.importAttachment(
+      relativePath,
+      this.validateContext(context),
+      this.#runAbort?.signal,
+    );
+  }
+  public async dispatch(
+    action: RuntimeAction,
+    context: InvocationContext,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<RuntimeInvocationResult> {
+    if (this.#state.phase !== 'running' || !this.#driver)
+      throw new SessionError('not-running', 'Start a bot project first.');
+    const selected = this.validateContext(context);
+    const signal = AbortSignal.any([
+      ...(this.#runAbort ? [this.#runAbort.signal] : []),
+      ...(options.signal ? [options.signal] : []),
+      AbortSignal.timeout(options.timeoutMs ?? 3000),
+    ]);
+    const span = this.#trace?.start(
+      'interaction',
+      action.type === 'command' ? `/${action.name ?? ''}` : action.type,
+      { action: action.type, actorId: selected.actorId, channelId: selected.channelId },
+    );
+    try {
+      const result = await this.#driver.dispatch(action, selected, signal);
+      const exactResult = this.#exactInvocationResult(result);
+      if (span) this.#trace?.end(span, 'ok');
+      this.#refreshEvidence();
+      return exactResult;
+    } catch (error) {
+      if (span) this.#trace?.end(span, 'error');
+      this.#refreshEvidence();
+      if (signal.aborted)
+        throw new SessionError(
+          isRecord(signal.reason as unknown) &&
+            (signal.reason as Record<string, unknown>)['name'] === 'TimeoutError'
+            ? 'timeout'
+            : 'cancelled',
+          'The operation timed out or was cancelled.',
+        );
+      throw error;
+    }
+  }
+
   public async invoke(
     input: string,
     context?: InvocationContext,
@@ -694,6 +1140,22 @@ export class DesktopRuntimeManager {
         error:
           'Command must be /name with 1–32 lowercase letters, digits, underscores, or hyphens.',
       });
+    }
+    if (
+      context !== undefined &&
+      (this.#configuration?.adapter.type !== 'raw-interaction-webhook' ||
+        this.#configuration.profile.commandRegistry?.profile === 'command-registry-v2')
+    ) {
+      const argumentText = normalized.slice(commandToken.length).trim();
+      return this.dispatch(
+        {
+          type: 'command',
+          name: commandName,
+          ...(argumentText ? { options: [{ name: 'text', type: 3, value: argumentText }] } : {}),
+        },
+        context,
+        options,
+      );
     }
     if (
       this.#state.phase !== 'running' ||
@@ -797,7 +1259,7 @@ export class DesktopRuntimeManager {
       if (selectedContext !== undefined) this.validateContext(selectedContext);
       const normalizedCallback = normalizeInteractionCallback(
         callback,
-        selectedContext !== undefined,
+        selectedContext === undefined ? 'model' : 'chat-input-messages-v1',
       );
       const result: RuntimeInvocationResult = {
         ok: true,
@@ -969,9 +1431,14 @@ export class DesktopRuntimeManager {
 
   async #cleanupInternal(): Promise<void> {
     this.#stopPolling();
+    this.#captureSnapshot = this.captureEvidence();
+    this.#retainedFaultEvidence = this.#faultPolicy.evidence();
+    this.#faultPolicy.clear();
     const bot = this.#bot;
     const rest = this.#rest;
     const gatewayServer = this.#gatewayServer;
+    const capturedTrace = this.#trace;
+    const capturedRisks = this.#risks;
 
     this.#trace = null;
     this.#risks = null;
@@ -981,6 +1448,7 @@ export class DesktopRuntimeManager {
     this.#applicationId = null;
     this.#interactionContext = null;
     this.#interactions = null;
+    this.#driver = null;
     this.#notifyEndpoints(null);
     const errors: string[] = [];
     if (bot !== null) {
@@ -1017,6 +1485,7 @@ export class DesktopRuntimeManager {
         errors.push('Core state subscription closure could not be confirmed.');
       }
     }
+    this.#captureSnapshot = this.#measureCapture(capturedTrace, capturedRisks, bot);
     this.#cleanupIssues = errors.map((message) => ({
       code: 'cleanup',
       message: redactText(message),
@@ -1201,14 +1670,14 @@ async function verifySignedPing(
 
 function normalizeInteractionCallback(
   value: unknown,
-  authoritative: boolean,
+  profile: 'model' | 'chat-input-messages-v1' | 'interactions-v1',
 ): NonNullable<RuntimeInvocationResult['response']> {
   if (
-    authoritative &&
+    profile !== 'model' &&
     (!isRecord(value) ||
       Object.keys(value).some((key) => key !== 'type' && key !== 'data') ||
       typeof value['type'] !== 'number' ||
-      ![4, 5, 9].includes(value['type']) ||
+      !(profile === 'interactions-v1' ? [4, 5, 6, 7, 8, 9] : [4, 5, 9]).includes(value['type']) ||
       (Object.hasOwn(value, 'data') && !isRecord(value['data'])))
   ) {
     throw new Error('Invalid interaction message payload.');
@@ -1419,6 +1888,8 @@ export class RetainedCoreState {
     clock: unknown,
     readonly sanitize: (value: unknown) => unknown,
     readonly excludedActorId?: string,
+    readonly extended = false,
+    readonly enforceViewPermissions = false,
   ) {
     if (
       !isRecord(source) ||
@@ -1461,13 +1932,47 @@ export class RetainedCoreState {
     }
   }
   public contexts(): InvocationContext[] {
-    return contextsFromResources(this.#resources(), this.excludedActorId);
+    return contextsFromResources(
+      this.#resources(),
+      this.excludedActorId,
+      this.enforceViewPermissions,
+    );
   }
   public actor(id: string): Readonly<Record<string, unknown>> | undefined {
     const actor = this.#resources().find((r) => r['resourceType'] === 'user' && r['id'] === id);
     return actor === undefined ? undefined : structuredClone(actor);
   }
-  public snapshot(): RuntimeCoreSnapshot | null {
+  public commandCount(): number {
+    return this.#resources().filter((r) => r['resourceType'] === 'application-command').length;
+  }
+  public commands(guildId?: string): readonly Readonly<Record<string, unknown>>[] {
+    let all = this.#resources().filter((r) => r['resourceType'] === 'application-command');
+    if (guildId !== undefined) {
+      all = all
+        .filter((r) => r['guild_id'] === undefined || r['guild_id'] === guildId)
+        .sort((a, b) => Number(b['guild_id'] !== undefined) - Number(a['guild_id'] !== undefined));
+      const keys = new Set<string>();
+      all = all.filter((command) => {
+        const key = JSON.stringify([command['type'], command['name']]);
+        if (keys.has(key)) return false;
+        keys.add(key);
+        return true;
+      });
+    }
+    return all
+      .slice(0, guildId === undefined ? 100 : 220)
+      .map(
+        (r) =>
+          this.sanitize(
+            Object.fromEntries(
+              Object.entries(r).filter(
+                ([key]) => !['resourceType', 'registry_profile'].includes(key),
+              ),
+            ),
+          ) as Readonly<Record<string, unknown>>,
+      );
+  }
+  public snapshot(actorId?: string): RuntimeCoreSnapshot | null {
     const source = this.#source;
     const clock = this.#clock;
     if (source === null || clock === null) return null;
@@ -1487,19 +1992,60 @@ export class RetainedCoreState {
       // Bound the sanitized renderer projection independently of the core store capacity.
       const resources: RuntimeResourceView[] = [];
       let bytes = 2;
+      let evidenceComplete = totalResources <= 1000;
       for (const resource of raw['resources'].slice(0, 1_000)) {
+        if (actorId !== undefined && this.enforceViewPermissions && isRecord(resource)) {
+          const channel =
+            resource['resourceType'] === 'channel'
+              ? resource
+              : resource['resourceType'] === 'message'
+                ? (raw['resources'] as unknown[])
+                    .filter(isRecord)
+                    .find(
+                      (r) => r['resourceType'] === 'channel' && r['id'] === resource['channel_id'],
+                    )
+                : undefined;
+          if (
+            channel &&
+            !canViewChannel(
+              (raw['resources'] as unknown[]).filter(isRecord),
+              actorId,
+              channel,
+              clock.now(),
+            )
+          )
+            continue;
+        }
         if (
           isRecord(resource) &&
           resource['resourceType'] === 'message' &&
-          !isPublicChannelMessage(resource, raw['resources'])
+          !isPublicChannelMessage(resource, raw['resources']) &&
+          !(actorId !== undefined && canViewDirectMessage(resource, raw['resources'], actorId)) &&
+          !(
+            actorId !== undefined &&
+            resource['visibility'] === 'ephemeral' &&
+            resource['recipient_id'] === actorId &&
+            isRecord(resource['author']) &&
+            resource['author']['bot'] === true
+          )
         )
           continue;
-        const view = projectResourceView(resource);
+        if (
+          isRecord(resource) &&
+          resource['resourceType'] === 'channel' &&
+          resource['type'] === 1 &&
+          (actorId === undefined || !directRecipient(resource, actorId))
+        )
+          continue;
+        const view = projectResourceView(resource, actorId !== undefined, this.extended);
         if (view === null) continue;
         const sanitized = this.sanitize(view);
         if (!isRecord(sanitized)) return null;
         const encoded = JSON.stringify(sanitized);
-        if (bytes + Buffer.byteLength(encoded) + (resources.length > 0 ? 1 : 0) > 1_048_576) break;
+        if (bytes + Buffer.byteLength(encoded) + (resources.length > 0 ? 1 : 0) > 1_048_576) {
+          evidenceComplete = false;
+          break;
+        }
         bytes += Buffer.byteLength(encoded) + (resources.length > 0 ? 1 : 0);
         resources.push(JSON.parse(encoded) as RuntimeResourceView);
       }
@@ -1514,6 +2060,7 @@ export class RetainedCoreState {
         resources,
         totalResources,
         truncated: resources.length !== totalResources,
+        evidenceComplete,
       };
     } catch {
       return null;
@@ -1532,11 +2079,19 @@ export class RetainedCoreState {
   }
 }
 
-function projectResourceView(value: unknown): RuntimeResourceView | null {
+function projectResourceView(
+  value: unknown,
+  rich = false,
+  extended = false,
+): RuntimeResourceView | null {
   if (
     !isRecord(value) ||
     typeof value['id'] !== 'string' ||
-    !['guild', 'channel', 'user', 'message'].includes(String(value['resourceType']))
+    !(
+      rich
+        ? ['guild', 'channel', 'user', 'message', 'role', 'member']
+        : ['guild', 'channel', 'user', 'message']
+    ).includes(String(value['resourceType']))
   )
     return null;
   const type = value['resourceType'] as RuntimeResourceView['resourceType'];
@@ -1550,10 +2105,30 @@ function projectResourceView(value: unknown): RuntimeResourceView | null {
           ? ['name', 'guild_id']
           : ['guild_id', 'channel_id', 'content', 'timestamp'];
   for (const key of strings) if (typeof value[key] === 'string') result[key] = value[key];
+  if (rich && (type === 'role' || type === 'member'))
+    for (const field of [
+      'name',
+      'guild_id',
+      'user_id',
+      'roles',
+      'permissions',
+      'position',
+      'color',
+    ])
+      if (value[field] !== undefined) result[field] = value[field];
   if (type === 'user') copyAuthorFields(value, result);
   if (type === 'channel' && Number.isSafeInteger(value['type'])) result['type'] = value['type'];
   if (type === 'message') {
-    result['visibility'] = 'channel';
+    result['visibility'] = value['visibility'] === 'ephemeral' ? 'ephemeral' : 'channel';
+    if (result['visibility'] === 'ephemeral' && typeof value['recipient_id'] === 'string')
+      result['visibleTo'] = value['recipient_id'];
+    if (typeof value['interaction_id'] === 'string')
+      result['interaction_id'] = value['interaction_id'];
+    if (rich || extended) {
+      const wire = projectMessageWire(value);
+      for (const field of ['components', 'embeds', 'attachments'])
+        if (Array.isArray(wire[field])) result[field] = wire[field];
+    }
     // Only type 0 and type 20 reach this projection; the type is kept, not forced.
     result['type'] = value['type'] === 20 ? 20 : 0;
     if (Number.isSafeInteger(value['flags'])) result['flags'] = value['flags'];
@@ -1578,6 +2153,7 @@ function copyAuthorFields(source: Record<string, unknown>, target: Record<string
 function contextsFromResources(
   resources: readonly Readonly<Record<string, unknown>>[],
   excludedActorId?: string,
+  membersOnly = false,
 ): InvocationContext[] {
   const guilds = new Set(
     resources.filter((r) => r['resourceType'] === 'guild').map((r) => r['id']),
@@ -1595,13 +2171,33 @@ function contextsFromResources(
       (r) =>
         r['resourceType'] === 'user' && typeof r['id'] === 'string' && r['id'] !== excludedActorId,
     )
-    .flatMap((user) =>
-      channels.map((channel) => ({
-        actorId: String(user['id']),
-        guildId: String(channel['guild_id']),
-        channelId: String(channel['id']),
-      })),
-    );
+    .flatMap((user) => [
+      ...channels
+        .filter(
+          (channel) =>
+            !membersOnly ||
+            resources.some(
+              (m) =>
+                m['resourceType'] === 'member' &&
+                m['guild_id'] === channel['guild_id'] &&
+                (m['user_id'] === user['id'] || m['id'] === user['id']),
+            ),
+        )
+        .map((channel) => ({
+          actorId: String(user['id']),
+          guildId: String(channel['guild_id']),
+          channelId: String(channel['id']),
+        })),
+      ...resources
+        .filter(
+          (r) =>
+            r['resourceType'] === 'channel' &&
+            r['type'] === 1 &&
+            r['guild_id'] === undefined &&
+            directRecipient(r, String(user['id'])),
+        )
+        .map((channel) => ({ actorId: String(user['id']), channelId: String(channel['id']) })),
+    ]);
 }
 
 /**
@@ -1654,5 +2250,29 @@ function isPublicChannelMessage(
     resources.some(
       (r) => isRecord(r) && r['resourceType'] === 'guild' && r['id'] === channel['guild_id'],
     )
+  );
+}
+
+function directRecipient(channel: Readonly<Record<string, unknown>>, actorId: string): boolean {
+  return (
+    Array.isArray(channel['recipients']) &&
+    channel['recipients'].some((recipient) => isRecord(recipient) && recipient['id'] === actorId)
+  );
+}
+function canViewDirectMessage(
+  message: Record<string, unknown>,
+  resources: readonly unknown[],
+  actorId: string,
+): boolean {
+  const channel = resources.find(
+    (r) => isRecord(r) && r['resourceType'] === 'channel' && r['id'] === message['channel_id'],
+  );
+  return (
+    isRecord(channel) &&
+    channel['type'] === 1 &&
+    channel['guild_id'] === undefined &&
+    directRecipient(channel, actorId) &&
+    message['guild_id'] === undefined &&
+    (message['visibility'] !== 'ephemeral' || message['recipient_id'] === actorId)
   );
 }

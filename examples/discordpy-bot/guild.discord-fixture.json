@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "guild": {
+    "id": "100000000000000001",
+    "name": "SDK Lab",
+    "owner_id": "300000000000000001",
+    "roles": [
+      { "id": "100000000000000001", "name": "@everyone", "permissions": "68608", "position": 0 }
+    ],
+    "channels": [
+      {
+        "id": "200000000000000001",
+        "guild_id": "100000000000000001",
+        "type": 0,
+        "name": "bot-testing",
+        "position": 0
+      }
+    ],
+    "members": [
+      {
+        "user": {
+          "id": "300000000000000001",
+          "username": "developer",
+          "discriminator": "0",
+          "avatar": null,
+          "bot": false
+        },
+        "roles": [],
+        "joined_at": "2026-01-01T00:00:00.000Z",
+        "deaf": false,
+        "mute": false
+      }
+    ]
+  }
+}

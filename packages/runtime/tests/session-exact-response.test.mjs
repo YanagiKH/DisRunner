@@ -12,14 +12,32 @@ async function withBot(content, run) {
   const directory = await mkdtemp(join(tmpdir(), 'exact-response-'));
   try {
     await cp(project, directory, { recursive: true });
-    const server = join(directory, 'src/server.mjs');
+    const configPath = join(directory, 'discord-simulator.config.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds: [] };
+    config.bot.entryPoint = 'src/legacy-session-entry.mjs';
+    config.bot.startCommand = 'node src/legacy-session-entry.mjs';
+    await writeFile(configPath, JSON.stringify(config));
+    // Preserve the exact authenticated-response contract before modern payload validation.
     await writeFile(
-      server,
-      (await readFile(server, 'utf8')).replace(
-        "'Pong! Offline and deterministic.'",
-        JSON.stringify(content),
-      ),
+      join(directory, 'src/legacy-session-entry.mjs'),
+      `import {createWebhookServer,loadServerOptionsFromEnvironment} from './server.mjs';
+const options=loadServerOptionsFromEnvironment();
+const server=createWebhookServer(options);
+server.listen(options.port,options.host);
+const shutdown=()=>{server.close(()=>{process.exitCode=0;});setTimeout(()=>server.closeAllConnections(),1000).unref();};
+process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
+`,
     );
+    const commands = join(directory, 'src/commands.mjs');
+    const source = await readFile(commands, 'utf8');
+    const literal = "'Pong! Offline and deterministic.'";
+    assert.equal(
+      source.split(literal).length,
+      2,
+      'the ping reply mutation must match exactly once',
+    );
+    await writeFile(commands, source.replace(literal, JSON.stringify(content)));
     await run(directory);
   } finally {
     await rm(directory, { recursive: true, force: true });

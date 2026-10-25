@@ -97,6 +97,20 @@ async function withRuntime(change, run) {
   try {
     await cp(example, root, { recursive: true });
     const config = JSON.parse(await readFile(join(root, 'discord-simulator.config.json'), 'utf8'));
+    config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds: [] };
+    config.bot.entryPoint = 'src/legacy-permissions-entry.mjs';
+    config.bot.startCommand = 'node src/legacy-permissions-entry.mjs';
+    // Preserve the real signed example transport while pinning the legacy route profile.
+    await writeFile(
+      join(root, config.bot.entryPoint),
+      `import {createWebhookServer,loadServerOptionsFromEnvironment} from './server.mjs';
+const options=loadServerOptionsFromEnvironment();
+const server=createWebhookServer(options);
+server.listen(options.port,options.host);
+const shutdown=()=>{server.close(()=>{process.exitCode=0;});setTimeout(()=>server.closeAllConnections(),1000).unref();};
+process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
+`,
+    );
     config.profile.ordinaryMessagePermissions = 'guild-text-own-messages-v1';
     config.fixtures.bot = 'fixtures/bot.json';
     const guild = {
@@ -109,7 +123,10 @@ async function withRuntime(change, run) {
           { id: '1100', permissions: '68608' },
         ],
         channels: [{ id: '2000', type: 0, permission_overwrites: [] }],
-        members: [{ id: '5100', user_id: '5000', roles: ['1100'] }],
+        members: [
+          { id: '5100', user_id: '5000', roles: ['1100'] },
+          { id: '5300', user_id: '3000', roles: [] },
+        ],
       },
     };
     const bot = { version: 1, user: { id: '5000', bot: true, username: 'Fixture Bot' } };

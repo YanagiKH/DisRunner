@@ -1,11 +1,11 @@
 # Architecture
 
-DisRunner v0.1 is a Preview with three deliberately different surfaces. The deterministic core and CLI are the broadest tested surface. Electron connects raw interaction-webhook projects through a mutually authenticated command path and bounded live message projections. Most Discord-like desktop editors and panels use seeded display data.
+DisRunner separates deterministic model execution from real local Bot execution. The core supplies state and protocol services; CLI and Desktop share the same Session and Scenario v2 runner. Supported Bot adapters are raw interaction webhooks, discord.js 14.27.0, and discord.py 2.6.4.
 
 ## Shipped boundaries
 
 ```text
-CLI scenario/recording/report
+CLI version 1 scenario/recording/report
             │
             ▼
 ┌──────────────── deterministic core ────────────────┐
@@ -15,31 +15,32 @@ CLI scenario/recording/report
 │ traces · small risk catalog · report data          │
 └────────────────────────────────────────────────────┘
 
-Electron renderer ── narrow IPC ── desktop runtime manager
+CLI version 2 ───────────────┐
+Electron renderer ── IPC ───┴─ shared Session / Scenario v2 runner
                                       │
-                                      ├─ validated project + BotRunner
-                                      ├─ loopback REST/Gateway services
-                                      └─ Ed25519 request ───► raw webhook bot
-                                         ◄── response HMAC ──┘
+                                      ├─ project/workspace + BotRunner
+                                      ├─ retained core state + local REST/Gateway
+                                      ├─ signed request / HMAC response ↔ raw Bot
+                                      └─ local Gateway / REST ↔ pinned SDK Bot
 ```
 
 The core classes can be composed in tests or the CLI. Their existence does not make every combination a supported imported-bot adapter.
 
 ### Core and CLI
 
-The core provides deterministic primitives and partial Discord-shaped protocol behavior. The CLI parses version 1 scenarios, runs supported actions/assertions, creates reports, and records or verifies deterministic replay envelopes. It does not run arbitrary bot frameworks.
+The core provides deterministic primitives and the declared local Discord protocol subset. CLI version 1 scenarios run the in-process model and support deterministic recording/replay. Version 2 scenarios launch a real configured Bot through Session, await bounded observations, and evaluate assertions against retained messages, interaction state, errors, and traces. Both produce JSON/JUnit/HTML/SARIF reports. Diagnostic reproduction bundles identify the inputs for a fresh Bot rerun; they omit source/dependencies and do not restore process memory.
 
 ### Electron runtime
 
-The desktop runtime validates a selected version 1 project, starts its declared process, and creates loopback REST and Gateway services with a per-run synthetic token. For the only supported adapter, `raw-interaction-webhook`, it also creates an ephemeral Ed25519 key pair and an independent 32-byte peer secret. The child verifies signed requests. Every accepted response HMAC-binds the request timestamp, HTTP status, request digest, and exact response digest; Electron verifies that HMAC on bounded raw bytes before checking status, parsing JSON, or validating the callback through the core interaction lifecycle.
+The shared runtime validates a selected project and workspace, starts the declared process, and creates loopback REST and Gateway services with a per-run synthetic token. The raw adapter uses an ephemeral Ed25519 key pair and an independent 32-byte peer secret. The child verifies signed requests. Accepted response HMACs bind the request timestamp, HTTP status, request digest, and exact response digest; the runtime verifies them before parsing callback data.
 
-Electron does not currently provide a supported generic Gateway, `discord.js`, `discord.py`, or stdio adapter. Selected ordinary and public interaction message mutations share retained core state, emit Gateway message dispatches and feed bounded Desktop projections. Ordinary guild-text permission enforcement requires the explicit `guild-text-own-messages-v1` profile and bot fixture; the default remains legacy-unenforced. Context-bound chat-input invocations use `chat-input-messages-v1`, including original/follow-up message routes. These are bounded profiles, not general fixture/event synchronization or Discord parity.
+The pinned SDK adapters redirect the supported SDK transports to those local services and use actual Gateway events and REST callbacks. Node 22.23.2 and Python 3.12.14 are the tested runtimes; install dependencies before offline use. Commands, legacy components, autocomplete, modals, messages, attachments, and supported channel/role/member changes share retained state. SDK projects default to strict ordinary-message permissions; raw projects retain the explicit legacy default unless configured otherwise. The action driver uses `interactions-v1`, including text invocation for raw projects with `command-registry-v2`. Earlier raw profiles retain their chat-input invocation contract. See [SDK adapters](sdk-adapters.md) and [Protocol compatibility](protocol-compatibility.md).
 
 ### Renderer
 
-The renderer has a narrow preload bridge for project selection, runtime start/stop, command invocation, and window controls. Runtime status, bounded process output, mutually authenticated command diagnostics, selected retained guild/channel/user/message projections, and associated runtime trace/risk entries come from Electron. The live feed includes ordinary type 0 messages, public interaction originals of type 20 and public follow-ups of type 0. It is diagnostic state, not viewer-permission-filtered state.
+The renderer uses a narrow preload bridge for project/workspace operations, runtime actions, scenario runs, exports, and window controls. Runtime status, bounded output, command registration, messages, and trace/risk entries come from Session. Public snapshots omit DMs and ephemeral messages. The selected actor view includes only that actor's private responses and applies channel visibility checks when permission enforcement is enabled.
 
-Guild/member editors, command/scenario editors, most inspector values, the virtual-clock control, and much of Risk Center remain seeded visual previews. Their edits are not persisted and do not drive the CLI/core scenario runner.
+Guild Editor saves validated resources to the workspace with bounded Undo/Redo. Command Explorer reads registered commands and validates inputs; Scenario Lab saves, validates, runs, cancels, and exports real Bot scenarios through the shared runner. The browser demo remains separate from project execution. A full dependency waterfall and CPU/memory profiler are not provided.
 
 ## Determinism and state
 
@@ -47,26 +48,26 @@ Given the same supported scenario, seed, initial resources, and virtual-clock st
 
 The Electron runtime uses a real-time core clock and launches external code. An imported process can read the host clock, use its own randomness, race, access files, or perform network I/O, so desktop runs are not fully deterministic merely because the core is seeded.
 
-v0.1 has no workspace database, migration system, automatic fixture persistence, archive importer/exporter, or renderer undo/redo integration. The public persisted formats are limited to files explicitly written by current CLI commands and the version 1 recording envelope.
+Editable resources, saved scenarios, seed, and mode live in versioned `.disrunner/workspace.json`. Saves use validation, a lock, expected-file hashes, atomic replacement, and a previous-save backup; newer unknown versions are not overwritten. Workspace persistence and recovery do not restore a running process. See [Workspaces](workspaces.md).
 
 ## Current event flows
 
-### CLI/core scenario
+### Version 1 model scenario
 
 1. The parser accepts a supported version 1 action.
 2. The scenario runner advances its paused clock and invokes the relevant in-process engine.
 3. Supported resource mutations, interaction transitions, rate-limit decisions, or Gateway helper events are recorded.
 4. Assertions are evaluated and the final state hash, spans, findings, and events become report data.
 
-### Electron mutually authenticated command
+### Real Bot action
 
-1. The user invokes a validated `/name` command while a raw-webhook project is running.
-2. Electron creates a core interaction and signs the Discord-shaped HTTP body with the per-run private key.
-3. The imported loopback endpoint verifies the request, serializes one bounded response, and authenticates its exact status/body with the protected per-run peer secret.
-4. Electron reads a bounded response, timing-safely verifies its HMAC, then checks HTTP status and parses JSON.
-5. Electron validates the authenticated callback through `InteractionEngine` and records invocation diagnostics. Supported public message commits update retained state, emit selected Gateway dispatches and appear through the live projection.
+1. Desktop or Scenario v2 dispatches an action with the current run ID, request ID, and selected actor/channel context.
+2. Session validates live context, applicable permissions, registered command options or component/modal state.
+3. The action reaches the real Bot over signed raw HTTP or the SDK's local Gateway transport.
+4. The raw response or SDK REST callback passes through the shared interaction lifecycle and message authority.
+5. Committed state drives supported Gateway events and actor-specific Desktop views; scenario assertions read that retained state.
 
-Invocation completion does not wait for a deferred edit/follow-up. Later supported public original/follow-up commits can appear through the live feed; raw callback diagnostics are not themselves conversation rows. This does not generate a complete end-to-end Gateway/REST waterfall. See [Interaction engine](interaction-engine.md) for profile and projection boundaries.
+An initial invocation may complete before a deferred edit or followup. Later commits update the live view. Scenario v2 can await those observations and waits for tracked SDK handlers within its overall deadline before final assertions; unexpected structured handler errors or incomplete evidence prevent a pass. Session-scoped faults can delay/fail selected HTTP operations or disconnect/duplicate selected Gateway events. See [Interaction engine](interaction-engine.md) and [Fault injection](fault-injection.md).
 
 ## Trust boundaries
 
@@ -74,7 +75,7 @@ Invocation completion does not wait for a deferred edit/follow-up. Later support
 - **IPC:** only the typed preload methods are exposed, and main-process handlers verify the sender.
 - **Local services:** current REST/Gateway/webhook endpoints bind explicit loopback addresses and use synthetic credentials. Raw-webhook requests use Ed25519 and accepted responses use a separate per-run HMAC. A same-user process can still race the released dynamic port and deny availability, but a listener without the peer secret cannot pass readiness or command-response authentication.
 - **Imported process:** it runs with the current OS user's authority. DisRunner validates configuration, paths, and injected environment values, but it is not an OS sandbox.
-- **Plugins:** no public plugin SDK or plugin sandbox ships in v0.1.
-- **Release:** workflows can produce checksums, an SBOM, and GitHub provenance; repository rules, signing, and notarization remain release-time prerequisites.
+- **Plugins:** no public plugin loader, SDK, or plugin sandbox is available.
+- **Release:** the workflow requires the declared target checks, checksums, SBOM, and provenance; stable Windows/macOS packages additionally require native signing/notarization verification. Completed target jobs and receipts establish release results.
 
-Generic fault injection, persistent workspaces, public plugins, complete protocol adapters, and imported-process profiling are planned. See [Compatibility](../COMPATIBILITY.md), [Security model](security-model.md), and [Threat model](threat-model.md).
+Voice, Components V2, other SDK versions, arbitrary host fault injection, and imported-process profiling remain outside the supported profile. See [Compatibility](../COMPATIBILITY.md), [Security model](security-model.md), and [Threat model](threat-model.md).

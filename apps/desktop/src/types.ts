@@ -59,6 +59,10 @@ export interface ChatMessage {
   readonly metadata?: string;
   readonly parentId?: string;
   readonly command?: string;
+  readonly embeds?: readonly Readonly<Record<string, unknown>>[];
+  readonly components?: readonly Readonly<Record<string, unknown>>[];
+  readonly attachments?: readonly Readonly<Record<string, unknown>>[];
+  readonly editable?: boolean;
 }
 
 export type TraceOutcome =

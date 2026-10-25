@@ -25,6 +25,9 @@ See the annotated [Interface tour](ui-tour.md) for the simulator, evidence inspe
 ## Automation and extension
 
 - [Scenario format](scenario-format.md)
+- [Real Bot scenarios](scenario-v2.md)
+- [SDK adapters](sdk-adapters.md)
+- [Workspaces](workspaces.md)
 - [Assertions](assertions.md)
 - [Plugin SDK](plugin-sdk.md)
 - [Release process](release-process.md)

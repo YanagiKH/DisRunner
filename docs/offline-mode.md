@@ -1,67 +1,51 @@
 # Offline Mode
 
-DisRunner v0.1 runs its supported simulator paths without Discord and without a real bot token. This is an application boundary, not a network sandbox for the imported bot process.
+DisRunner's supported transport paths use synthetic credentials and local endpoints, without connecting to Discord. Prepare the application, interpreter, and Bot dependencies before disconnecting. Offline transport is separate from OS isolation of arbitrary user code.
 
-## Implemented application controls
+## Local services and credentials
 
-### Core services and helpers
+- REST and Gateway bind `127.0.0.1` on dynamic ports.
+- Each run receives a fresh `disrunner.offline.*` credential and its own endpoints.
+- Project configuration rejects production-shaped credentials and non-loopback adapter endpoints.
+- The raw webhook server receives an ephemeral Ed25519 public key and a separate protected response-authentication secret.
+- Supported logs, traces, and exports redact common credential shapes and current runtime secrets.
 
-- REST and Gateway servers bind `127.0.0.1`.
-- Per-run synthetic tokens use a reserved `disrunner.offline.*` namespace; production-shaped Discord tokens fail validation on supported injection paths.
-- `assertOfflineUrl` accepts only loopback HTTP(S) or WebSocket targets and explicitly rejects Discord host suffixes, credentials in URLs, unsupported protocols, and non-loopback hosts.
-- `createOfflineFetch` manually follows a bounded number of redirects, revalidates every target, and removes sensitive headers when the origin changes.
-- supported export/process-output paths redact configured values and common credential shapes.
+Raw readiness verifies a signed PING and its response HMAC over exact request/response bytes before accepting the Bot as ready. The same peer authentication protects command callbacks. Body size, age, replay, connection, and timeout limits remain independent checks.
 
-These URL/fetch helpers protect only callers that use them. They do not intercept arbitrary sockets opened by imported code.
+## SDK transport guards
 
-### Electron and raw webhook path
+The pinned JavaScript bootstrap redirects SDK REST/Gateway requests to the current session and rejects connections outside those endpoints. The Python bootstrap similarly directs SDK traffic locally and rejects external aiohttp requests while active. Neither adapter falls back to Discord after a startup or route failure.
 
-- The packaged renderer loads only app files and exact active loopback origins; navigation, new windows, permissions, downloads, and other renderer requests are denied.
-- Project configuration accepts only explicit loopback adapter URL templates and `profile.networkPolicy: "offline"`.
-- The desktop runtime injects synthetic REST/Gateway credentials, an ephemeral Ed25519 public key, and a separate protected per-run webhook peer secret—not a Discord bot token.
-- The bundled raw-webhook example binds loopback, fails closed without offline mode/key material, verifies `timestamp + raw body` request signatures, and HMAC-authenticates every accepted PING/command response.
-- Electron reads the bounded raw response, verifies HMAC-SHA-256 over the versioned domain, timestamp, HTTP status, request digest, and response digest with `timingSafeEqual`, and only then checks status or parses JSON.
-- Request body, age, replay, connection, socket-reuse, header, and response-body limits remain enforced independently of peer authentication.
+These guards cover their supported transport hooks. A Bot using another networking library, native module, or child process can have other behavior. They do not replace a firewall or OS sandbox. See [SDK adapters](sdk-adapters.md) for the exact dependency/runtime profiles.
 
-The current application does not turn denied renderer requests into the general risk finding promised by the product roadmap. The Settings “Audit blocked requests” control is a visual preview, not a shipped audit log.
+## Desktop boundary
+
+The Electron renderer loads application files and the active permitted local origins. Navigation, new windows, permissions, downloads, and IPC senders are restricted. The browser demo has no local process/file bridge.
+
+Project paths and entry files are validated, the command is executed without a shell, execution-control environment overrides are rejected, and process output is bounded. The runtime owns its Bot process and local services and performs bounded cleanup on stop or cancellation.
 
 ## Imported-process boundary
 
-The Electron project loader resolves the declared executable/entry point and canonical project paths, parses the start command without a shell, and restricts execution-control environment variables. `BotRunner` independently canonicalizes the workspace/current directory, validates synthetic endpoints and selected environment values, bounds/redacts output, starts the process without a shell, and attempts process-tree cleanup on stop.
+The selected Bot still runs with the current OS user's filesystem, network, and process privileges. It may load its own `.env`, read accessible files, open custom connections, or spawn programs. DisRunner does not install a system firewall, virtualize every socket, or provide a general untrusted-code sandbox.
 
-The child still runs with the current OS user's filesystem, network, and process privileges. It can ignore injected endpoints, load its own `.env`, open a direct Discord or external connection, read accessible files, or spawn other programs. DisRunner v0.1 does not install a firewall, hook every socket API, or prove process-level egress denial.
-
-> Offline Mode means DisRunner's supported traffic stays local. It does not make arbitrary imported code offline.
-
-## Test evidence
-
-Current automated coverage checks core URL policy, redirect revalidation, synthetic-token handling, local-service constraints, redaction boundaries, raw-webhook request/response authentication, fixed cross-implementation HMAC vectors, forged/missing/tampered responses, and packaged Electron renderer request blocking on macOS/Linux. The cross-platform desktop runtime-manager suite drives the real signed transport against local valid and forged listeners; the Ubuntu quality job exercises the raw-webhook server, independent client, and security suites; macOS/Linux package smoke exercises authenticated PING and command callbacks plus fixed forged-listener rejection. The Windows package smoke is intentionally narrower: because Electron's Windows CDP connection can deadlock, it validates the real executable, packaged identity, ASAR presence, stability, and process-tree cleanup without executing the packaged renderer/runtime. Windows renderer E2E and runtime-manager tests cover those layers before packaging. No target runs a cross-platform OS-level egress canary for the imported process.
-
-Run the applicable suites:
-
-```bash
-pnpm run test:offline
-pnpm run test:security
-pnpm --filter @disrunner/desktop run test:runtime-manager
-pnpm run test:raw-webhook
-pnpm run test:e2e
-```
-
-Passing them proves only the exercised application paths and build.
+Never provide a production credential to a local project. A local process with sufficient same-user inspection privileges may inspect another process's environment or memory despite the application-level guards.
 
 ## Running untrusted code
 
-Use an external security boundary for an unknown project:
+Use a disposable VM/container or an OS sandbox with restricted mounts and networking. Prepare dependencies before isolating it, remove live credentials, and verify that IPv4/IPv6/DNS and filesystem restrictions match the intended boundary. Export only reviewed reports and fixtures.
 
-1. Copy only the reviewed bot files and fixtures into a disposable VM/container.
-2. Remove production tokens, cloud credentials, SSH keys, browser profiles, and home-directory mounts.
-3. Disable network access at the VM/container/firewall layer, including IPv4, IPv6, and DNS.
-4. Run as a non-administrator with minimal filesystem/process permissions.
-5. Review dependency install scripts before the environment is isolated.
-6. Export only manually reviewed, redacted outputs, then destroy the environment.
+## Verification
 
-Exact controls vary by OS; validate the external boundary independently.
+The repository provides URL/network-policy, local-service, synthetic-token, redaction, peer-authentication, and real adapter conformance checks. Run the relevant suites for a source checkout:
 
-## Planned modes
+```sh
+pnpm run test:offline
+pnpm run test:security
+pnpm run test:runtime
+pnpm run test:raw-webhook
+pnpm run test:conformance
+```
 
-Hybrid/live traffic is not implemented. Any future mode must be explicit, visibly separate from Offline Mode, tightly scoped to a test guild and route allowlist, and backed by credential storage and audit controls. No current Preview toggle enables it.
+These checks establish the paths they exercise. They do not prove process-wide containment of arbitrary Bot code or qualify an untested installed platform. Published platform/artifact results belong to the corresponding release.
+
+Hybrid/live traffic, online synchronization, and an online updater are not required for local use.

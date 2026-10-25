@@ -1,0 +1,10 @@
+{
+  "name": "@disrunner/example-discordjs-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Discord.js example for local DisRunner sessions.",
+  "dependencies": {
+    "discord.js": "14.27.0"
+  }
+}

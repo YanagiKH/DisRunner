@@ -110,4 +110,27 @@ describe('simulationReducer', () => {
     expect(state.interaction.details).toBe('Bot interaction timed out after 3000 ms.');
     expect(state.interaction.outcome).toBe('Timed out');
   });
+
+  it('labels component diagnostics with the actual control and captured action', () => {
+    const action = { type: 'component' as const, customId: 'confirm', componentType: 2 };
+    const state = simulationReducer(runningState(), {
+      type: 'execute-runtime',
+      input: 'confirm',
+      action,
+      result: {
+        runId: 'run-1',
+        requestId: 'request-3',
+        context: { actorId: '3000', guildId: '1000', channelId: '2100' },
+        ok: true,
+        command: 'confirm',
+        interactionId: '1234567890',
+        durationMs: 7,
+        response: { type: 'update', data: { content: 'Confirmed' } },
+        error: null,
+      },
+    });
+    expect(state.interaction.command).toBe('Component confirm');
+    expect(state.interaction.payload['action']).toEqual(action);
+    expect(state.messages['2100']).toBeUndefined();
+  });
 });

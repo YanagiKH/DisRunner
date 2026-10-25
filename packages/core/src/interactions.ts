@@ -1,3 +1,8 @@
+import {
+  validateLegacyModalResponse,
+  validateAutocompleteResponse,
+  findFocusedAutocompleteOptionType,
+} from './interaction-controls.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { ResourceRecord, RiskFinding, SimulationProfile } from './contracts.js';
 import type { VirtualClock } from './clock.js';
@@ -49,7 +54,8 @@ export interface InteractionContext {
 }
 
 export interface SimulatedInteraction {
-  readonly messageProfile?: 'chat-input-messages-v1';
+  readonly messageProfile?: 'chat-input-messages-v1' | 'interactions-v1';
+  readonly sourceMessageId?: string;
   readonly originalMessageId?: string;
   readonly id: string;
   readonly token: string;
@@ -67,7 +73,8 @@ export interface SimulatedInteraction {
 }
 
 interface MutableInteraction {
-  messageProfile?: 'chat-input-messages-v1';
+  messageProfile?: 'chat-input-messages-v1' | 'interactions-v1';
+  sourceMessageId?: string;
   originalMessageId?: string;
   id: string;
   token: string;
@@ -172,10 +179,11 @@ export class InteractionEngine {
       readonly data?: Readonly<Record<string, unknown>>;
       readonly context?: InteractionContext;
       readonly messageProfile?: InteractionMessageProfile;
+      readonly sourceMessageId?: string;
     } = {},
   ): SimulatedInteraction {
     this.#assertLifecycleIdle();
-    if (input.messageProfile === 'chat-input-messages-v1') return this.#createAuthoritative(input);
+    if (authoritativeProfile(input.messageProfile)) return this.#createAuthoritative(input);
     if (input.messageProfile !== undefined && input.messageProfile !== 'model')
       throw unsupportedMessageProfile();
     // The application ID always comes from the engine; same-name input or data fields are ignored.
@@ -261,7 +269,7 @@ export class InteractionEngine {
     data: Readonly<Record<string, unknown>> = {},
   ): SimulatedInteraction {
     this.#assertLifecycleIdle();
-    if (this.#interactions.get(id)?.messageProfile === 'chat-input-messages-v1')
+    if (authoritativeProfile(this.#interactions.get(id)?.messageProfile))
       return this.executeMessage({ operation: 'respond', interactionId: id, responseType, data })
         .interaction;
     const interaction = this.#interactions.get(id);
@@ -305,7 +313,7 @@ export class InteractionEngine {
 
   public followup(id: string, data: Readonly<Record<string, unknown>> = {}): InteractionFollowup {
     this.#assertLifecycleIdle();
-    if (this.#interactions.get(id)?.messageProfile === 'chat-input-messages-v1') {
+    if (authoritativeProfile(this.#interactions.get(id)?.messageProfile)) {
       const result = this.executeMessage({ operation: 'create-followup', interactionId: id, data });
       const message = result.message!;
       return {
@@ -356,7 +364,7 @@ export class InteractionEngine {
 
   public editOriginal(id: string, data: Readonly<Record<string, unknown>>): SimulatedInteraction {
     this.#assertLifecycleIdle();
-    if (this.#interactions.get(id)?.messageProfile === 'chat-input-messages-v1')
+    if (authoritativeProfile(this.#interactions.get(id)?.messageProfile))
       return this.executeMessage({ operation: 'edit-original', interactionId: id, data })
         .interaction;
     const interaction = this.#requireUsableToken(id);
@@ -390,7 +398,7 @@ export class InteractionEngine {
 
   public deleteOriginal(id: string): SimulatedInteraction {
     this.#assertLifecycleIdle();
-    if (this.#interactions.get(id)?.messageProfile === 'chat-input-messages-v1')
+    if (authoritativeProfile(this.#interactions.get(id)?.messageProfile))
       return this.executeMessage({ operation: 'delete-original', interactionId: id }).interaction;
     const interaction = this.#requireUsableToken(id);
     if (interaction.status === 'pending') throw new DiscordApiError(404, 10015, 'Unknown webhook.');
@@ -407,7 +415,7 @@ export class InteractionEngine {
     data: Readonly<Record<string, unknown>>,
   ): InteractionFollowup {
     this.#assertLifecycleIdle();
-    if (this.#interactions.get(interactionId)?.messageProfile === 'chat-input-messages-v1') {
+    if (authoritativeProfile(this.#interactions.get(interactionId)?.messageProfile)) {
       const result = this.executeMessage({
         operation: 'edit-followup',
         interactionId,
@@ -440,7 +448,7 @@ export class InteractionEngine {
 
   public deleteFollowup(interactionId: string, followupId: string): void {
     this.#assertLifecycleIdle();
-    if (this.#interactions.get(interactionId)?.messageProfile === 'chat-input-messages-v1') {
+    if (authoritativeProfile(this.#interactions.get(interactionId)?.messageProfile)) {
       this.executeMessage({ operation: 'delete-followup', interactionId, messageId: followupId });
       return;
     }
@@ -500,7 +508,22 @@ export class InteractionEngine {
         data: Readonly<Record<string, unknown>>,
         existing?: ResourceRecord,
         materializing = false,
-      ) => validateInteractionMessagePayload(data, this.#maxPayloadBytes, existing, materializing);
+      ) =>
+        validateInteractionMessagePayload(
+          interaction.messageProfile === 'interactions-v1'
+            ? Object.fromEntries(
+                Object.entries(data).filter(
+                  ([key, value]) =>
+                    !(key === 'enforce_nonce' && value === false) &&
+                    !(existing !== undefined && key === 'tts' && value === false),
+                ),
+              )
+            : data,
+          this.#maxPayloadBytes,
+          existing,
+          materializing,
+          interaction.messageProfile === 'interactions-v1',
+        );
       if (command.operation === 'respond') {
         if (interaction.status !== 'pending')
           throw new DiscordApiError(400, 40060, 'Interaction has already been acknowledged.');
@@ -534,9 +557,77 @@ export class InteractionEngine {
           operation = 'create';
           kind = 'original';
           loading = true;
-        } else if (command.responseType !== 'modal') throw invalidInteractionPayload();
+        } else if (command.responseType === 'update' || command.responseType === 'defer-update') {
+          const source =
+            interaction.sourceMessageId === undefined
+              ? undefined
+              : authority.state.get('message', interaction.sourceMessageId);
+          if (
+            source === undefined ||
+            source['channel_id'] !== context.channelId ||
+            source['guild_id'] !== context.guildId ||
+            (source['application_id'] !== undefined &&
+              source['application_id'] !== applicationId) ||
+            !isPlainObject(source['author']) ||
+            source['author']['id'] !== authority.author.id ||
+            source['author']['bot'] !== true ||
+            (source['visibility'] === 'ephemeral' && source['recipient_id'] !== context.actorId)
+          )
+            throw unknownInteractionMessage();
+          if (command.responseType === 'defer-update' && Object.keys(data).length !== 0)
+            throw invalidInteractionPayload();
+          current = source;
+          messageId = source.id;
+          kind = 'original';
+          candidate.originalMessageId = source.id;
+          if (command.responseType === 'update') {
+            payload = normalized(data, source);
+            operation = 'update';
+          }
+        } else if (command.responseType === 'autocomplete') {
+          if (interaction.messageProfile === 'interactions-v1')
+            validateAutocompleteResponse(
+              data,
+              this.#maxPayloadBytes,
+              findFocusedAutocompleteOptionType(interaction.data, this.#maxPayloadBytes),
+            );
+          const choices = data['choices'];
+          if (
+            Object.keys(data).some((key) => key !== 'choices') ||
+            !Array.isArray(choices) ||
+            choices.length > 25 ||
+            choices.some(
+              (choice) =>
+                !isPlainObject(choice) ||
+                typeof choice['name'] !== 'string' ||
+                choice['name'].length < 1 ||
+                choice['name'].length > 100 ||
+                !['string', 'number'].includes(typeof choice['value']),
+            )
+          )
+            throw invalidInteractionPayload();
+        } else if (command.responseType === 'modal') {
+          if (interaction.messageProfile === 'interactions-v1')
+            validateLegacyModalResponse(data, this.#maxPayloadBytes);
+          if (
+            interaction.messageProfile === 'interactions-v1' &&
+            (typeof data['custom_id'] !== 'string' ||
+              data['custom_id'].length < 1 ||
+              data['custom_id'].length > 100 ||
+              typeof data['title'] !== 'string' ||
+              data['title'].length < 1 ||
+              data['title'].length > 45 ||
+              !Array.isArray(data['components']) ||
+              data['components'].length < 1 ||
+              data['components'].length > 5)
+          )
+            throw invalidInteractionPayload();
+        } else throw invalidInteractionPayload();
         candidate.acknowledgedAtMs = now;
-        candidate.status = command.responseType === 'defer' ? 'deferred' : 'responded';
+        candidate.status =
+          command.responseType === 'defer' || command.responseType === 'defer-update'
+            ? 'deferred'
+            : 'responded';
         candidate.initialResponse = {
           type: command.responseType,
           data: operation === 'none' ? data : {},
@@ -633,6 +724,7 @@ export class InteractionEngine {
         }
       }
       if (
+        command.operation !== 'respond' &&
         operation === 'update' &&
         current !== undefined &&
         isDeepStrictEqual(interactionMessagePayload(current), payload)
@@ -667,7 +759,32 @@ export class InteractionEngine {
         const result = domain.commit(
           {
             operation,
+            componentSource:
+              current?.id === interaction.sourceMessageId &&
+              current?.['message_origin'] !== 'interaction',
             interactionId: interaction.id,
+            ...(interaction.messageProfile === 'interactions-v1'
+              ? {
+                  interactionMetadata: {
+                    id: interaction.id,
+                    type:
+                      interaction.type === 'component'
+                        ? 3
+                        : interaction.type === 'modal-submit'
+                          ? 5
+                          : 2,
+                    user: {
+                      id: context.actorId,
+                      username:
+                        authority.state.get('user', context.actorId)?.['username'] ?? 'User',
+                      discriminator: '0',
+                      avatar: null,
+                      bot: false,
+                    },
+                    authorizing_integration_owners: context.guildId ? { '0': context.guildId } : {},
+                  },
+                }
+              : {}),
             applicationId,
             context,
             ...(kind === undefined ? {} : { kind }),
@@ -741,10 +858,7 @@ export class InteractionEngine {
         initial ? 10062 : 10015,
         initial ? 'Unknown interaction.' : 'Unknown webhook.',
       );
-    if (
-      interaction.messageProfile !== 'chat-input-messages-v1' ||
-      this.#messageAuthority === undefined
-    )
+    if (!authoritativeProfile(interaction.messageProfile) || this.#messageAuthority === undefined)
       throw unsupportedMessageProfile();
     if (this.#effectiveStatus(interaction) === 'expired')
       throw new DiscordApiError(
@@ -762,11 +876,27 @@ export class InteractionEngine {
     const message = this.#messageAuthority?.state.get('message', id);
     if (
       message === undefined ||
+      message['channel_id'] !== interaction.context?.channelId ||
+      message['guild_id'] !== interaction.context?.guildId
+    )
+      throw unknownInteractionMessage();
+    const source = kind === 'original' && id === interaction.sourceMessageId;
+    if (source) {
+      const author = message['author'];
+      if (
+        !isPlainObject(author) ||
+        author['id'] !== this.#messageAuthority?.author.id ||
+        author['bot'] !== true ||
+        (message['application_id'] !== undefined &&
+          message['application_id'] !== interaction.applicationId) ||
+        (message['visibility'] === 'ephemeral' &&
+          message['recipient_id'] !== interaction.context?.actorId)
+      )
+        throw unknownInteractionMessage();
+    } else if (
       message['message_origin'] !== 'interaction' ||
       message['interaction_id'] !== interaction.id ||
       message['interaction_message_kind'] !== kind ||
-      message['channel_id'] !== interaction.context?.channelId ||
-      message['guild_id'] !== interaction.context?.guildId ||
       message['application_id'] !== interaction.applicationId ||
       message['webhook_id'] !== interaction.applicationId
     )
@@ -775,7 +905,7 @@ export class InteractionEngine {
   }
   #snapshot(interaction: MutableInteraction, deriveStatus = true): SimulatedInteraction {
     const snapshot = cloneInteraction(interaction);
-    if (interaction.messageProfile !== 'chat-input-messages-v1') return snapshot;
+    if (!authoritativeProfile(interaction.messageProfile)) return snapshot;
     let initialResponse = snapshot.initialResponse;
     if (initialResponse !== undefined && interaction.originalMessageId !== undefined) {
       const original = this.#messageAuthority?.state.get('message', interaction.originalMessageId);
@@ -823,6 +953,8 @@ export class InteractionEngine {
     readonly id?: string;
     readonly token?: string;
     readonly type?: string;
+    readonly messageProfile?: InteractionMessageProfile;
+    readonly sourceMessageId?: string;
     readonly data?: Readonly<Record<string, unknown>>;
     readonly context?: InteractionContext;
   }): SimulatedInteraction {
@@ -832,8 +964,9 @@ export class InteractionEngine {
       const data = cloneAuthorityPayload(input.data ?? {}, this.#maxPayloadBytes);
       const context = input.context === undefined ? undefined : copyContext(input.context);
       if (
-        (input.type ?? 'command') !== 'command' ||
-        data['type'] !== 1 ||
+        (input.messageProfile === 'chat-input-messages-v1'
+          ? (input.type ?? 'command') !== 'command' || data['type'] !== 1
+          : !MODELED_INTERACTION_KINDS.has(input.type ?? 'command')) ||
         context === undefined ||
         this.#applicationId === undefined
       )
@@ -852,7 +985,8 @@ export class InteractionEngine {
         token,
         applicationId: this.#applicationId,
         context,
-        type: 'command',
+        type: input.type ?? 'command',
+        ...(input.sourceMessageId === undefined ? {} : { sourceMessageId: input.sourceMessageId }),
         data,
         createdAtMs,
         initialDeadlineAtMs: createdAtMs + this.#profile.interactionDeadlineMs,
@@ -861,7 +995,7 @@ export class InteractionEngine {
         followups: [],
         timeoutReported: false,
         retainedBytes: 0,
-        messageProfile: 'chat-input-messages-v1',
+        messageProfile: input.messageProfile as 'chat-input-messages-v1' | 'interactions-v1',
       };
       const retainedBytes = this.#authorityRetainedBytes(interaction);
       this.#assertInteractionRetainedSize(retainedBytes);
@@ -1378,4 +1512,8 @@ function cloneAuthorityPayload(
   const data = cloneInteractionPayload(value, maxBytes);
   if (!isPlainObject(data)) throw invalidInteractionPayload();
   return data;
+}
+
+function authoritativeProfile(profile: InteractionMessageProfile | undefined): boolean {
+  return profile === 'chat-input-messages-v1' || profile === 'interactions-v1';
 }

@@ -18,7 +18,7 @@ function requireId(value) {
   return value;
 }
 
-/** Readiness PING gets a pong; every command gets the ephemeral diagnostic, never a feed row. */
+/** Readiness PING gets a pong; every command gets a private diagnostic for its invoking actor. */
 export function interactionCallbackBody(isPing) {
   return isPing ? { type: 1 } : { type: 4, data: { content: diagnostic, flags: 64 } };
 }

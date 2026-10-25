@@ -64,7 +64,12 @@ test('runtime production dependency closure excludes Electron and React', async 
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(manifest.private, true);
   assert.equal(manifest.type, 'module');
-  assert.deepEqual(manifest.dependencies, { '@disrunner/core': 'workspace:*' });
+  assert.deepEqual(manifest.dependencies, {
+    '@disrunner/core': 'workspace:*',
+    '@disrunner/adapter-discordjs': 'workspace:*',
+    '@disrunner/adapter-discordpy': 'workspace:*',
+    yaml: '^2.9.1',
+  });
   const core = JSON.parse(
     await readFile(new URL('../../core/package.json', import.meta.url), 'utf8'),
   );
@@ -137,9 +142,13 @@ for (const strict of [true, false]) {
             roles: [
               { id: '1000', permissions: '0' },
               { id: '1100', permissions: '0' },
+              { id: '1200', permissions: '68608' },
             ],
             channels: [{ id: '2000', type: 0, permission_overwrites: [] }],
-            members: [{ id: '5100', user_id: '5000', roles: ['1100'] }],
+            members: [
+              { id: '5100', user_id: '5000', roles: ['1100'] },
+              { id: '5101', user_id: '3000', roles: ['1200'] },
+            ],
           },
         }),
       );
@@ -194,6 +203,7 @@ for (const strict of [true, false]) {
           requestSingleInstanceLock: () => true,
           whenReady: () => Promise.resolve(),
           getVersion: () => 'headless',
+          getPath: () => path.join(directory, 'user-data'),
           quit() {},
         },
         BrowserWindow: InertShellWindow,

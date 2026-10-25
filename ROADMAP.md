@@ -1,70 +1,39 @@
 # DisRunner Roadmap
 
-This roadmap describes intent, not compatibility. A capability becomes supported only after implementation, documentation in [COMPATIBILITY.md](COMPATIBILITY.md), and direct automated evidence at the advertised layer.
+The supported profiles are defined in [Compatibility](COMPATIBILITY.md). New features require protocol, real Bot and packaged application tests at the layer they affect.
 
-## Current — v0.1 Preview
+## Current — v1.0
 
-Implemented scope:
+- Shared Desktop/CLI Session with real raw-webhook, discord.js and discord.py processes.
+- Local API v10 REST/Gateway, command registry, supported message/interaction lifecycles, permissions and intents.
+- Typed commands, autocomplete, context commands, legacy buttons/selects/modals, DMs and local attachments.
+- Actor-specific state, live diagnostics, saved fixtures/scenarios, atomic storage, backups and conflict recovery.
+- Real Bot Scenario v2, meaningful assertions, cancellation, scoped faults, four report formats and redacted diagnostic bundles.
+- Deterministic model scenarios and recordings remain separate from real Bot reruns.
+- Packaged raw/SDK UI and installer roundtrips, offline network-namespace tests, standalone CLI distribution and release integrity checks.
 
-- deterministic core state, time, seeded IDs/randomness, snapshots/state hashes, and version 1 scenarios;
-- core interaction lifecycle plus selected permission, intent, rate-limit, Gateway, REST, protocol-limit, trace, assertion, and risk behavior;
-- CLI validate/run/test, versioned record/replay, and JSON/JUnit/HTML/SARIF output;
-- signed raw-interaction-webhook example;
-- Electron project validation/process lifecycle and a real mutually authenticated local `/ping` path;
-- selected ordinary and public chat-input message commits, Gateway dispatches and bounded Desktop live projections, plus explicit ordinary-message permission enforcement;
-- packaged Linux G1 and strict ordinary-message allow/deny matrices, with `completeParity: false`; see [qualified evidence and remaining gates](docs/g1-acceptance.md);
-- Discord-like desktop visual fixtures and preview feature surfaces.
+Platform installation and signing results are published with each release. See the [evidence index](docs/v1.0/requirements-evidence-index.md) and [release process](docs/release-process.md).
 
-Known exit gaps for a broader usable preview:
+## Next — broader supported profiles
 
-- synchronization is limited to selected message/state projections and dispatches; other resources, editors and diagnostic panels are not fully connected;
-- editor/scenario/settings changes are not persisted;
-- desktop interaction controls do not cover context commands, autocomplete, components, or modals;
-- generic fault injection, imported-process performance metrics, broad risk rules, and crash recovery need implementation;
-- platform support must be promoted from fresh package/E2E evidence, not workflow presence.
+- Additional SDK versions after independent conformance runs.
+- More fixture editor forms, command/profile options and supported REST resources.
+- Further Components V2 and newer modal controls behind explicit profiles.
+- More fault policies and workload measurements.
+- Additional migration/recovery and minimum-OS coverage.
 
-## Next — connected desktop preview
+## Later — advanced simulation
 
-- Persist virtual guild, channel, role, user, message, command, component, and modal fixtures.
-- Extend the selected message connection to other desktop actions and core resources used by REST and Gateway transports.
-- Extend Gateway events beyond selected message mutations and connect the remaining trace, diff, permission, bucket and finding panels.
-- Expose the core virtual clock and interaction 3-second/15-minute boundaries in Electron.
-- Connect Scenario Lab to the versioned core/CLI scenario engine and safe report export.
-- Add recovery tests for app crashes, active ports, and child-process cleanup.
-
-**Exit evidence:** the bundled raw-webhook bot can be opened, exercised, restarted, recovered, and cleaned up through one packaged E2E; displayed evidence matches core state.
-
-## Later — framework and Gateway adapters
-
-- Define a versioned adapter contract for generic local HTTP/WebSocket bots.
-- Add tested, pinned-version `discord.js` and `discord.py` adapters.
-- Return connected fixture guilds/events over Gateway and validate reconnect/resume through the advertised dynamic URL.
-- Add bounded delay/drop/duplicate/reorder/burst policies and deterministic cleanup.
-
-**Exit evidence:** adapter contract suites plus real WebSocket/REST process E2E on each promoted platform.
-
-## Toward 1.0
-
-- Complete the declared interaction, permission, rate-limit, REST/Gateway event, and Components V2 profiles.
-- Add bounded CPU, memory, event-loop, queue, and latency measurements with reproducible workloads.
-- Stabilize config/scenario/recording/report schemas and supply migrations.
-- Add risk baselines/suppressions and explicit CI severity policies.
-- Produce signed/notarized packages, updater/rollback behavior, SBOM, canonical provenance, and audited release evidence.
-
-**Exit evidence:** every 1.0 definition-of-done item maps to a green automated check and no unresolved critical/high security finding remains.
-
-## Advanced simulation
-
-- Sharding, large-guild, long-running, multi-bot, and distributed workload models.
-- Advanced AutoMod, stage, soundboard, entitlement, subscription, and commerce resources.
-- Explicit-consent live contract comparison, isolated from Offline Mode.
-- Voice state at scale. Real voice transport remains out of scope unless separately specified.
+- Multiple Bots, sharding and larger guild workloads.
+- Threads/forums, reactions, presence and additional event families.
+- Process CPU, memory and event-loop profiling.
+- Optional update delivery and richer historical reports.
 
 ## Always out of scope
 
 - User-account automation or self-bot behavior.
-- Shipping Discord logos, proprietary assets, or a pixel-perfect proprietary client copy.
-- Guaranteeing undocumented Discord client behavior or production correctness.
-- Claiming that application-level offline controls replace an OS sandbox.
+- Shipping proprietary Discord client assets or promising pixel-perfect client behavior.
+- Claiming complete Discord parity or arbitrary process memory checkpoints.
+- Treating loopback adapters as an OS sandbox for untrusted code.
 
-Proposals must identify the protocol surface, evidence strategy, security impact, and compatibility/migration plan.
+Proposals should identify the protocol surface, compatibility impact and observable test cases.

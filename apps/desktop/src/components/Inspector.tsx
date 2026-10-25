@@ -23,18 +23,23 @@ interface InspectorProps {
   readonly trace: InteractionTrace;
   readonly emptyMessage?: string | undefined;
   readonly onSelectTab: (tab: InspectorTab) => void;
+  readonly runtime?: DisRunnerRuntimeState | undefined;
 }
 
 function TraceDetails({
   trace,
   onOpenPayload,
+  live = false,
 }: {
   readonly trace: InteractionTrace;
   readonly onOpenPayload: () => void;
+  readonly live?: boolean;
 }) {
   return (
     <div className="trace-details">
-      <div className="inspector-eyebrow">Selected interaction · sample projection</div>
+      <div className="inspector-eyebrow">
+        {live ? 'Selected interaction' : 'Selected interaction · sample projection'}
+      </div>
       <dl>
         <dt>Command</dt>
         <dd>{trace.command}</dd>
@@ -43,7 +48,15 @@ function TraceDetails({
         <dt>Channel</dt>
         <dd>{trace.channel}</dd>
         <dt>Message ID</dt>
-        <dd>{trace.outcome === 'Timed out' ? '(not yet created)' : `msg-${trace.id.slice(-4)}`}</dd>
+        <dd>
+          {live
+            ? typeof trace.payload['messageId'] === 'string'
+              ? trace.payload['messageId']
+              : '—'
+            : trace.outcome === 'Timed out'
+              ? '(not yet created)'
+              : `msg-${trace.id.slice(-4)}`}
+        </dd>
         <dt>Interaction ID</dt>
         <dd>{trace.interactionId}</dd>
         <dt>Created at</dt>
@@ -149,29 +162,36 @@ function Outcome({ trace }: { readonly trace: InteractionTrace }) {
   );
 }
 
-function PayloadView({ trace }: { readonly trace: InteractionTrace }) {
+function PayloadView({
+  trace,
+  live = false,
+}: {
+  readonly trace: InteractionTrace;
+  readonly live?: boolean;
+}) {
   return (
     <div className="inspector-content payload-view">
       <div className="payload-toolbar">
         <div>
           <FileJson size={16} />
           <strong>INTERACTION_CREATE</strong>
-          <span>Sample projection · application/json</span>
+          <span>{live ? 'application/json' : 'Sample projection · application/json'}</span>
         </div>
         <button disabled type="button">
           <Copy size={14} /> Copy redacted payload
         </button>
       </div>
-      <pre>
+      <pre aria-label="Interaction summary JSON">
         <code>{JSON.stringify(trace.payload, null, 2)}</code>
       </pre>
       <aside className="payload-note">
         <ShieldCheck size={17} />
         <div>
-          <strong>Redacted preview</strong>
+          <strong>{live ? 'Safe interaction summary' : 'Redacted preview'}</strong>
           <span>
-            This projected model excludes raw interaction tokens; it is not a complete request
-            capture.
+            {live
+              ? 'Interaction tokens are excluded from the displayed summary.'
+              : 'This projected model excludes raw interaction tokens; it is not a complete request capture.'}
           </span>
         </div>
       </aside>
@@ -327,7 +347,33 @@ function RisksView({ trace }: { readonly trace: InteractionTrace }) {
   );
 }
 
-export function Inspector({ activeTab, trace, onSelectTab, emptyMessage }: InspectorProps) {
+function RunSpans({ runtime }: { readonly runtime: DisRunnerRuntimeState }) {
+  return (
+    <div className="inspector-content">
+      <h3>Run spans</h3>
+      {runtime.traces.length === 0 ? (
+        <p>No spans have been recorded.</p>
+      ) : (
+        runtime.traces.map((span) => (
+          <div className="live-trace-row" key={span.id}>
+            <strong>{span.name}</strong>
+            <span>
+              {span.status} · {span.durationMs} ms
+            </span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+export function Inspector({
+  activeTab,
+  trace,
+  onSelectTab,
+  emptyMessage,
+  runtime,
+}: InspectorProps) {
   return (
     <section className="inspector" aria-label="Interaction inspector">
       <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
@@ -344,24 +390,109 @@ export function Inspector({ activeTab, trace, onSelectTab, emptyMessage }: Inspe
           </button>
         ))}
         <div className="inspector-tab-spacer" />
-        <span className="inspector-preview">Visual preview · sample panels</span>
+        <span className="inspector-preview">
+          {runtime ? 'Current run' : 'Visual preview · sample panels'}
+        </span>
       </div>
-      {emptyMessage ? (
-        <p role="tabpanel">{emptyMessage}</p>
+      {emptyMessage && (!runtime || activeTab === 'Trace' || activeTab === 'Payload') ? (
+        <div role="tabpanel">
+          <p>{emptyMessage}</p>
+          {runtime && activeTab === 'Trace' && <RunSpans runtime={runtime} />}
+        </div>
       ) : (
         <>
           {activeTab === 'Trace' && (
             <div className="trace-view" role="tabpanel">
-              <TraceDetails trace={trace} onOpenPayload={() => onSelectTab('Payload')} />
-              <Waterfall trace={trace} />
+              <TraceDetails
+                trace={trace}
+                onOpenPayload={() => onSelectTab('Payload')}
+                live={runtime !== undefined}
+              />
+              {runtime ? (
+                <div className="inspector-content">
+                  <h3>Observed spans</h3>
+                  {runtime.traces.map((span) => (
+                    <div className="live-trace-row" key={span.id}>
+                      <strong>{span.name}</strong>
+                      <span>
+                        {span.status} · {span.durationMs} ms
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Waterfall trace={trace} />
+              )}
               <Outcome trace={trace} />
             </div>
           )}
-          {activeTab === 'Payload' && <PayloadView trace={trace} />}
-          {activeTab === 'State Diff' && <StateDiffView />}
-          {activeTab === 'Permissions' && <PermissionsView />}
-          {activeTab === 'Rate Limits' && <RateLimitsView />}
-          {activeTab === 'Risks' && <RisksView trace={trace} />}
+          {activeTab === 'Payload' && <PayloadView trace={trace} live={runtime !== undefined} />}
+          {activeTab === 'State Diff' &&
+            (runtime ? (
+              <div className="inspector-content">
+                <h3>Current state · revision {runtime.coreState?.stateRevision ?? '—'}</h3>
+                <pre>{JSON.stringify(runtime.coreState?.resources ?? [], null, 2)}</pre>
+              </div>
+            ) : (
+              <StateDiffView />
+            ))}
+          {activeTab === 'Permissions' &&
+            (runtime ? (
+              <div className="inspector-content">
+                <h3>Permission results</h3>
+                <p>
+                  Permission denials recorded during this run appear below. REST request details are
+                  available in Trace.
+                </p>
+                {runtime.risks
+                  .filter((risk) => /permission|denied/i.test(`${risk.ruleId} ${risk.title}`))
+                  .map((risk, index) => (
+                    <p key={index}>
+                      {risk.title}: {risk.evidence}
+                    </p>
+                  ))}
+              </div>
+            ) : (
+              <PermissionsView />
+            ))}
+          {activeTab === 'Rate Limits' &&
+            (runtime ? (
+              <div className="inspector-content">
+                <h3>REST requests</h3>
+                {runtime.traces
+                  .filter((span) => span.kind === 'rest')
+                  .map((span) => (
+                    <div className="live-trace-row" key={span.id}>
+                      <strong>{span.name}</strong>
+                      <span>
+                        {span.status} · {span.durationMs} ms
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <RateLimitsView />
+            ))}
+          {activeTab === 'Risks' &&
+            (runtime ? (
+              <div className="inspector-content">
+                {runtime.risks.length === 0 ? (
+                  <p>No findings recorded.</p>
+                ) : (
+                  runtime.risks.map((risk, index) => (
+                    <div className={`risk-finding ${risk.severity}`} key={index}>
+                      <div>
+                        <strong>{risk.title}</strong>
+                        <p>{risk.evidence}</p>
+                      </div>
+                      <b>{risk.severity}</b>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : (
+              <RisksView trace={trace} />
+            ))}
         </>
       )}
     </section>

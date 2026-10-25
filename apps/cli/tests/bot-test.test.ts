@@ -102,6 +102,9 @@ function unitSession(overrides: Partial<Session> = {}): { session: Session; call
       return Promise.resolve(response(request));
     },
     snapshot,
+    snapshotForActor: snapshot,
+    setFaults: () => {},
+    dispatch: () => Promise.reject(new Error('This unit fixture does not dispatch actions.')),
     subscribe: () => () => {},
     stop: () => Promise.resolve(shutdown()),
     dispose: () => {
@@ -1140,7 +1143,10 @@ describe('shared-config ordinary permission consumer', () => {
               { id: '1100', permissions: '0' },
             ],
             channels: [{ id: '2000', type: 0, permission_overwrites: [] }],
-            members: [{ id: '5100', user_id: '5000', roles: ['1100'] }],
+            members: [
+              { id: '5100', user_id: '5000', roles: ['1100'] },
+              { id: '5101', user_id: '3000', roles: [] },
+            ],
           },
         }),
       );

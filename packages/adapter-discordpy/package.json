@@ -1,0 +1,16 @@
+{
+  "name": "@disrunner/adapter-discordpy",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "bootstrap.py",
+    "manifest.json",
+    "requirements.txt"
+  ]
+}

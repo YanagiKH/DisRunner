@@ -1,5 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { parseReleaseVersion } from './release-policy.mjs';
 
 const root = process.cwd();
 const manifests = ['package.json'];
@@ -13,8 +14,10 @@ for (const workspaceDirectory of ['apps', 'packages', 'examples']) {
 const versions = new Map();
 for (const manifest of manifests.sort()) {
   const parsed = JSON.parse(await readFile(path.join(root, manifest), 'utf8'));
-  if (typeof parsed.version !== 'string' || !/^\d+\.\d+\.\d+$/u.test(parsed.version)) {
-    throw new Error(`${manifest} does not contain a semantic version.`);
+  try {
+    parseReleaseVersion(parsed.version);
+  } catch {
+    throw new Error(`${manifest} does not contain a supported semantic version.`);
   }
   versions.set(manifest, parsed.version);
 }
