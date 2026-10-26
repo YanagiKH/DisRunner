@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   assertAppImageLauncher,
   assertLinuxSandboxEvidence,
@@ -21,6 +22,7 @@ import {
 } from './linux-sandbox.mjs';
 
 const launcher = new URL('../../build/linux/AppRun', import.meta.url);
+const oracle = fileURLToPath(new URL('./linux-sandbox.mjs', import.meta.url));
 
 async function fixture(t) {
   const directory = await mkdtemp(path.join(tmpdir(), 'DisRunner AppRun 測試 '));
@@ -157,6 +159,54 @@ test(
     await writeFile(path.join(directory, 'disrunner.desktop'), '[Desktop Entry]\nExec=AppRun %U\n');
     await chmod(path.join(directory, 'AppRun'), 0o644);
     await assert.rejects(assertAppImageLauncher(directory), /mode 0755/u);
+  },
+);
+
+test(
+  'artifact validation rejects symlink entry files even when their targets contain valid bytes',
+  { skip: process.platform !== 'linux' },
+  async (t) => {
+    for (const name of ['AppRun', 'disrunner.desktop']) {
+      const directory = await fixture(t);
+      await assertAppImageLauncher(directory);
+      const filename = path.join(directory, name);
+      const target = path.join(directory, 'valid-target');
+      await copyFile(filename, target);
+      await rm(filename);
+      await symlink(target, filename);
+      await assert.rejects(assertAppImageLauncher(directory), undefined, name);
+    }
+  },
+);
+
+test(
+  'artifact validation rejects nonregular and oversized entries without blocking on a FIFO',
+  { skip: process.platform !== 'linux' },
+  async (t) => {
+    for (const name of ['AppRun', 'disrunner.desktop']) {
+      for (const kind of ['directory', 'fifo', 'oversized']) {
+        const directory = await fixture(t);
+        await assertAppImageLauncher(directory);
+        const filename = path.join(directory, name);
+        const maximum = name === 'AppRun' ? (await readFile(launcher)).length : 64 * 1024;
+        await rm(filename);
+        if (kind === 'directory') await mkdir(filename);
+        else if (kind === 'fifo') {
+          const created = spawnSync('mkfifo', [filename]);
+          assert.equal(created.status, 0);
+        } else {
+          await writeFile(filename, Buffer.alloc(maximum + 1), { mode: 0o755 });
+        }
+        const child = spawnSync(process.execPath, [oracle, directory], {
+          encoding: 'utf8',
+          timeout: 2000,
+        });
+        assert.equal(child.error, undefined, `${name}/${kind} must terminate normally`);
+        assert.equal(child.signal, null);
+        assert.equal(child.status, 1, `${name}/${kind} must fail validation`);
+        assert.match(child.stderr, /regular file|artifact size/u);
+      }
+    }
   },
 );
 

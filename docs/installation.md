@@ -77,7 +77,7 @@ A bare `node`, `python`, or `python3` in `bot.startCommand` uses the inherited e
 
 The Linux desktop requires a working Chromium sandbox. It uses unprivileged user namespaces when the host permits them, or a matching administrator-installed SUID helper. A host that restricts user namespaces needs a per-application policy or a protected extracted installation. FUSE mounts commonly ignore SUID permissions, so changing permissions inside a mounted AppImage is insufficient.
 
-After verifying the downloaded AppImage checksum, an administrator can install an extracted copy in a new, protected version directory:
+After verifying the downloaded AppImage checksum, an administrator can install an extracted copy in a new, protected version directory. Keep this protected SUID installation path free of whitespace. For an installation directory containing spaces, use an application-specific user-namespace policy.
 
 ```sh
 (

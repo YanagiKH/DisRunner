@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, readlink, realpath, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, open, readFile, readdir, readlink, realpath, writeFile } from 'node:fs/promises';
 import { release } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -209,13 +210,43 @@ export async function packagedExecutablePath(launchEntry) {
     : launchEntry;
 }
 
+async function readArtifactFile(filename, maximumBytes, expectedMode) {
+  const file = await open(
+    filename,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const before = await file.stat({ bigint: true });
+    assert.ok(before.isFile(), 'AppImage entry must be a regular file');
+    assert.ok(before.size > 0n && before.size <= BigInt(maximumBytes), 'Invalid artifact size');
+    if (expectedMode !== undefined)
+      assert.equal(
+        Number(before.mode & 0o7777n),
+        expectedMode,
+        'AppImage AppRun must have mode 0755',
+      );
+    const bytes = Buffer.alloc(maximumBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const read = await file.read(bytes, length, bytes.length - length, length);
+      if (read.bytesRead === 0) break;
+      length += read.bytesRead;
+    }
+    assert.ok(length <= maximumBytes, 'Invalid artifact size');
+    assert.equal(BigInt(length), before.size, 'Artifact changed during its bounded read');
+    const after = await file.stat({ bigint: true });
+    for (const field of ['size', 'mode', 'mtimeNs', 'ctimeNs'])
+      assert.equal(after[field], before[field], 'Artifact changed during its bounded read');
+    return bytes.subarray(0, length);
+  } finally {
+    await file.close();
+  }
+}
+
 export async function assertAppImageLauncher(appDirectory) {
   const appRun = path.join(appDirectory, 'AppRun');
-  const info = await lstat(appRun);
-  assert.ok(info.isFile(), 'AppImage AppRun must be a regular controlled launcher');
-  assert.equal(info.mode & 0o7777, 0o755, 'AppImage AppRun must have mode 0755');
-  const actual = await readFile(appRun);
   const expected = await readFile(controlledLauncher);
+  const actual = await readArtifactFile(appRun, expected.length, 0o755);
   assert.deepEqual(
     actual,
     expected,
@@ -223,7 +254,8 @@ export async function assertAppImageLauncher(appDirectory) {
   );
   const desktopFiles = (await readdir(appDirectory)).filter((name) => name.endsWith('.desktop'));
   assert.equal(desktopFiles.length, 1, 'AppImage must contain one desktop entry');
-  const desktop = await readFile(path.join(appDirectory, desktopFiles[0]), 'utf8');
+  const desktopBytes = await readArtifactFile(path.join(appDirectory, desktopFiles[0]), 64 * 1024);
+  const desktop = desktopBytes.toString('utf8');
   const execLines = desktop.split(/\r?\n/u).filter((line) => line.startsWith('Exec='));
   assert.deepEqual(
     execLines,
@@ -237,7 +269,7 @@ export async function assertAppImageLauncher(appDirectory) {
     appRunSha256: createHash('sha256').update(actual).digest('hex'),
     controlledAppRunSha256: createHash('sha256').update(expected).digest('hex'),
     desktopFile: desktopFiles[0],
-    desktopSha256: createHash('sha256').update(desktop).digest('hex'),
+    desktopSha256: createHash('sha256').update(desktopBytes).digest('hex'),
     desktopExec: execLines[0].slice('Exec='.length),
   };
 }

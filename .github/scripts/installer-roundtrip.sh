@@ -10,10 +10,23 @@ evidence_directory="${DISRUNNER_INSTALLER_EVIDENCE:-$root/apps/desktop/release/i
 install_directory="$task_directory/application"
 mount_directory="$task_directory/image"
 mounted=false
+external_instance=""
 mkdir -p "$install_directory" "$mount_directory" "$evidence_directory"
+cleanup_external_helper() {
+  local phase="${1:-exit}"
+  if [[ -n "$external_instance" ]]; then
+    if ! "$node_path" "$root/.github/scripts/prepare-linux-sandbox.mjs" --cleanup-external-helper "$external_instance" > "$evidence_directory/external-suid-cleanup-${phase}.json"; then
+      return 1
+    fi
+    external_instance=""
+  fi
+}
 cleanup() {
   status="$?"
   trap - EXIT
+  if ! cleanup_external_helper; then
+    status=1
+  fi
   if [[ "$mounted" = true ]]; then
     if ! hdiutil detach "$mount_directory"; then
       hdiutil detach -force "$mount_directory" || true
@@ -67,7 +80,26 @@ for stage in installed reinstalled; do
     (cd "$install_directory" && "$artifact" --appimage-extract > "$evidence_directory/extract-${stage}.txt")
     "$node_path" "$root/apps/desktop/tests/e2e/linux-sandbox.mjs" "$install_directory/squashfs-root" --output "$evidence_directory/launcher-${stage}.json"
     if [[ "${DISRUNNER_TEST_INSTALL_SUID_SANDBOX:-0}" = 1 ]]; then
-      "$node_path" "$root/.github/scripts/prepare-linux-sandbox.mjs" "$install_directory/squashfs-root" > "$evidence_directory/suid-${stage}.json"
+      if [[ -z "$external_instance" ]]; then
+        external_instance="$("$node_path" -p 'require("node:crypto").randomUUID()')"
+      fi
+      "$node_path" "$root/.github/scripts/prepare-linux-sandbox.mjs" --external-helper "$install_directory/squashfs-root" --instance "$external_instance" > "$evidence_directory/suid-${stage}.json"
+      CHROME_DEVEL_SANDBOX="$("$node_path" --input-type=module - "$evidence_directory/suid-${stage}.json" "$external_instance" <<'NODE'
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const receipt = JSON.parse(await readFile(process.argv[2], 'utf8'));
+const expected = '/tmp/disrunner-sandbox-' + process.argv[3] + '/chrome-sandbox';
+assert.equal(receipt.instance, process.argv[3]);
+assert.equal(receipt.helperPath, expected);
+assert.equal(receipt.scope, 'temporary-ci-external-suid-helper');
+assert.equal(receipt.adjacentHelperAbsent, true);
+assert.equal(receipt.uid, 0);
+assert.equal(receipt.gid, 0);
+assert.equal(receipt.mode, '4755');
+process.stdout.write(receipt.helperPath);
+NODE
+)"
+      export CHROME_DEVEL_SANDBOX
     fi
     export DISRUNNER_LINUX_SANDBOX_EVIDENCE="$evidence_directory/$stage-linux-sandbox"
   fi
@@ -82,6 +114,7 @@ if [[ "$mounted" = true ]]; then
   hdiutil detach "$mount_directory"
   mounted=false
 fi
+cleanup_external_helper uninstall
 rm -rf "$install_directory"
 test ! -e "$executable"
 cmp -s "$workspace" "$evidence_directory/workspace-before.json"
@@ -106,6 +139,7 @@ const receipt = JSON.stringify({
   installerSha256: hash.digest('hex'),
   stages: ['installed-raw-and-sdk-ui', 'reinstalled-raw-and-sdk-ui', 'removed'],
   workspaceSentinelPreserved: true,
+  externalSandboxHelperRemoved: process.platform === 'linux' && process.env.DISRUNNER_TEST_INSTALL_SUID_SANDBOX === '1' ? true : null,
   completedAt: new Date().toISOString(),
 }, null, 2) + '\n';
 await writeFile(path.join(process.env.DISRUNNER_INSTALLER_EVIDENCE, 'result.json'), receipt);
