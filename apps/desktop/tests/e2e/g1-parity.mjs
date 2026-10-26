@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cp, mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { cp, mkdir, readFile, writeFile, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
@@ -1043,6 +1043,7 @@ async function gui() {
       });
     }
     async function select(directory, actor, invalid = false) {
+      const expectedRoot = invalid ? null : await realpath(directory);
       // Error recovery is explicit: changing projects must not bypass retained cleanup.
       if ((await snapshot()).phase === 'error') {
         await page.getByRole('button', { name: 'Retry cleanup', exact: true }).click();
@@ -1056,16 +1057,20 @@ async function gui() {
       }, directory);
       await page.keyboard.press('Alt+Digit6');
       await page.getByRole('button', { name: 'Browse folders', exact: true }).click();
-      await until(
-        async () => (await snapshot()).phase === (invalid ? 'error' : 'ready'),
-        'UI project selection',
-      );
+      await until(async () => {
+        const selected = await snapshot();
+        return (
+          selected.phase === (invalid ? 'error' : 'ready') &&
+          (invalid || selected.project?.root === expectedRoot)
+        );
+      }, 'UI project selection');
       if (invalid) {
         assert.equal((await snapshot()).pid, null);
         return;
       }
       await page.keyboard.press('Alt+Digit1');
       const actorSelect = page.getByRole('combobox', { name: 'Invocation actor' });
+      await until(async () => (await actorSelect.inputValue()) === actor, 'selected project actor');
       assert.equal(await actorSelect.inputValue(), actor);
       assert.equal(await actorSelect.locator('option').count(), 1, 'one loaded user only');
       assert.deepEqual(
