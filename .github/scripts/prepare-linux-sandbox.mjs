@@ -24,6 +24,7 @@ async function regularFile(filename) {
   const file = await open(
     filename,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    0o600,
   );
   try {
     const before = await file.stat();
@@ -80,6 +81,7 @@ export async function inspectCallerOwnedExecutable(executable) {
   const file = await open(
     executable,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    0o600,
   );
   try {
     const before = await file.stat();
@@ -113,6 +115,7 @@ async function protectedExternalDirectory(instance, allowMissing = false) {
     folder = await open(
       directory,
       constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      0o600,
     );
   } catch (error) {
     if (allowMissing && error.code === 'ENOENT') return null;
@@ -188,6 +191,7 @@ async function createExternalHelper(instance, expectedHash) {
     folder = await open(
       directory,
       constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      0o600,
     );
     const target = path.join('/proc/self/fd/' + folder.fd, 'chrome-sandbox');
     const file = await open(
@@ -305,6 +309,7 @@ async function prepareExternalHelper(directory, instance) {
     const folder = await open(
       candidate.appDirectory,
       constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      0o600,
     );
     try {
       assert.equal(
@@ -347,6 +352,7 @@ async function installVerifiedHelper(directory, expectedHash) {
   const folder = await open(
     directory,
     constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    0o600,
   );
   const stableDirectory = '/proc/self/fd/' + folder.fd;
   const temporary = path.join(stableDirectory, '.chrome-sandbox-' + randomUUID());

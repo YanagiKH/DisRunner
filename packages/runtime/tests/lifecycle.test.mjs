@@ -561,50 +561,83 @@ test(
   },
 );
 
-async function cycleEvidence(label, cycles, runCycle) {
+async function cycleEvidence(t, label, cycles, runCycle) {
   const { session, endpoints } = newSession();
   useMode(cycles.mode);
   await session.selectProject(project);
   const baseline = await settledBaseline();
   const records = [];
   let lastPorts = [];
-  for (let cycle = 1; cycle <= 20; cycle += 1) {
-    const seenBefore = identities().length;
-    const endpointCount = endpoints.length;
-    const detail = await runCycle(session, cycle);
-    const tree = identities().slice(seenBefore);
-    const ports = portsOf(endpoints.slice(endpointCount).at(-1));
-    assert.ok(tree.length >= 2, `${label} cycle ${cycle}: parent and grandchild reported`);
-    for (const record of tree)
-      assert.equal(isAlive(record), false, `${label} cycle ${cycle}: ${record.role}:${record.pid}`);
-    await assertPortsClosed(ports);
-    lastPorts = ports;
-    records.push({
-      cycle,
-      ...detail,
-      tree: tree.map(({ role, pid, pgid, starttime }) => ({ role, pid, pgid, starttime })),
-      ports,
-    });
+  let currentCycle = 0;
+  try {
+    for (let cycle = 1; cycle <= 20; cycle += 1) {
+      currentCycle = cycle;
+      const seenBefore = identities().length;
+      const endpointCount = endpoints.length;
+      const detail = await runCycle(session, cycle);
+      const tree = identities().slice(seenBefore);
+      const ports = portsOf(endpoints.slice(endpointCount).at(-1));
+      assert.ok(tree.length >= 2, `${label} cycle ${cycle}: parent and grandchild reported`);
+      for (const record of tree)
+        assert.equal(
+          isAlive(record),
+          false,
+          `${label} cycle ${cycle}: ${record.role}:${record.pid}`,
+        );
+      await assertPortsClosed(ports);
+      lastPorts = ports;
+      records.push({
+        cycle,
+        ...detail,
+        tree: tree.map(({ role, pid, pgid, starttime }) => ({ role, pid, pgid, starttime })),
+        ports,
+      });
+    }
+    const disposed = await session.dispose();
+    // After a failure cycle the session keeps exposing that run's primary child-exited issue
+    // (contract: stop/dispose must expose it); cleanup itself must still have succeeded.
+    assert.deepEqual(
+      disposed.errors.map((issue) => issue.code),
+      cycles.disposeErrorCodes ?? [],
+      JSON.stringify(disposed.errors),
+    );
+    const excess = await excessHandles(baseline);
+    const reused = [];
+    for (const port of lastPorts) reused.push(await listenOnce(port));
+    return { records, excess, reused };
+  } catch (error) {
+    try {
+      t.diagnostic(
+        JSON.stringify({
+          event: 'lifecycle-cycle-failure',
+          label,
+          cycle: currentCycle,
+          records,
+          snapshot: session.snapshot(),
+          endpoints,
+          fixtureDiagnostics: reports().filter((entry) =>
+            ['identity', 'error', 'exit', 'sigterm'].includes(entry.event),
+          ),
+        }),
+      );
+    } catch {
+      try {
+        t.diagnostic(
+          JSON.stringify({ event: 'lifecycle-evidence-unavailable', label, cycle: currentCycle }),
+        );
+      } catch {
+        /* The original cycle failure remains authoritative. */
+      }
+    }
+    throw error;
   }
-  const disposed = await session.dispose();
-  // After a failure cycle the session keeps exposing that run's primary child-exited issue
-  // (contract: stop/dispose must expose it); cleanup itself must still have succeeded.
-  assert.deepEqual(
-    disposed.errors.map((issue) => issue.code),
-    cycles.disposeErrorCodes ?? [],
-    JSON.stringify(disposed.errors),
-  );
-  const excess = await excessHandles(baseline);
-  const reused = [];
-  for (const port of lastPorts) reused.push(await listenOnce(port));
-  return { records, excess, reused };
 }
 
 test(
   'L11 twenty-success-cycles',
   { skip: !isLinux && 'Linux-only /proc evidence', timeout: 120_000 },
   async (t) => {
-    const evidence = await cycleEvidence('L11', { mode: 'normal' }, async (session, cycle) => {
+    const evidence = await cycleEvidence(t, 'L11', { mode: 'normal' }, async (session, cycle) => {
       const started = await session.start();
       const result = await session.invoke(request(started.runId, `ping-${cycle}`, '/ping'));
       assert.equal(result.response.data.content, 'pong:ping');
@@ -624,6 +657,7 @@ test(
   { skip: !isLinux && 'Linux-only /proc evidence', timeout: 120_000 },
   async (t) => {
     const evidence = await cycleEvidence(
+      t,
       'L12',
       { mode: 'exit-startup-1', disposeErrorCodes: ['child-exited'] },
       async (session) => {
@@ -646,7 +680,7 @@ test(
   'L13 twenty-cancel-cycles',
   { skip: !isLinux && 'Linux-only /proc evidence', timeout: 120_000 },
   async (t) => {
-    const evidence = await cycleEvidence('L13', { mode: 'stall-ping' }, async (session) => {
+    const evidence = await cycleEvidence(t, 'L13', { mode: 'stall-ping' }, async (session) => {
       const heldBefore = events('ping-held').length;
       const controller = new AbortController();
       const outcome = session.start({ signal: controller.signal }).then(

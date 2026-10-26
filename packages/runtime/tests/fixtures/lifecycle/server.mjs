@@ -37,10 +37,50 @@ function reporter(reportPath) {
   };
 }
 
+function observeProcess(report, role) {
+  const diagnostic = (entry) => {
+    try {
+      report({ role, pid: process.pid, ...entry });
+    } catch {
+      /* Diagnostic recording must not change the original process outcome. */
+    }
+  };
+  const recordError = (error, operation) => {
+    try {
+      const entry = { event: 'error', operation };
+      if (typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(error.code))
+        entry.code = error.code;
+      if (Number.isSafeInteger(error?.errno)) entry.errno = error.errno;
+      if (Number.isSafeInteger(error?.port) && error.port > 0 && error.port <= 65_535)
+        entry.port = error.port;
+      if (
+        ['listen', 'bind', 'spawn', 'fork', 'read', 'write', 'accept', 'connect'].includes(
+          error?.syscall,
+        )
+      )
+        entry.operation = error.syscall;
+      diagnostic(entry);
+    } catch {
+      /* Preserve the original exception if its metadata cannot be inspected. */
+    }
+  };
+  process.on('uncaughtExceptionMonitor', (error, origin) => {
+    recordError(
+      error,
+      origin === 'unhandledRejection' ? 'unhandled-rejection' : 'uncaught-exception',
+    );
+  });
+  process.on('exit', (code) => diagnostic({ event: 'exit', code, signal: null }));
+  return recordError;
+}
+
 if (process.argv[2] === '--grandchild') {
   const report = reporter(process.argv[3]);
+  observeProcess(report, 'grandchild');
   if (process.argv[4] === 'ignore-term') {
-    process.on('SIGTERM', () => report({ role: 'grandchild', pid: process.pid, event: 'sigterm' }));
+    process.on('SIGTERM', () =>
+      report({ role: 'grandchild', pid: process.pid, event: 'sigterm', signal: 'SIGTERM' }),
+    );
   }
   report({ ...identity('grandchild'), event: 'identity' });
   try {
@@ -67,7 +107,7 @@ function readControl() {
   }
 }
 
-function startGrandchild(reportPath, ignoreTerm) {
+function startGrandchild(reportPath, ignoreTerm, recordError) {
   return new Promise((resolvePromise, reject) => {
     // Not detached: the grandchild stays in the runner-owned process group.
     const grandchild = spawn(
@@ -80,7 +120,10 @@ function startGrandchild(reportPath, ignoreTerm) {
       ],
       { stdio: ['ignore', 'ignore', 'ignore', 'pipe'] },
     );
-    grandchild.once('error', reject);
+    grandchild.once('error', (error) => {
+      recordError(error, 'grandchild-spawn');
+      reject(error);
+    });
     grandchild.stdio[3].once('data', () => {
       grandchild.stdio[3].destroy();
       resolvePromise();
@@ -91,19 +134,20 @@ function startGrandchild(reportPath, ignoreTerm) {
 async function runBot() {
   const { mode, reportPath } = readControl();
   const report = reporter(reportPath);
+  const recordError = observeProcess(report, 'parent');
   report({ ...identity('parent'), event: 'identity', mode });
 
   const stubborn = mode === 'stubborn-tree';
   let server = null;
   process.on('SIGTERM', () => {
-    report({ role: 'parent', pid: process.pid, event: 'sigterm' });
+    report({ role: 'parent', pid: process.pid, event: 'sigterm', signal: 'SIGTERM' });
     if (stubborn) return;
     server?.closeAllConnections();
     process.exit(0);
   });
   setInterval(() => undefined, 1_000);
 
-  await startGrandchild(reportPath, stubborn);
+  await startGrandchild(reportPath, stubborn, recordError);
 
   if (mode === 'exit-startup-0' || mode === 'exit-startup-1') {
     const code = mode === 'exit-startup-0' ? 0 : 1;

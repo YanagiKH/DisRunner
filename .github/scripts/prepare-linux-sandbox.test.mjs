@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
 import {
   chmod,
   copyFile,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
+  readdir,
   rm,
   symlink,
   unlink,
@@ -61,6 +64,24 @@ async function namespaceProbe() {
   const command = async (...args) =>
     JSON.parse((await run(process.execPath, [helperScript, ...args], { timeout: 10_000 })).stdout);
   let created = false;
+  let mutation;
+  let markerFile;
+  let markerCreated = false;
+  const replaceHelperBytes = async (content) => {
+    await mutation.truncate(content.length);
+    let offset = 0;
+    while (offset < content.length) {
+      const { bytesWritten } = await mutation.write(
+        content,
+        offset,
+        content.length - offset,
+        offset,
+      );
+      assert.ok(bytesWritten > 0);
+      offset += bytesWritten;
+    }
+    await mutation.sync();
+  };
   try {
     const first = await command('--create-external-helper', instance, expectedHash);
     created = true;
@@ -68,7 +89,12 @@ async function namespaceProbe() {
     assert.equal(first.gid, 0);
     assert.equal(first.mode, '4755');
     assert.equal(first.helperSha256, expectedHash);
-    const initialInode = (await lstat(helper)).ino;
+    mutation = await open(
+      helper,
+      constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      0o600,
+    );
+    const initialInode = (await mutation.stat()).ino;
     assert.equal((await inspectExternalHelper(instance)).helperPath, helper);
     assert.equal(
       (await lstat(helper)).ino,
@@ -76,28 +102,43 @@ async function namespaceProbe() {
       'Reuse inspection must not replace the helper.',
     );
 
-    await chmod(helper, 0o644);
+    await mutation.chmod(0o644);
     await assert.rejects(inspectExternalHelper(instance), /mode 4755/u);
-    await chmod(helper, 0o4755);
-    await writeFile(helper, 'wrong bytes');
-    await chmod(helper, 0o4755);
+    await mutation.chmod(0o4755);
+    await replaceHelperBytes(Buffer.from('wrong bytes'));
+    await mutation.chmod(0o4755);
     await assert.rejects(inspectExternalHelper(instance), /match pinned Electron/u);
     await assert.rejects(command('--remove-external-helper', instance, expectedHash));
-    assert.ok((await lstat(helper)).isFile(), 'A mismatching helper must not be unlinked.');
-    await writeFile(helper, bytes);
-    await chmod(helper, 0o4755);
+    assert.equal((await mutation.stat()).nlink, 1, 'A mismatching helper must not be unlinked.');
+    await replaceHelperBytes(bytes);
+    await mutation.chmod(0o4755);
 
     const marker = path.join(directory, 'preserve-existing');
-    await writeFile(marker, 'keep');
+    markerFile = await open(
+      marker,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_RDWR |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK,
+      0o600,
+    );
+    markerCreated = true;
+    await markerFile.writeFile('keep');
     await assert.rejects(command('--create-external-helper', instance, expectedHash), /EEXIST/u);
+    const markerBytes = Buffer.alloc(4);
+    assert.equal((await markerFile.read(markerBytes, 0, 4, 0)).bytesRead, 4);
+    assert.equal(markerBytes.toString('utf8'), 'keep');
     assert.equal(
-      await readFile(marker, 'utf8'),
-      'keep',
+      (await markerFile.stat()).nlink,
+      1,
       'Creation failure must not remove pre-existing objects.',
     );
+    assert.deepEqual((await readdir(directory)).sort(), ['chrome-sandbox', 'preserve-existing']);
     await assert.rejects(command('--remove-external-helper', instance, expectedHash));
-    assert.ok((await lstat(helper)).isFile());
+    assert.equal((await mutation.stat()).nlink, 1);
     await unlink(marker);
+    markerCreated = false;
     assert.equal(
       (await command('--remove-external-helper', instance, expectedHash)).status,
       'removed',
@@ -125,13 +166,21 @@ async function namespaceProbe() {
       }) + '\n',
     );
   } finally {
-    if (created) {
-      await writeFile(helper, bytes);
-      await chmod(helper, 0o4755);
-      await unlink(path.join(directory, 'preserve-existing')).catch((error) => {
-        if (error.code !== 'ENOENT') throw error;
-      });
-      await command('--remove-external-helper', instance, expectedHash);
+    try {
+      if (created) {
+        if (mutation !== undefined) {
+          await replaceHelperBytes(bytes);
+          await mutation.chmod(0o4755);
+        }
+        if (markerCreated) await unlink(path.join(directory, 'preserve-existing'));
+        await command('--remove-external-helper', instance, expectedHash);
+      }
+    } finally {
+      try {
+        await markerFile?.close();
+      } finally {
+        await mutation?.close();
+      }
     }
   }
 }
@@ -239,6 +288,16 @@ if (process.argv[2] === '--namespace-probe') {
       await symlink(target, directory);
       await assert.rejects(inspectExternalHelper(instance));
       assert.ok((await lstat(directory)).isSymbolicLink());
+    },
+  );
+
+  test(
+    'read-only external inspection does not allocate an unused instance directory',
+    options,
+    async () => {
+      const instance = randomUUID();
+      await assert.rejects(inspectExternalHelper(instance), { code: 'ENOENT' });
+      await assert.rejects(lstat(externalHelperDirectory(instance)), { code: 'ENOENT' });
     },
   );
 

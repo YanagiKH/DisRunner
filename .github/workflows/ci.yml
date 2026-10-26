@@ -45,6 +45,9 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare the pinned Electron distribution
+        run: node apps/desktop/node_modules/electron/install.js
+
       - name: Check documentation links and assets
         run: node .github/scripts/check-docs.mjs
 
