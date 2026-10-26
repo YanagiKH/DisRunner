@@ -1,0 +1,166 @@
+name: Native macOS image comparison
+on:
+  push:
+    branches:
+      - KH/v1.0-macos-image-validation
+permissions:
+  contents: read
+concurrency:
+  group: disrunner-macos-image-comparison-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CI: 1
+  NODE_VERSION: 22.23.2
+  PNPM_VERSION: 11.19.0
+jobs:
+  native-macos:
+    name: E2E (${{ matrix.os }})
+    concurrency:
+      group: ci-e2e-${{ github.ref }}-${{ matrix.os }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            artifact: macos-arm64
+          - os: macos-26
+            artifact: macos-arm64
+          - os: macos-26-intel
+            artifact: macos-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: ./.github/actions/setup-python
+      - name: Validate Windows release helper syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($script in Get-ChildItem -LiteralPath .github/scripts -Filter '*.ps1') {
+            $syntaxTokens = $null
+            $syntaxErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$syntaxTokens, [ref]$syntaxErrors) | Out-Null
+            if ($syntaxErrors.Count -ne 0) { throw ($syntaxErrors | Out-String) }
+          }
+      - name: Prepare pinned Python SDK dependencies
+        run: python -m pip install --requirement packages/adapter-discordpy/requirements.txt
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare the pinned Electron distribution
+        if: runner.os == 'Linux'
+        run: node apps/desktop/node_modules/electron/install.js
+      - name: Runtime-manager peer authentication tests
+        run: pnpm --filter @disrunner/desktop run test:runtime-manager
+      - name: Real SDK transport conformance
+        run: node --test tests/conformance/*.test.mjs
+      - name: Isolated offline raw webhook and SDK conformance
+        if: runner.os == 'Linux'
+        env:
+          OFFLINE_EVIDENCE_DIR: ${{ runner.temp }}/offline-conformance
+        run: bash .github/scripts/offline-conformance.sh
+      - name: Upload isolated offline evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: offline-conformance-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/offline-conformance
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Install Linux browser dependencies
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/desktop exec playwright install-deps chromium
+      - name: Install Chromium for E2E
+        run: pnpm --filter @disrunner/desktop exec playwright install chromium
+      - name: Run desktop E2E
+        run: pnpm run test:e2e
+      - name: Resolve the expected packaged version
+        run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'RELEASE_VERSION=' + require('./package.json').version + '\n')"
+      - name: Build unsigned desktop distribution for acceptance
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: pnpm --filter @disrunner/desktop run package --publish never --config.forceCodeSigning=false --config.mac.notarize=false --config.dmg.sign=false
+      - name: Smoke packaged Electron
+        if: runner.os != 'Linux'
+        run: pnpm --filter @disrunner/desktop run test:package-smoke
+      - name: Prepare the pinned Linux sandbox helper for acceptance
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/installer-evidence"
+          node .github/scripts/prepare-linux-sandbox.mjs apps/desktop/release/linux-unpacked > "$RUNNER_TEMP/installer-evidence/unpacked-suid.json"
+      - name: Smoke packaged Electron on Linux
+        if: runner.os == 'Linux'
+        env:
+          DISRUNNER_LINUX_SANDBOX_EVIDENCE: ${{ runner.temp }}/installer-evidence/unpacked-linux-sandbox
+        run: xvfb-run -a pnpm --filter @disrunner/desktop run test:package-smoke
+      - name: Install, exercise, reinstall and uninstall unsigned NSIS distribution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_PRERELEASE: 'true'
+          DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
+        run: ./.github/scripts/installer-roundtrip.ps1
+      - name: Mount and exercise unsigned macOS distribution
+        if: runner.os == 'macOS'
+        env:
+          RELEASE_PRERELEASE: 'true'
+          DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
+        run: bash .github/scripts/installer-roundtrip.sh
+      - name: Extract and exercise Linux distribution
+        if: runner.os == 'Linux'
+        env:
+          RELEASE_PRERELEASE: 'true'
+          DISRUNNER_TEST_INSTALL_SUID_SANDBOX: '1'
+          DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
+        run: xvfb-run -a bash .github/scripts/installer-roundtrip.sh
+      - name: Upload installed distribution and SDK UI evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: installer-${{ matrix.artifact }}-${{ github.sha }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/installer-evidence
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Build CLI for packaged G1 parity
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/cli run build
+      - name: Check packaged G1 parity on Linux
+        id: g1_parity
+        if: runner.os == 'Linux'
+        timeout-minutes: 6
+        env:
+          G1_PACKAGED_EXECUTABLE: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/disrunner
+          G1_EVIDENCE_DIR: ${{ github.workspace }}/apps/desktop/g1-evidence
+        run: xvfb-run -a pnpm --filter @disrunner/desktop run test:g1-parity
+      - name: Upload packaged G1 evidence
+        if: always() && runner.os == 'Linux' && (steps.g1_parity.outcome == 'success' || steps.g1_parity.outcome == 'failure')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g1-parity-${{ matrix.artifact }}-${{ github.sha }}-${{ matrix.os }}
+          path: |
+            apps/desktop/g1-evidence/*.json
+            apps/desktop/g1-evidence/*.html
+            apps/desktop/g1-evidence/*.png
+            apps/desktop/g1-evidence/**/child-trace.jsonl
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: e2e-failure-${{ matrix.artifact }}-${{ github.sha }}-${{ matrix.os }}
+          path: |
+            apps/desktop/playwright-report/**
+            apps/desktop/test-results/**
+          if-no-files-found: warn
+          retention-days: 14
