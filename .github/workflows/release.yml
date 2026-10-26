@@ -291,6 +291,10 @@ jobs:
         if: runner.os == 'Linux'
         run: pnpm --filter @disrunner/desktop exec playwright install-deps chromium
 
+      - name: Prepare the pinned Electron distribution
+        if: runner.os == 'Linux'
+        run: node apps/desktop/node_modules/electron/install.js
+
       - name: Require stable Windows signing configuration
         if: runner.os == 'Windows'
         env:
