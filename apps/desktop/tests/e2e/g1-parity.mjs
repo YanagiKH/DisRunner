@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
 import { strictExpected, assertStrictMutation, assertStrictDenial } from './g1-strict-oracle.mjs';
+import { requireLinuxNonRoot, captureLinuxSandbox } from './linux-sandbox.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const corpus = path.join(root, 'apps/desktop/tests/fixtures/g1-parity');
@@ -346,8 +347,10 @@ async function gui() {
   const executablePath = process.env.G1_PACKAGED_EXECUTABLE;
   assert.ok(executablePath, 'G1_PACKAGED_EXECUTABLE must name a locally built packaged candidate');
   const { _electron: electron } = await import('playwright');
+  requireLinuxNonRoot();
   const application = await electron.launch({
     executablePath,
+    chromiumSandbox: true,
     args: [`--user-data-dir=${path.join(output, 'user-data')}`],
     env,
     timeout: 15000,
@@ -365,6 +368,11 @@ async function gui() {
     page.setDefaultTimeout(15000);
     await page.waitForLoadState('domcontentloaded');
     assert.match(page.url(), /^file:/u);
+    await captureLinuxSandbox({
+      mainPid: application.process().pid,
+      rendererPids: [await browserWindow.evaluate((window) => window.webContents.getOSProcessId())],
+      evidencePath: path.join(output, 'linux-sandbox.json'),
+    });
     assert.deepEqual(
       await page.evaluate(() => ({
         bridge: typeof window.disrunnerDesktop,

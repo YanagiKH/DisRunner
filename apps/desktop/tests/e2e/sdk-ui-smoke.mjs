@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { linkDiscordJsFixture } from '../../../../scripts/sdk-fixture.mjs';
+import { captureLinuxSandbox, packagedExecutablePath } from './linux-sandbox.mjs';
 import {
   findExecutable,
   launchApplication,
@@ -27,6 +28,7 @@ for (const name of [
   'failure.png',
   'failure-state.json',
   'viewport.json',
+  'linux-sandbox.json',
   'discord.js-interactions.png',
   'discord.js-direct-message.png',
   'discord.py-interactions.png',
@@ -320,15 +322,17 @@ async function check(adapter) {
 }
 
 try {
-  const executable = await findExecutable();
+  const launchEntry = await findExecutable();
+  const executable = await packagedExecutablePath(launchEntry);
   const asar =
     process.platform === 'darwin'
       ? path.resolve(path.dirname(executable), '../Resources/app.asar')
       : path.join(path.dirname(executable), 'resources/app.asar');
   const executableSha256 = await digest(executable);
+  const launchEntrySha256 = await digest(launchEntry);
   const asarSha256 = await digest(asar);
   const launched = await launchApplication(
-    executable,
+    launchEntry,
     path.join(temporary, 'profile'),
     controller.signal,
     (chunk) => {
@@ -341,6 +345,12 @@ try {
   assert.ok(context);
   page = context.pages()[0] ?? (await context.waitForEvent('page', { timeout: 15000 }));
   await page.waitForURL(/^file:/u);
+  await page.waitForLoadState('domcontentloaded');
+  const linuxSandbox = await captureLinuxSandbox({
+    mainPid: applicationProcess.pid,
+    browser,
+    evidencePath: path.join(evidence, 'linux-sandbox.json'),
+  });
   if (testViewport) await page.setViewportSize(testViewport);
   const runtimeInfo = await page.evaluate(() => window.disrunnerDesktop.getRuntimeInfo());
   assert.equal(runtimeInfo.packaged, true);
@@ -353,6 +363,11 @@ try {
   await recordViewport('startup');
   await check('discord.js');
   await check('discord.py');
+  assert.equal(
+    await digest(launchEntry),
+    launchEntrySha256,
+    'packaged launch entry must remain unchanged during acceptance',
+  );
   assert.equal(
     await digest(executable),
     executableSha256,
@@ -372,8 +387,11 @@ try {
         architecture: process.arch,
         node: process.versions.node,
         sourceCommit: process.env.GITHUB_SHA ?? null,
+        launchEntry: path.basename(launchEntry),
+        launchEntrySha256,
         executableSha256,
         asarSha256,
+        linuxSandbox,
         testViewport,
         viewports,
         results,

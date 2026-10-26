@@ -42,7 +42,7 @@ case "$(uname -s)" in
     artifact="${DISRUNNER_INSTALLER_ARTIFACT:-$root/apps/desktop/release/DisRunner-${version}-linux-${image_architecture}.AppImage}"
     test -f "$artifact"
     chmod u+x "$artifact"
-    executable="$install_directory/squashfs-root/disrunner"
+    executable="$install_directory/squashfs-root/AppRun"
     ;;
   *) echo 'Use installer-roundtrip.ps1 for Windows.' >&2; exit 1 ;;
 esac
@@ -65,6 +65,11 @@ for stage in installed reinstalled; do
   else
     rm -rf "$install_directory/squashfs-root"
     (cd "$install_directory" && "$artifact" --appimage-extract > "$evidence_directory/extract-${stage}.txt")
+    "$node_path" "$root/apps/desktop/tests/e2e/linux-sandbox.mjs" "$install_directory/squashfs-root" --output "$evidence_directory/launcher-${stage}.json"
+    if [[ "${DISRUNNER_TEST_INSTALL_SUID_SANDBOX:-0}" = 1 ]]; then
+      "$node_path" "$root/.github/scripts/prepare-linux-sandbox.mjs" "$install_directory/squashfs-root" > "$evidence_directory/suid-${stage}.json"
+    fi
+    export DISRUNNER_LINUX_SANDBOX_EVIDENCE="$evidence_directory/$stage-linux-sandbox"
   fi
   test -x "$executable"
   export DISRUNNER_SDK_UI_EVIDENCE="$evidence_directory/$stage-sdk-ui"

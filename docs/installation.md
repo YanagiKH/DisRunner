@@ -73,6 +73,28 @@ A bare `node`, `python`, or `python3` in `bot.startCommand` uses the inherited e
 - macOS local builds are not automatically signed or notarized. Inspect the actual downloaded release's identity and Gatekeeper result.
 - An AppImage may need `chmod +x DisRunner-*-linux-*.AppImage`. Required Electron system libraries must be installed on the target distribution. Disabling the Electron sandbox is not a normal installation step.
 
+### Linux sandbox setup
+
+The Linux desktop requires a working Chromium sandbox. It uses unprivileged user namespaces when the host permits them, or a matching administrator-installed SUID helper. A host that restricts user namespaces needs a per-application policy or a protected extracted installation. FUSE mounts commonly ignore SUID permissions, so changing permissions inside a mounted AppImage is insufficient.
+
+After verifying the downloaded AppImage checksum, an administrator can install an extracted copy in a new, protected version directory:
+
+```sh
+(
+set -e
+./DisRunner-1.0.0-linux-x86_64.AppImage --appimage-extract
+test ! -e /opt/disrunner-1.0.0
+sudo install -d -m 755 /opt/disrunner-1.0.0
+sudo cp -a squashfs-root/. /opt/disrunner-1.0.0/
+sudo chown -R root:root /opt/disrunner-1.0.0
+sudo chmod -R go-w /opt/disrunner-1.0.0
+sudo chmod 4755 /opt/disrunner-1.0.0/chrome-sandbox
+/opt/disrunner-1.0.0/AppRun
+)
+```
+
+Use the helper supplied by that exact release and keep the installation directory administrator-owned. Run DisRunner as the normal user; projects and workspaces remain in separate writable user directories. The standalone CLI does not require Electron's desktop sandbox setup.
+
 ## Updating and uninstalling
 
 Updates are explicit offline installations; no online updater is required. Stop active Bots, keep a copy of the project directory and `.disrunner` data, and follow the new release's migration notes.

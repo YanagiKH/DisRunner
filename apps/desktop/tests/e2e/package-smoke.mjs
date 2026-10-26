@@ -5,6 +5,7 @@ import { access, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { captureLinuxSandbox, requireLinuxNonRoot } from './linux-sandbox.mjs';
 
 const HARNESS_TIMEOUT_MS = 60_000;
 const INSPECTOR_READY_TIMEOUT_MS = 15_000;
@@ -12,6 +13,11 @@ const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024;
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const releaseRoot = path.join(desktopRoot, 'release');
+
+function sandboxEvidencePath(name) {
+  const directory = process.env.DISRUNNER_LINUX_SANDBOX_EVIDENCE;
+  return directory === undefined ? undefined : path.join(directory, name);
+}
 
 // The Windows branch attaches to the renderer over Chromium CDP. It never evaluates native
 // BrowserWindow operations through the main-process inspector.
@@ -35,6 +41,11 @@ async function runWindowsSmoke(signal) {
     page = context.pages()[0] ?? (await context.waitForEvent('page', { timeout: 15000 }));
     await page.waitForURL(/^file:/u);
     await page.waitForLoadState('domcontentloaded');
+    await captureLinuxSandbox({
+      mainPid: applicationProcess.pid,
+      browser,
+      evidencePath: sandboxEvidencePath('raw-cdp.json'),
+    });
     assert.deepEqual(
       await page.evaluate(() => ({
         bridge: typeof window.disrunnerDesktop,
@@ -142,6 +153,7 @@ async function runWindowsSmoke(signal) {
 }
 
 async function runFullPackagedSmoke(signal) {
+  requireLinuxNonRoot();
   const executablePath = await findExecutable();
   const userDataDirectory = await mkdtemp(path.join(tmpdir(), 'disrunner-package-smoke-'));
   const negativeProjectRoot = path.join(desktopRoot, 'tests', 'fixtures', 'package-smoke-project');
@@ -159,6 +171,7 @@ async function runFullPackagedSmoke(signal) {
     signal.throwIfAborted();
     const { _electron: electron } = await import('playwright');
     electronApplication = await electron.launch({
+      chromiumSandbox: true,
       args: ['--remote-allow-origins=*', `--user-data-dir=${userDataDirectory}`],
       env: sanitizedEnvironment(),
       executablePath,
@@ -167,6 +180,16 @@ async function runFullPackagedSmoke(signal) {
     const page = await electronApplication.firstWindow();
     await page.waitForLoadState('domcontentloaded');
     assert.match(page.url(), /^file:/u, 'packaged renderer must load from a file URL');
+    if (process.platform === 'linux') {
+      const window = await electronApplication.browserWindow(page);
+      const rendererPid = await window.evaluate((window) => window.webContents.getOSProcessId());
+      await window.dispose();
+      await captureLinuxSandbox({
+        mainPid: electronApplication.process().pid,
+        rendererPids: [rendererPid],
+        evidencePath: sandboxEvidencePath('raw-native.json'),
+      });
+    }
 
     const isolation = await page.evaluate(() => ({
       bridge: typeof window.disrunnerDesktop,
@@ -654,13 +677,13 @@ function isExecutableName(name) {
 }
 
 async function launchApplication(executable, userData, signal, onOutput) {
+  requireLinuxNonRoot();
   signal.throwIfAborted();
   const args = [
     '--remote-debugging-address=127.0.0.1',
     '--remote-debugging-port=0',
     `--user-data-dir=${userData}`,
   ];
-  if (process.platform !== 'win32' && process.getuid?.() === 0) args.push('--no-sandbox');
   const child = spawn(executable, args, {
     detached: process.platform !== 'win32',
     env: sanitizedEnvironment(),

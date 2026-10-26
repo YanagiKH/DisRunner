@@ -94,7 +94,16 @@
       "target": [
         "AppImage"
       ],
-      "category": "Development"
+      "category": "Development",
+      "extraFiles": [
+        {
+          "from": "build/linux/AppRun",
+          "to": "AppRun"
+        }
+      ]
+    },
+    "appImage": {
+      "executableArgs": []
     },
     "publish": null
   }

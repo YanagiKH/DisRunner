@@ -57,6 +57,9 @@ jobs:
       - name: Test release channels and signing prerequisites
         run: node --test .github/scripts/release-policy.test.mjs .github/scripts/verify-runtime-qualification.test.mjs
 
+      - name: Test Linux launcher and sandbox preparation
+        run: pnpm run test:linux-sandbox
+
       - name: Check formatting
         run: pnpm run format:check
 
@@ -186,8 +189,15 @@ jobs:
       - name: Smoke packaged Electron
         if: runner.os != 'Linux'
         run: pnpm --filter @disrunner/desktop run test:package-smoke
+      - name: Prepare the pinned Linux sandbox helper for acceptance
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/installer-evidence"
+          node .github/scripts/prepare-linux-sandbox.mjs apps/desktop/release/linux-unpacked > "$RUNNER_TEMP/installer-evidence/unpacked-suid.json"
       - name: Smoke packaged Electron on Linux
         if: runner.os == 'Linux'
+        env:
+          DISRUNNER_LINUX_SANDBOX_EVIDENCE: ${{ runner.temp }}/installer-evidence/unpacked-linux-sandbox
         run: xvfb-run -a pnpm --filter @disrunner/desktop run test:package-smoke
       - name: Install, exercise, reinstall and uninstall unsigned NSIS distribution
         if: runner.os == 'Windows'
@@ -206,6 +216,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           RELEASE_PRERELEASE: 'true'
+          DISRUNNER_TEST_INSTALL_SUID_SANDBOX: '1'
           DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
         run: xvfb-run -a bash .github/scripts/installer-roundtrip.sh
       - name: Upload installed distribution and SDK UI evidence
