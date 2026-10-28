@@ -423,7 +423,9 @@ export class BotRunner {
     const child = this.#child;
     if (
       this.#windowsCleanupFailure !== undefined &&
-      (child === undefined || this.#windowsCleanupFailure instanceof WindowsTaskkillTimeoutError)
+      (child === undefined ||
+        this.#windowsCleanupFailure instanceof WindowsTaskkillTimeoutError ||
+        this.observeExit() === 'exited')
     )
       throw this.#windowsCleanupFailure;
     if (
@@ -513,7 +515,16 @@ export class BotRunner {
     const child = this.#child;
     if (child === undefined) return this.#exitedAtMs === undefined ? 'unknown' : 'exited';
     if (child.exitCode !== null || child.signalCode !== null) return 'exited';
-    if (process.platform !== 'linux' || child.pid === undefined) return 'unknown';
+    if (child.pid === undefined) return 'unknown';
+    if (platform() !== 'linux') {
+      try {
+        process.kill(child.pid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return 'exited';
+      }
+      // An existing PID does not establish that it still identifies our child.
+      return 'unknown';
+    }
     return directChildExitObservation(child.pid, this.#ownedGroup?.leaderStartTime);
   }
 
@@ -538,10 +549,11 @@ export class BotRunner {
         child === undefined ||
         this.#child !== child ||
         child.exitCode !== null ||
-        child.signalCode !== null
+        child.signalCode !== null ||
+        this.observeExit() === 'exited'
       )
         throw error;
-      await this.#signalOwned(child, true, forceWaitMs);
+      await this.#signalOwned(child, true, forceWaitMs, error);
       forced = true;
     }
     if (!(await this.#waitForOwnedTermination(child, forced ? forceWaitMs : graceMs))) {
@@ -637,10 +649,22 @@ export class BotRunner {
     child: ChildProcessWithoutNullStreams | undefined,
     force: boolean,
     commandTimeoutMs: number,
+    previousWindowsFailure?: Error,
   ): Promise<void> {
     if (platform() === 'win32') {
-      if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null)
-        await runTaskkill(child.pid, force, commandTimeoutMs);
+      const failure = previousWindowsFailure ?? this.#windowsCleanupFailure;
+      if (
+        child?.pid === undefined ||
+        child.exitCode !== null ||
+        child.signalCode !== null ||
+        this.observeExit() === 'exited'
+      ) {
+        // Recheck at the signalling boundary: an earlier probe can become stale.
+        // A departed child cannot establish success after a failed tree helper.
+        if (failure !== undefined) throw new Error(failure.message, { cause: failure });
+        return;
+      }
+      await runTaskkill(child.pid, force, commandTimeoutMs);
       return;
     }
     const group = this.#ownedGroup;
@@ -665,8 +689,9 @@ export class BotRunner {
     const deadline = Date.now() + timeoutMs;
     if (child !== undefined && !(await waitForExit(child, timeoutMs))) return false;
     const group = this.#ownedGroup;
-    // Windows: a successful taskkill /T and direct-child exit are required. These observations
-    // are not independent proof of descendant termination; real Windows qualification is pending.
+    // Windows waits for the original ChildProcess exit even when a non-destructive probe
+    // found its PID already absent. Never send taskkill to that departed PID.
+    // Direct-child exit and taskkill /T are not independent descendant-termination evidence.
     if (platform() === 'win32' || group === undefined) return true;
     for (;;) {
       if (ownedGroupState(group) === 'empty') return true;

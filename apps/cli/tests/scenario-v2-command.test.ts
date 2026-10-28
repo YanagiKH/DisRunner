@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseReproductionBundle } from '@disrunner/runtime';
 import { parseArgs } from '../src/index.js';
+import { assertChildCleanup, type ChildTrace } from './helpers/child-cleanup.js';
 
 const fixtures = fileURLToPath(new URL('./fixtures/bot-test/', import.meta.url));
 const executable = fileURLToPath(new URL('../dist/index.js', import.meta.url));
@@ -183,8 +184,11 @@ describe('version 2 CLI process contract', () => {
     const events = (await readFile(join(directory, 'child.jsonl'), 'utf8'))
       .trim()
       .split('\n')
-      .map((line) => JSON.parse(line) as { event: string });
-    expect(events.some((event) => event.event === 'exit')).toBe(true);
+      .map((line) => JSON.parse(line) as ChildTrace);
+    expect(events.some((event) => event.event === 'callback' && event.authenticatedResponse)).toBe(
+      true,
+    );
+    await assertChildCleanup(events);
     await expect(readFile(output)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 15000);
 

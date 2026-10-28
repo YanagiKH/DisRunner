@@ -396,12 +396,27 @@ describe('BotRunner M1 platform-conditional oracles', () => {
       runner = new BotRunner();
       const started = await runner.start({
         ...config('stubborn'),
-        args: ['-e', 'setInterval(() => undefined, 1_000)'],
+        // A failed helper must not leave a child holding the test directory forever.
+        // Reaching this containment deadline is a failure, never evidence of cleanup.
+        args: [
+          '-e',
+          'setInterval(() => undefined, 1_000); setTimeout(() => process.exit(97), 10_000).unref()',
+        ],
       });
       const pid = started.pid as number;
-      const stopped = await runner.stop(200);
-      expect(stopped.pid).toBeUndefined();
-      expect(() => process.kill(pid, 0)).toThrow();
+      try {
+        expect(() => process.kill(pid, 0)).not.toThrow();
+        const stopped = await runner.stop();
+        expect(stopped.pid).toBeUndefined();
+        expect(stopped.exitCode).not.toBe(97);
+        expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }));
+      } finally {
+        await waitFor(
+          'Windows child exit, including failure containment',
+          () => (runner?.snapshot().pid === undefined ? true : undefined),
+          11_000,
+        );
+      }
     },
   );
 

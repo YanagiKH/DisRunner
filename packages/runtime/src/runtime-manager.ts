@@ -225,10 +225,10 @@ export class DesktopRuntimeManager {
       (bot.startedAtMs !== undefined || bot.exitedAtMs !== undefined)
     ) {
       if (['stopped', 'crashed'].includes(bot.status)) this.#unexpectedExit = true;
-      else if (process.platform === 'linux') {
+      else {
         const observed = this.#bot?.observeExit?.();
         if (observed === 'exited') this.#unexpectedExit = true;
-        else if (observed === 'unknown')
+        else if (process.platform === 'linux' && observed === 'unknown')
           throw new SessionError('transport', 'Bot process liveness is uncertain.');
       }
     }
