@@ -110,9 +110,16 @@ for (const width of [720, 1280]) {
       await expect(sidebar).toBeHidden();
       await expect(picker).toBeVisible({ timeout: 2000 });
       await picker.focus();
-      await picker.press('Space');
-      await picker.press('ArrowDown');
-      await picker.press('Enter');
+      if (process.platform === 'darwin') {
+        // macOS headless-shell suppresses native popups; typeahead still uses real keys.
+        await picker.press('s');
+      } else {
+        await picker.press('Space');
+        await picker.press('ArrowDown');
+        await picker.press('Enter');
+      }
+      await picker.press('Tab');
+      await expect(picker).not.toBeFocused();
       await expect(page.getByRole('main', { name: 'Virtual channel second' })).toBeVisible();
     } else {
       await expect(sidebar).toBeVisible();
