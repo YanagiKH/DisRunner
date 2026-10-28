@@ -1,4 +1,4 @@
-import { createHook } from 'node:async_hooks';
+import { AsyncResource, createHook } from 'node:async_hooks';
 import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -1153,16 +1153,62 @@ describe('isolation, state and resources', () => {
   });
 
   it('stop releases the listener, port and handles', async () => {
-    const before = tcpHandles();
     const server = construct(inputProfile());
-    const { port } = await server.start(0);
-    await getJson(port, '/api/v10/oauth2/applications/@me');
-    await server.stop();
-    expect(server.address).toBeUndefined();
-    await expect(
-      send(port, '/api/v10/users/@me', { authorization: TOKEN_A }),
-    ).rejects.toMatchObject({ code: 'ECONNREFUSED' });
-    expect(await canBind(port)).toBe(true);
-    await expect.poll(() => tcpHandles()).toEqual(before);
+    const background = createNetServer();
+    await new Promise<void>((resolve) => background.listen(0, '127.0.0.1', resolve));
+    const closeBackground = () =>
+      new Promise<void>((resolve, reject) =>
+        background.close((error) => (error === undefined ? resolve() : reject(error))),
+      );
+    const scope = new AsyncResource('rest-stop-test');
+    const descendants = new Set([scope.asyncId()]);
+    const created = new Map<number, string>();
+    const live = new Set<number>();
+    // Track this run's descendants independently of other listeners finishing their teardown.
+    const hook = createHook({
+      init(asyncId, type, triggerAsyncId) {
+        if (!descendants.has(triggerAsyncId)) return;
+        descendants.add(asyncId);
+        if (type === 'TCPWRAP' || type === 'TCPSERVERWRAP') {
+          created.set(asyncId, type);
+          live.add(asyncId);
+        }
+      },
+      destroy(asyncId) {
+        live.delete(asyncId);
+      },
+    });
+    hook.enable();
+    try {
+      await scope.runInAsyncScope(async () => {
+        const { port } = await server.start(0);
+        await closeBackground();
+        await getJson(port, '/api/v10/oauth2/applications/@me');
+        const listeners = [...created].filter(([, type]) => type === 'TCPSERVERWRAP');
+        expect(listeners).toHaveLength(1);
+        expect(
+          [...created.values()].filter((type) => type === 'TCPWRAP').length,
+        ).toBeGreaterThanOrEqual(2);
+        expect(listeners.every(([asyncId]) => live.has(asyncId))).toBe(true);
+        await server.stop();
+        expect(server.address).toBeUndefined();
+        await expect(
+          send(port, '/api/v10/users/@me', { authorization: TOKEN_A }),
+        ).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+        expect(await canBind(port)).toBe(true);
+        await expect.poll(() => [...live]).toEqual([]);
+      });
+    } finally {
+      try {
+        await server.stop();
+      } finally {
+        try {
+          if (background.listening) await closeBackground();
+        } finally {
+          hook.disable();
+          scope.emitDestroy();
+        }
+      }
+    }
   });
 });
