@@ -162,6 +162,8 @@ jobs:
       - name: Prepare the pinned Electron distribution
         if: runner.os == 'Linux'
         run: node apps/desktop/node_modules/electron/install.js
+      - name: Core unit tests
+        run: pnpm run test:unit
       - name: Runtime-manager peer authentication tests
         run: pnpm --filter @disrunner/desktop run test:runtime-manager
       - name: Real SDK transport conformance

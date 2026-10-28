@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: disrunner-release-suite-validation-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CI: 1
@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: 41c794be84f4132894a568c2bc436ac020475723
+          ref: 517cb653d09fc8e1afd133a82422a1a1ce6337bb
           persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -54,7 +54,7 @@ jobs:
       - name: Verify immutable commit and every package version
         shell: bash
         env:
-          RELEASE_SHA: 41c794be84f4132894a568c2bc436ac020475723
+          RELEASE_SHA: 517cb653d09fc8e1afd133a82422a1a1ce6337bb
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
@@ -78,7 +78,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           OFFLINE_EVIDENCE_DIR: ${{ runner.temp }}/offline-conformance
-        run: bash .github/scripts/offline-conformance.sh
+        run: env -u GITHUB_SHA bash .github/scripts/offline-conformance.sh
       - name: Upload isolated offline evidence
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
