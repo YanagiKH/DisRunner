@@ -52,7 +52,7 @@
     "@types/node": "^22.20.5",
     "eslint": "^9.39.5",
     "eslint-plugin-react-hooks": "^5.2.0",
-    "eslint-plugin-react-refresh": "^0.4.26",
+    "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^16.5.0",
     "prettier": "^3.9.10",
     "tsx": "^4.23.15",
