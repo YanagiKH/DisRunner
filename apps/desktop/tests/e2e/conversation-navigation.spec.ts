@@ -110,7 +110,9 @@ for (const width of [720, 1280]) {
       await expect(sidebar).toBeHidden();
       await expect(picker).toBeVisible({ timeout: 2000 });
       await picker.focus();
+      await picker.press('Space');
       await picker.press('ArrowDown');
+      await picker.press('Enter');
       await expect(page.getByRole('main', { name: 'Virtual channel second' })).toBeVisible();
     } else {
       await expect(sidebar).toBeVisible();
