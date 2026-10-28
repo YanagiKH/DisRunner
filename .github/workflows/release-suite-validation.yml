@@ -1,0 +1,91 @@
+name: Release suite validation
+
+on:
+  push:
+    branches: [KH/v1.0-release-suite-validation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disrunner-release-suite-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: 1
+  NODE_VERSION: 22.23.2
+  PNPM_VERSION: 11.19.0
+  RELEASE_TAG: v1.0.0
+
+jobs:
+  validate-release:
+    name: Release gate (${{ matrix.platform }})
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-15
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: 41c794be84f4132894a568c2bc436ac020475723
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Verify immutable commit and every package version
+        shell: bash
+        env:
+          RELEASE_SHA: 41c794be84f4132894a568c2bc436ac020475723
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          node .github/scripts/check-versions.mjs
+      - uses: ./.github/actions/setup-python
+      - name: Prepare pinned Python SDK dependencies
+        run: python -m pip install --requirement packages/adapter-discordpy/requirements.txt
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare the pinned Electron distribution
+        if: runner.os == 'Linux'
+        run: node apps/desktop/node_modules/electron/install.js
+      - name: Install Linux browser dependencies
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/desktop exec playwright install-deps chromium
+      - name: Install Chromium for release E2E
+        run: pnpm --filter @disrunner/desktop exec playwright install chromium
+      - run: pnpm run verify:release
+      - name: Real SDK transport conformance
+        run: node --test --test-concurrency=1 tests/conformance/*.test.mjs
+      - name: Isolated offline raw webhook and SDK conformance
+        if: runner.os == 'Linux'
+        env:
+          OFFLINE_EVIDENCE_DIR: ${{ runner.temp }}/offline-conformance
+        run: bash .github/scripts/offline-conformance.sh
+      - name: Upload isolated offline evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: offline-conformance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/offline-conformance
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Audit high-severity dependency findings
+        run: pnpm audit --audit-level=high
