@@ -49,7 +49,7 @@ NODE
   corpus=(tests/conformance/*.test.mjs packages/runtime/tests/session-exact-response.test.mjs)
   mkdir -p "$evidence_directory"
   set +e
-  "$node_path" --test "${corpus[@]}" 2>&1 | tee "$evidence_directory/results.tap"
+  "$node_path" --test --test-concurrency=1 "${corpus[@]}" 2>&1 | tee "$evidence_directory/results.tap"
   pipeline_status=("${PIPESTATUS[@]}")
   result="${pipeline_status[0]}"
   if [[ "${pipeline_status[1]}" != 0 ]]; then result=1; fi

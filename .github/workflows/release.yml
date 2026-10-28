@@ -223,7 +223,7 @@ jobs:
         run: pnpm --filter @disrunner/desktop exec playwright install chromium
       - run: pnpm run verify:release
       - name: Real SDK transport conformance
-        run: node --test tests/conformance/*.test.mjs
+        run: node --test --test-concurrency=1 tests/conformance/*.test.mjs
       - name: Isolated offline raw webhook and SDK conformance
         if: runner.os == 'Linux'
         env:

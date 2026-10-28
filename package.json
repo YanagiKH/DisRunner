@@ -45,7 +45,7 @@
     "clean": "node scripts/clean.mjs",
     "build:runtime": "pnpm run build:core && pnpm --filter @disrunner/runtime build",
     "test:runtime": "pnpm run build:runtime && pnpm --filter @disrunner/runtime test",
-    "test:conformance": "pnpm run build:runtime && node --test tests/conformance/*.test.mjs"
+    "test:conformance": "pnpm run build:runtime && node --test --test-concurrency=1 tests/conformance/*.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
