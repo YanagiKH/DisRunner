@@ -4,7 +4,7 @@ All notable changes to DisRunner are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-10-25
+## [1.0.0]
 
 ### Added
 
