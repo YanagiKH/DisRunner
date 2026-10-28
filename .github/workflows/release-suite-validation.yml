@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: f4c80e4cdd26cc8ee213e10e756488acf5695f07
+          ref: f77a11b9c73807921f456a3d0214c8b8115d68d1
           persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -54,7 +54,7 @@ jobs:
       - name: Verify immutable commit and every package version
         shell: bash
         env:
-          RELEASE_SHA: f4c80e4cdd26cc8ee213e10e756488acf5695f07
+          RELEASE_SHA: f77a11b9c73807921f456a3d0214c8b8115d68d1
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"

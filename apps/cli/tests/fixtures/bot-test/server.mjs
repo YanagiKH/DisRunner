@@ -42,7 +42,12 @@ function trace(event, fields = {}) {
   if (tracePath)
     appendFileSync(tracePath, JSON.stringify({ event, pid: process.pid, ...fields }) + '\n');
 }
-trace('launch', { mode, port });
+trace('launch', {
+  mode,
+  port,
+  restPort: Number(process.env.DISRUNNER_REST_PORT),
+  gatewayPort: Number(process.env.DISRUNNER_GATEWAY_PORT),
+});
 if (mode === 'early-zero' || mode === 'early-crash') {
   trace('exit', { code: mode === 'early-zero' ? 0 : 17 });
   process.exit(mode === 'early-zero' ? 0 : 17);

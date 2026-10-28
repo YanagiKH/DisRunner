@@ -59,7 +59,7 @@ Usage:
 
 Version 1 scenarios use the virtual model. Version 2 runs the configured real Bot.
 Assertion or replay mismatches exit 1; invalid input exits 2. Version 2 runtime
-failures exit 3, SIGINT exits 130, and SIGTERM exits 143 after cleanup.
+failures exit 3. Ctrl+C (SIGINT) exits 130 after cleanup; POSIX SIGTERM exits 143.
 `;
 }
 

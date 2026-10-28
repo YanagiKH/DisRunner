@@ -43,7 +43,7 @@ Legacy message buttons/selects and text-input modals use real interaction payloa
 
 Project configs and workspaces use version 1 envelopes. Version 1 scenarios retain model semantics; [version 2](scenario-v2.md) explicitly selects a real Bot and realtime clock. Recordings carry their own format version. Version 2 reports identify run ID, adapter, normalized scenario hash, completeness, and fault receipts.
 
-Version 2 returns 0 for pass, 1 for behavior failure, 2 for invalid/unsupported input, 3 for runtime/cleanup/output failure, 130 for SIGINT cancellation, and 143 for SIGTERM cancellation. Expected negative behavior requires an explicit assertion; an unconsumed error or unused declared fault cannot be silently treated as success.
+Version 2 returns 0 for pass, 1 for behavior failure, 2 for invalid/unsupported input, 3 for runtime/cleanup/output failure, 130 for Ctrl+C/SIGINT cancellation, and 143 for SIGTERM cancellation on POSIX systems. Use Ctrl+C for graceful Windows cancellation. Expected negative behavior requires an explicit assertion; an unconsumed error or unused declared fault cannot be silently treated as success.
 
 ## Drift management
 
