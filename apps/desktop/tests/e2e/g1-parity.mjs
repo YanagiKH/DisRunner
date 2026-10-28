@@ -1105,7 +1105,15 @@ async function gui() {
     }
     async function stop(directory) {
       await page.getByRole('button', { name: /^(Stop bot|Retry cleanup)$/u }).click();
-      await until(async () => (await snapshot()).phase === 'ready', 'UI Stop bot');
+      // The main-process snapshot can settle before React commits its renderer update.
+      await until(
+        async () =>
+          (await snapshot()).phase === 'ready' &&
+          /Live messages unavailable/u.test(
+            await page.getByRole('status', { name: 'Live message feed status' }).textContent(),
+          ),
+        'UI Stop bot',
+      );
       await released(directory);
       assert.deepEqual(await visibleMessageContents(), [], 'stopped runtime clears retained feed');
       assert.match(
