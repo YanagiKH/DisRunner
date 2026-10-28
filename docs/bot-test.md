@@ -1,6 +1,8 @@
-# Offline raw-Bot case tests
+# Offline Bot case tests
 
-`bot-test` executes a real local child through the shared `createSession` API. It does not reinterpret the existing model-based `run` or `test` commands, install dependencies, connect to real Discord, or accept tokens. Offline transport is not an OS sandbox.
+`bot-test` preserves the compact version-1 Bot case format. For typed actions, DM messages, faults, and four-format reports, use [Scenario v2](scenario-v2.md).
+
+`bot-test` executes a real local child through the shared `createSession` API. Version 1 model scenarios retain their separate semantics; it does not install dependencies, connect to real Discord, or accept tokens. Offline transport is not an OS sandbox.
 
 ## Case v1
 
@@ -26,17 +28,17 @@ The selected project must contain the actor, guild, and text channel, and the ch
 
 ## Ordinary message permissions
 
-`bot-test` loads the same [project permission profile](project-configuration.md#ordinary-message-permission-opt-in) as Desktop. There is no CLI permission override. Omitted `profile.ordinaryMessagePermissions` remains `legacy-unenforced`; `guild-text-own-messages-v1` requires `fixtures.bot` and uses explicit guild membership/roles/overwrites for the bot's ordinary REST requests. The human `fixtures.user` remains the invocation actor, and selecting the configured bot as `actorId` is invalid.
+`bot-test` loads the same [project permission profile](project-configuration.md#ordinary-message-permission-opt-in) as Desktop. There is no CLI permission override. For raw projects, omitted `profile.ordinaryMessagePermissions` remains `legacy-unenforced`; `guild-text-own-messages-v1` requires `fixtures.bot` and uses explicit guild membership/roles/overwrites for the bot's ordinary REST requests. The human `fixtures.user` remains the invocation actor, and selecting the configured bot as `actorId` is invalid.
 
 Permission-negative fixtures may start successfully and return ordinary REST `403` responses. Case v1 still asserts the webhook response type and content, not arbitrary REST permissions: a test bot can make an ordinary REST request and report its outcome in its callback. Interaction-token routes keep their existing authorization; an ordinary-message denial does not itself imply a callback failure. This is shared-runtime behavior, not SDK conformance.
 
 ## Application-command registration
 
-`bot-test` also loads the shared [command registry project opt-in](project-configuration.md#command-registry-opt-in). Omission leaves registration disabled; `guildIds: []` enables only global registration, and guild registration requires an explicit allowlist backed by loaded fixtures. There is no CLI registry override. This setting is independent of ordinary message permissions and does not add an adapter.
+`bot-test` also loads the shared [command registry project opt-in](project-configuration.md#command-registry-opt-in). For raw projects, omission leaves registration disabled; `guildIds: []` enables only global registration, and guild registration requires an explicit allowlist backed by loaded fixtures. There is no CLI registry override. This setting is independent of ordinary message permissions and does not add an adapter.
 
 A supervised raw-webhook child can discover its application through authenticated `GET /oauth2/applications/@me` and register through the existing injected REST URL and synthetic Bot credential. Each run owns its command state; a successful restart starts fresh and the child must register again. Signed readiness and authenticated webhook responses are still required.
 
-Case v1 remains an assertion of webhook response type and exact content, not a direct registry HTTP assertion format. A child reporting success is not independent proof of the registration status, response body or state revision. Registering a name does not connect it to a handler, change the invocation grammar, add options support, or make invocation look up the registry. SDK and Command Explorer integration remain unsupported.
+Case v1 remains an assertion of webhook response type and exact content, not a direct registry HTTP assertion format. A child reporting success is not independent proof of the registration status, response body or state revision. Registering a name does not connect it to a handler, change the invocation grammar, add options support, or make invocation look up the registry. Typed SDK commands and Command Explorer use the separate extended runtime profile described in [SDK adapters](sdk-adapters.md).
 
 ## Result and cleanup
 
@@ -44,7 +46,7 @@ The module exports `runBotTest(options, dependencies?)`. Its only injectable dep
 
 The overall deadline covers preflight, startup and all steps, defaults to 30,000 ms, and accepts integers 1–300,000. Caller cancellation gives `cancelled` and exit 130 or 143. Deadline expiry is `runner-error`/1, not user cancellation. Disposal uses the shared runtime's independent shutdown window and is always awaited, including after partial startup. The module never installs global signal handlers or calls `process.exit`.
 
-The exact report keys are `version`, `execution`, `adapter`, `name`, `runId`, `status`, `context`, `assertions`, `error`, and `cleanupErrors`. Version is 1, execution is `bot`, and adapter is `raw-interaction-webhook`. Success exits 0; mismatch or runner error 1; invalid input/project/context 2. Cleanup issues demote a pass to runner-error/1 and preserve earlier failed/invalid/cancelled outcomes and primary errors. Output failure is runner-error/1 except that cancellation retains 130/143. Prior primary issues are retained in `cleanupErrors`. Reports never include environment, authentication headers, runtime console output or arbitrary exception text.
+The exact report keys are `version`, `execution`, `adapter`, `name`, `runId`, `status`, `context`, `assertions`, `error`, and `cleanupErrors`. Version is 1, execution is `bot`, and adapter identifies the selected project (or `null` before startup). Success exits 0; mismatch or runner error 1; invalid input/project/context 2. Cleanup issues demote a pass to runner-error/1 and preserve earlier failed/invalid/cancelled outcomes and primary errors. Output failure is runner-error/1 except that cancellation retains 130/143. Prior primary issues are retained in `cleanupErrors`. Reports never include environment, authentication headers, runtime console output or arbitrary exception text.
 
 With `outPath`, JSON is serialized only after disposal into an exclusive mode-0600 same-directory temporary file and renamed. Owned temporary files are removed on failure. An existing destination that cannot be replaced is not claimed as this run's result; callers must print the returned report, not read old output files.
 
@@ -58,6 +60,8 @@ The executable implements this command in `apps/cli/src/index.ts`. It requires o
 
 The executable installs temporary SIGINT and SIGTERM handlers, passes cancellation to `runBotTest`, awaits cleanup, prints the finalized JSON report to stdout, and removes its handlers in `finally`. The first signal selects cancellation exit code 130 (SIGINT) or 143 (SIGTERM). The library module itself does not manage OS signals. `--out` writes the same finalized report, not a separate rendering or a previously existing result file.
 
+Use Ctrl+C for graceful cancellation on Windows. SIGTERM cancellation is supported on POSIX systems; Windows process termination APIs, including Node's `child.kill()`, forcibly terminate the executable and cannot produce its finalized cancellation report.
+
 `@disrunner/runtime` exports `createSession`, `parseBotCase`, `evaluateBotStep`, and the `BotCase` and `BotAssertion` types. The CLI imports these public exports; it does not use a private runtime import or a second child launcher.
 
 ## Independent oracles
@@ -68,7 +72,7 @@ The fixture `server.mjs` verifies Ed25519 requests and uses the unchanged exampl
 
 Test-owned trace files distinguish launch, readiness, command receipt, callback, shutdown and exit. They contain IDs, PIDs and ports, never secrets or signed raw bodies. Real-child observers capture shared-session PIDs and endpoints; tests require PID death, refused loopback connections, and successful port reuse. If a recorded PID remains present, the cleanup assertion fails; the test does not signal a bare PID that may have been reused. The real session remains responsible for owned cleanup. The unchanged example is also executed separately as C03. These direct-child fixture checks do not establish process-tree or grandchild cleanup. Separate core and shared-runtime lifecycle tests are described in [Runtime lifecycle cleanup](runtime-lifecycle.md), including their platform and ownership limitations.
 
-C01/C02 cover parsing and pre-spawn rejection. C03–C09 cover unchanged real Bot, the original redacted-response runner-error and separate safe-text mismatch, PONG-only, missing executable, both early exits and explicit fixture context. C10 covers startup/command/body AbortController cancellation. `apps/cli/tests/bot-test-command.test.ts` separately covers executable dispatch, flag rejection, finalized output and real SIGINT/SIGTERM cancellation. C11 covers independently injected primary/cleanup failures. C12 covers atomic final output, stale-file avoidance and write/rename failures. C13 covers missing response, identity/request mismatch, invalid peer authentication and stale-run rejection through the real session. C14 covers safe mismatch stop/cleanup and unexpected exit after callback. C15 uses the unchanged existing recording/replay, reporters and CLI error-boundary suites.
+C01/C02 cover parsing and pre-spawn rejection. C03–C09 cover unchanged real Bot, the original redacted-response runner-error and separate safe-text mismatch, PONG-only, missing executable, both early exits and explicit fixture context. C10 covers startup/command/body AbortController cancellation. `apps/cli/tests/bot-test-command.test.ts` separately covers executable dispatch, flag rejection, finalized output and real SIGINT/SIGTERM cancellation on POSIX, plus real Windows Ctrl+C during startup and command execution. The Windows controller checks its private console and owned Job before releasing test containment; each executable test independently checks Bot PID death and all three listener ports. C11 covers independently injected primary/cleanup failures. C12 covers atomic final output, stale-file avoidance and write/rename failures. C13 covers missing response, identity/request mismatch, invalid peer authentication and stale-run rejection through the real session. C14 covers safe mismatch stop/cleanup and unexpected exit after callback. C15 uses the unchanged existing recording/replay, reporters and CLI error-boundary suites.
 
 Use Node.js `>=22.23.2 <23` and the repository-pinned pnpm `11.19.0`. After dependencies are prepared, `pnpm run test:runtime` runs the runtime tests, and `pnpm run build:cli && pnpm --filter @disrunner/cli test:integration` builds the runtime dependency chain and CLI before running the CLI tests. The Bot command itself never installs dependencies. Fake sessions and the headless import checks are not substitutes for authenticated real-child tests.
 

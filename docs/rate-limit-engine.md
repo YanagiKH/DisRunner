@@ -1,6 +1,6 @@
 # Rate-limit engine
 
-`RateLimitEngine` is a deterministic, configurable in-process bucket engine. It is used by the scenario runner and partial REST emulator. It is not a complete model of Discord's changing production limits.
+`RateLimitEngine` is a configurable in-process bucket engine used by model scenarios and shared raw/SDK REST sessions. It uses the supplied clock: paused/virtual for model scenarios and realtime for Bot sessions. It does not model all of Discord's changing production limits.
 
 ## Implemented rules and buckets
 
@@ -25,7 +25,7 @@ Configured buckets can return `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-R
 
 ## Current built-in profile
 
-The scenario runner and Electron runtime each configure a representative shared message-create rule:
+The model runner and shared Desktop/CLI runtime configure a representative shared message-create rule:
 
 ```text
 POST /channels/:channelId/messages
@@ -33,10 +33,12 @@ POST /channels/:channelId/messages
 major parameter: channelId
 ```
 
-Scenario `rate-limit-request` actions call that engine. Once denied, the runner emits the implemented `RATE_LIMIT_HOT_BUCKET` finding. There is no version 1 scenario syntax for arbitrary bucket definitions.
+Version 1 `rate-limit-request` actions call that engine. Once denied, the model runner emits `RATE_LIMIT_HOT_BUCKET`. There is no version 1 scenario syntax for arbitrary bucket definitions. The extended API profile keeps token-authenticated interaction/webhook requests outside an injected Bot global pause while retaining applicable route buckets.
+
+Version 2 fault plans can return bounded HTTP 429/500/502/503 effects or delay/timeout selected operations. Actual SDK client code handles its own supported retries; DisRunner observes the resulting requests and messages rather than fabricating a successful retry. Plans and receipts belong to one Session and are cleared on stop/reset. See [Fault injection](fault-injection.md).
 
 ## Current limits
 
-v0.1 does not implement an automatic client retry queue, backoff/jitter policy, retry scheduling, malformed-header injection, response-loss/commit faults, latency simulation, invalid-request bans, adaptive Discord quota discovery, or production global-budget prediction. Rules are local test inputs.
+DisRunner does not provide a general client retry queue, arbitrary backoff/jitter scheduler, malformed-header injection, commit-then-lose-response faults, invalid-request bans, adaptive Discord quota discovery, or production global-budget prediction. Configured buckets and scoped fault plans are local test inputs.
 
-The renderer's Rate Limits panel and `/rate-limit` browser-preview behavior are seeded visual data; they are not a live view of every core bucket. Use core/CLI results for executable evidence.
+The browser demo's rate-limit examples are illustrative; Desktop does not expose a complete live inspector of every core bucket. Use actual REST status/headers, traces, fault receipts, and scenario assertions for the supported behavior.

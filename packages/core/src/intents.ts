@@ -123,6 +123,16 @@ export function parseIntentBits(value: bigint | string | number): bigint {
 export function requiredIntentForEvent(eventName: string, data: unknown): bigint | undefined {
   const guildEvent = hasGuildId(data);
   if (
+    (eventName === 'CHANNEL_CREATE' ||
+      eventName === 'CHANNEL_UPDATE' ||
+      eventName === 'CHANNEL_DELETE') &&
+    typeof data === 'object' &&
+    data !== null &&
+    'type' in data &&
+    data.type === 1
+  )
+    return GatewayIntents.DIRECT_MESSAGES;
+  if (
     eventName === 'MESSAGE_CREATE' ||
     eventName === 'MESSAGE_UPDATE' ||
     eventName === 'MESSAGE_DELETE'

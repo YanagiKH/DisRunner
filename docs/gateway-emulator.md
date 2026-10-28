@@ -1,6 +1,6 @@
 # Gateway emulator
 
-DisRunner v0.1 contains a partial Discord-shaped Gateway core and loopback WebSocket transport. It is primarily a core/contract-test surface; it is not yet a supported imported-bot desktop adapter.
+DisRunner provides a bounded API v10 JSON Gateway over loopback. The shared runtime uses it for the pinned JavaScript/Python SDK adapters and exposes the same state to Desktop and CLI.
 
 ## Implemented core subset
 
@@ -14,9 +14,9 @@ The in-process model covers:
 6. disconnect/invalidate and accepted/rejected `RESUME` with replay/`RESUMED`;
 7. explicit `RECONNECT` and `INVALID_SESSION` packets from the core API.
 
-The local WebSocket server exposes selected identify/heartbeat/resume behavior and records core trace spans. v0.1 does not declare URL encoding/compression negotiation, full close-code/zombie behavior, proactive failure packets, or a complete production-client reconnect path.
+The local WebSocket server supports identify/heartbeat/resume, validates intent close codes, records trace spans, and enforces authenticated heartbeat deadlines. Single-shard JSON is supported; compression, large-guild chunking, presence, and voice are outside this profile.
 
-Electron starts the local Gateway service, but it does not bootstrap the renderer's synthetic guilds, dispatch UI actions, or emit REST mutations over Gateway. A connected socket is therefore not proof of a complete virtual Discord session.
+When configured with the session bootstrap state, READY lists fixture guilds and GUILD_CREATE supplies their channels, roles, members, and Bot identity. Supported message and resource mutations publish the corresponding Gateway events after a state commit. Desktop actions and SDK REST requests use that same state.
 
 ## Bootstrap heartbeats before authentication
 
@@ -24,7 +24,7 @@ After HELLO, a client may send a heartbeat before IDENTIFY or RESUME. The loopba
 
 This bootstrap ACK is transport-only: it does not authenticate, allocate or bind a session, emit dispatches, or reset/cancel the original identify timeout. Heartbeat-only connections still close with 4003 when that deadline expires. Rejected RESUME leaves the connection unauthenticated; subsequent valid bootstrap heartbeats may be ACKed without changing the rejection or granting session ownership. IDENTIFY token validation remains unchanged.
 
-After successful IDENTIFY or RESUME, heartbeats continue through the session engine, including sequence validation and heartbeat-ACK fault injection. The engine's disabled-ACK fault setting does not suppress transport-only bootstrap ACKs. These real-WebSocket regression guarantees address source-observed SDK ordering only; they are not proof of actual Python SDK execution, SDK certification, or G0/G1/G2 qualification.
+After successful IDENTIFY or RESUME, heartbeats continue through the session engine, including sequence validation and heartbeat-ACK fault injection. The engine's disabled-ACK fault setting does not suppress transport-only bootstrap ACKs. These protocol checks isolate heartbeat ordering; the adapter suites separately exercise actual SDK startup.
 
 ## Local reconnect endpoint and backlog
 
@@ -34,7 +34,7 @@ A disconnected, unexpired session can accumulate dispatches using the same inten
 
 `LocalGatewayServer.dispatch(...)` returns `true` only when it sends the packet to an open socket. It returns `false` both for filtered events and accepted buffered events; it is not a backlog-admission acknowledgment. RESUME replays retained packets after the supplied sequence, then emits RESUMED. Expired/invalid sessions, wrong credentials, future sequences, or missing replay history reject without partial replay. Duplicate session ownership is rejected rather than stealing a live socket.
 
-These are core real-WebSocket regression guarantees, not SDK certification, a complete imported-bot reconnect workflow, or milestone acceptance. READY still does not bootstrap populated guild caches.
+Bootstrap data is optional for direct core callers. The shared SDK runtime supplies it so READY/GUILD_CREATE can populate the tested SDK caches. Resume history is bounded, and a client outside that retained window receives explicit session rejection.
 
 ## Replay capacity
 
@@ -46,16 +46,14 @@ An oversized or non-JSON dispatch is rejected before its sequence advances. Even
 
 The core can validate requested privileged intents against a supplied allowed set and map selected event names to required intents. Selected message events can have content-bearing fields stripped when `MESSAGE_CONTENT` is unavailable.
 
-Desktop project `profile.intents` is parsed but not wired into the runtime Gateway session in v0.1. Intent decisions shown in most renderer panels are visual fixtures.
+Project `profile.intents` supplies the local privileged-intent allowlist. The SDK requests its own intents; unknown bits retain close code 4013 and disallowed privileged intents retain 4014. Enabling a known intent does not implement every event associated with it.
 
 ## Scenario controls
 
-Version 1 scenarios can dispatch an event, disconnect the in-process session, resume it, and assert that resume occurred. There is no generic scenario policy for delay, missed heartbeat, drop, duplicate, reorder, partial payload, or burst delivery.
-
-Those delivery faults, idempotency checks, and a real imported-bot reconnect/resume E2E remain roadmap work. See [Fault injection status](fault-injection.md).
+Version 1 scenarios can dispatch an event, disconnect the in-process session, resume it, and assert the model result. Version 2 scenarios inject actions into a real Bot and may select bounded Gateway `disconnect` or `duplicate` fault plans. Plans are session-scoped and cleared on stop; unused plans fail the scenario. Reorder, malformed-payload, burst, and arbitrary missed-heartbeat policies are not exposed. See [Fault injection](fault-injection.md).
 
 ## Sharding and findings
 
-Shard routing, identify concurrency, per-shard failure/latency, and cross-shard metrics are not implemented as a supported v0.1 profile.
+Shard routing, identify concurrency, per-shard failure/latency, and cross-shard metrics are not implemented as a supported local profile.
 
 The Gateway core does not currently emit the broad intent/reconnect/idempotency risk catalog previously proposed for this project. Scenarios can assert delivered events and `gateway-resumed`; implemented risk IDs are listed in [Risk engine](risk-engine.md).

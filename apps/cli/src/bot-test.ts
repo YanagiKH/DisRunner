@@ -24,7 +24,7 @@ export interface BotTestOptions {
 export interface BotTestReport {
   readonly version: 1;
   readonly execution: 'bot';
-  readonly adapter: 'raw-interaction-webhook';
+  adapter: string | null;
   name: string | null;
   runId: string | null;
   status: 'passed' | 'failed' | 'invalid' | 'runner-error' | 'cancelled';
@@ -46,7 +46,7 @@ export async function runBotTest(
   const report: BotTestReport = {
     version: 1,
     execution: 'bot',
-    adapter: 'raw-interaction-webhook',
+    adapter: null,
     name: null,
     runId: null,
     status: 'invalid',
@@ -114,6 +114,7 @@ export async function runBotTest(
     if (typeof started.runId !== 'string' || started.runId.length === 0)
       throw new SessionError('transport', 'Startup did not return an active run ID.');
     const runId = started.runId;
+    report.adapter = started.project?.adapter ?? null;
     report.runId = runId;
     report.status = 'passed';
     for (const step of testCase.steps) {

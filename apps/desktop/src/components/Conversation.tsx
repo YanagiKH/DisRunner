@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Bell, Hash, Pin, Search, SlidersHorizontal, Users, X } from 'lucide-react';
-import type { Channel, ChatMessage } from '../types';
+import type { Channel, ChatMessage, CommandSpec } from '../types';
+import type { ProjectAction } from '../state/project-workspace';
 import { Composer } from './Composer';
 import { MessageFeed } from './MessageFeed';
 
@@ -10,6 +11,9 @@ interface ConversationProps {
   readonly botRunning: boolean;
   readonly invocationBlockReason?: string | undefined;
   readonly onSubmit: (value: string) => void;
+  readonly commands?: readonly CommandSpec[] | undefined;
+  readonly onAction?: ((action: ProjectAction) => void) | undefined;
+  readonly onSaveAttachment?: ((id: string) => void) | undefined;
 }
 
 export function Conversation({
@@ -18,6 +22,9 @@ export function Conversation({
   botRunning,
   onSubmit,
   invocationBlockReason,
+  commands,
+  onAction,
+  onSaveAttachment,
 }: ConversationProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -83,7 +90,12 @@ export function Conversation({
           <SlidersHorizontal size={18} />
         </button>
       </header>
-      <MessageFeed channelName={channel.name} messages={filteredMessages} />
+      <MessageFeed
+        channelName={channel.name}
+        messages={filteredMessages}
+        onAction={botRunning ? onAction : undefined}
+        onSaveAttachment={botRunning ? onSaveAttachment : undefined}
+      />
       {query && (
         <div className="search-result-count">{filteredMessages.length} matching events</div>
       )}
@@ -92,6 +104,7 @@ export function Conversation({
         channelName={channel.name}
         onSubmit={onSubmit}
         invocationBlockReason={invocationBlockReason}
+        commands={commands}
       />
     </main>
   );

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "bot": {
+    "name": "Discord.py Example",
+    "runtime": "python",
+    "startCommand": "python3 bot.py",
+    "entryPoint": "bot.py",
+    "workingDirectory": "."
+  },
+  "adapter": { "type": "discord.py" },
+  "profile": {
+    "mode": "strict",
+    "seed": 42042,
+    "intents": ["GUILDS", "GUILD_MEMBERS", "GUILD_MESSAGES", "DIRECT_MESSAGES", "MESSAGE_CONTENT"],
+    "networkPolicy": "offline",
+    "hotReload": false
+  },
+  "fixtures": { "guild": "guild.discord-fixture.json", "user": "user.discord-fixture.json" }
+}

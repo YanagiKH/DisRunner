@@ -4,6 +4,28 @@ import { fileURLToPath } from 'node:url';
 import { createSession, SessionError } from '../dist/index.js';
 const project = fileURLToPath(new URL('../../../examples/raw-webhook-bot/', import.meta.url));
 const context = { actorId: '3000', guildId: '1000', channelId: '2000' };
+
+async function pinLegacyFixture(directory) {
+  const { readFile, writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const configPath = join(directory, 'discord-simulator.config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds: [] };
+  config.bot.entryPoint = 'src/legacy-session-entry.mjs';
+  config.bot.startCommand = 'node src/legacy-session-entry.mjs';
+  await writeFile(configPath, JSON.stringify(config));
+  // Start the unchanged authenticated server without the example's v2 registration wrapper.
+  await writeFile(
+    join(directory, 'src/legacy-session-entry.mjs'),
+    `import {createWebhookServer,loadServerOptionsFromEnvironment} from './server.mjs';
+const options=loadServerOptionsFromEnvironment();
+const server=createWebhookServer(options);
+server.listen(options.port,options.host);
+const shutdown=()=>{server.close(()=>{process.exitCode=0;});setTimeout(()=>server.closeAllConnections(),1000).unref();};
+process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
+`,
+  );
+}
 test('explicit contexts are validated without starting and snapshots are detached', async () => {
   const session = createSession();
   assert.throws(() => session.validateContext(context), SessionError);
@@ -44,12 +66,20 @@ test('wire context is explicit and selected fixtures stay frozen across disk edi
   const session = createSession();
   try {
     await cp(project, directory, { recursive: true });
+    await pinLegacyFixture(directory);
     const server = join(directory, 'src/server.mjs');
+    const source = await readFile(server, 'utf8');
+    const anchor = '  const reply = interactionReply(interaction);';
+    assert.equal(source.split(anchor).length, 2, 'one authenticated command handler point');
     await writeFile(
       server,
-      (await readFile(server, 'utf8')).replace(
-        "'Pong! Offline and deterministic.'",
-        'JSON.stringify({ guildId: interaction.guild_id, channelId: interaction.channel_id, user: interaction.member.user, memberKeys: Object.keys(interaction.member) })',
+      source.replace(
+        anchor,
+        `  if (interaction.type === 2 && interaction.data?.name === 'ping') {
+    send(200, {type:4,data:{content:JSON.stringify({guildId:interaction.guild_id,channelId:interaction.channel_id,user:interaction.member.user,memberKeys:Object.keys(interaction.member)})}});
+    return;
+  }
+${anchor}`,
       ),
     );
     await session.selectProject(directory);
@@ -81,8 +111,15 @@ test('wire context is explicit and selected fixtures stay frozen across disk edi
   }
 });
 
-test('authenticated live channel edits and deletes revoke invocation contexts immediately', async () => {
+test('authenticated live channel edits and deletes revoke invocation contexts immediately', async (t) => {
   const { createSessionWithDependencies } = await import('../dist/session.js');
+  const { cp, mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(tmpdir(), 'legacy-live-context-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await cp(project, directory, { recursive: true });
+  await pinLegacyFixture(directory);
   let token;
   const session = createSessionWithDependencies(
     {},
@@ -101,7 +138,7 @@ test('authenticated live channel edits and deletes revoke invocation contexts im
     },
   );
   try {
-    await session.selectProject(project);
+    await session.selectProject(directory);
     const started = await session.start();
     const mutate = (method, body) =>
       fetch(`${started.endpoints.restBaseUrl}/channels/2000`, {
@@ -170,18 +207,17 @@ test('wire actor uses actual retained state and deleted live actor cannot invoke
   const session = createSession();
   try {
     await cp(project, directory, { recursive: true });
+    await pinLegacyFixture(directory);
     const server = join(directory, 'src/server.mjs');
+    const source = await readFile(server, 'utf8');
+    const anchor = '  const reply = interactionReply(interaction);';
+    assert.equal(source.split(anchor).length, 2, 'one authenticated command handler point');
     await writeFile(
       server,
-      (await readFile(server, 'utf8'))
-        .replace(
-          'function handleInteraction(send, interaction)',
-          'async function handleInteraction(send, interaction)',
-        )
-        .replace(
-          '  const name = interaction.data?.name;',
-          `
-  if (interaction.data?.name === 'wait') {
+      source.replace(
+        anchor,
+        `
+  if (interaction.type === 2 && interaction.data?.name === 'wait') {
     const fs = await import('node:fs/promises');
     await fs.writeFile('dispatched', 'ready');
     while (true) {
@@ -189,9 +225,12 @@ test('wire actor uses actual retained state and deleted live actor cannot invoke
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
   }
-  const name = interaction.data?.name === 'wait' ? 'ping' : interaction.data?.name;`,
-        )
-        .replace("'Pong! Offline and deterministic.'", 'interaction.member.user.username'),
+  if (interaction.type === 2 && ['ping','wait'].includes(interaction.data?.name)) {
+    send(200,{type:4,data:{content:interaction.member.user.username}});
+    return;
+  }
+${anchor}`,
+      ),
     );
     await session.selectProject(directory);
     const started = await session.start();

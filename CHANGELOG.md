@@ -4,22 +4,30 @@ All notable changes to DisRunner are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [1.0.0]
+
 ### Added
 
-- Add an explicit ordinary guild-text message permission profile backed by live state, with own-message mutation and revocation checks. The core API and shared runtime support opt-in; project configuration pairs the enforcing profile with a version-1 bot fixture and explicit guild membership. CLI `bot-test` and Desktop share that configuration. Legacy behavior remains the default; DM authorization, viewer-filtered Desktop state and full Discord/SDK permission parity are not claimed. See [the profile contract](docs/ordinary-message-permissions.md).
+- Pinned discord.js 14.27.0 and discord.py 2.6.4 adapters, with genuine offline SDK dispatch, cache synchronization, ESM/CommonJS support and runtime diagnostics.
+- Shared Desktop/CLI Bot execution, typed commands, context commands, autocomplete, buttons, selects, modals, DM views and local attachments.
+- Versioned workspaces with fixture/scenario editing, atomic saves, backups, conflict detection, undo/redo and explicit recovery.
+- Real Bot Scenario v2, cancellation, bounded fault plans, JSON/JUnit/HTML/SARIF reports and redacted reproduction bundles.
+- Packaged application and installer operation tests, isolated offline conformance, and a standalone CLI archive with dependency notices.
+- Stable release signing/notarization checks, installation receipts, prerelease channels and complete artifact integrity verification.
 
 ### Fixed
 
-- Reject permission expectation mismatches and unasserted scheduled operation failures instead of reporting false success in model scenarios.
-- Align strict scenario parsing with the published schema, reject simultaneous `steps` and `actions`, and reject unknown closed configuration keys without closing arbitrary payload dictionaries.
-- Preserve Gateway intent close codes 4013/4014 over the local WebSocket transport.
-- Reject invalid application-command callbacks, prevent edits from reviving deleted originals, and merge interaction message PATCH fields with atomic capacity checks.
-- Apply the documented simulator policies for content-edit mention settings and immutable ephemeral identity. Unknown interaction labels now fail callback validation rather than inheriting component behavior; existing scenarios using custom labels must use a modeled kind.
+- Keep message state, REST results, Gateway events and actor-specific desktop views consistent.
+- Preserve original/followup lifecycle, PATCH fields, ephemeral visibility, component source messages and interaction acknowledgement rules.
+- Enforce live permission/intent decisions, correct resume URLs/backlogs, command scope precedence and SDK retry behavior.
+- Reject invalid settings, vacuous assertions, missing responses, incomplete evidence and handler exceptions after an acknowledgement.
+- Bound logs/traces/diagnostics, redact configured secrets, and preserve process/port cleanup on failure or cancellation.
 
-### Maintenance
+### Compatibility
 
-- Refresh compatible dependencies, constrain vulnerable build transitives, and migrate the test runner to Vitest 4 while retaining coverage thresholds and an explicit source scope.
-- Add a proposed v1.0 capability/evidence baseline and shared-runtime ADR. SDK adapters and target-platform certification remain pending; these documents are not a v1.0 support claim.
+- Project version 1 and model scenarios remain readable; real Bot workflows use Scenario v2.
+- Bot reruns use real process time. Deterministic model replay does not restore arbitrary Bot memory or timers.
+- Components V2, voice, arbitrary SDK versions, automatic dependency installation and OS sandboxing are outside the supported profile.
 
 ## [0.1.0] - 2026-09-01
 
@@ -52,5 +60,6 @@ Initial Preview. See [COMPATIBILITY.md](COMPATIBILITY.md) for the layer-by-layer
 - Generic latency/drop/duplicate/reorder fault injection and imported-process performance profiling are not implemented.
 - REST, Gateway, object-limit, risk-rule, and desktop interaction catalogs are partial.
 
-[Unreleased]: https://github.com/YanagiKH/DisRunner/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/YanagiKH/DisRunner/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/YanagiKH/DisRunner/releases/tag/v1.0.0
 [0.1.0]: https://github.com/YanagiKH/DisRunner/releases/tag/v0.1.0

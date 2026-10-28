@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${APPDIR:-}" ]]; then
+  APPDIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+fi
+export APPDIR
+export PATH="${APPDIR}:${APPDIR}/usr/sbin${PATH:+:${PATH}}"
+export XDG_DATA_DIRS="${APPDIR}/usr/share${XDG_DATA_DIRS:+:${XDG_DATA_DIRS}}:/usr/share/gnome:/usr/local/share:/usr/share"
+export LD_LIBRARY_PATH="${APPDIR}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export GSETTINGS_SCHEMA_DIR="${APPDIR}/usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:${GSETTINGS_SCHEMA_DIR}}"
+
+exec "$APPDIR/disrunner" "$@"

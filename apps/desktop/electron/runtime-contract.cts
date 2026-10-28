@@ -1,4 +1,6 @@
 export type {
+  BotScenarioV2Result,
+  RuntimeActionRequest,
   InvocationRequest,
   InvocationContext,
   SessionSnapshot,

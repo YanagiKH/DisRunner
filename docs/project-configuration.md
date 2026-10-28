@@ -1,176 +1,141 @@
 # Project configuration
 
-The Electron v0.1 Preview reads one `discord-simulator.config.json` from the selected project folder. Treat it as code: review the command, keep paths inside the project, and never store real credentials.
+Desktop and CLI use the same `discord-simulator.config.json` in the selected project directory. Review its executable and entry point before running a project. Dependencies must already be installed; DisRunner does not install them during a session.
 
-## Runnable v0.1 shape
+## Configuration shape
 
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/YanagiKH/DisRunner/main/docs/schemas/discord-simulator.config.schema.json",
   "version": 1,
   "bot": {
-    "name": "example-bot",
+    "name": "Local Bot",
     "runtime": "node",
-    "startCommand": "node src/server.mjs",
-    "entryPoint": "src/server.mjs",
+    "startCommand": "node bot.mjs",
+    "entryPoint": "bot.mjs",
     "workingDirectory": "."
   },
-  "adapter": {
-    "type": "raw-interaction-webhook",
-    "interactionEndpoint": "http://127.0.0.1:${DISRUNNER_BOT_PORT}/interactions"
-  },
-  "environment": {
-    "DISRUNNER_OFFLINE": "1"
-  },
+  "adapter": { "type": "discord.js" },
+  "environment": {},
   "profile": {
     "mode": "strict",
     "seed": 42,
-    "networkPolicy": "offline"
+    "intents": ["GUILDS", "GUILD_MESSAGES", "MESSAGE_CONTENT"],
+    "networkPolicy": "offline",
+    "hotReload": false
   },
-  "fixtures": {
-    "guild": "fixtures/foundation-lab.discord-fixture.json",
-    "user": "fixtures/developer.discord-fixture.json"
-  }
+  "fixtures": { "guild": "fixtures/guild.json", "user": "fixtures/user.json" }
 }
 ```
 
-Keep fixture paths inside the selected project. Paths that escape the workspace, traverse through an unsafe symlink, or resolve to the config file itself fail validation.
+Use the schema shipped with the selected release when available. The `main` schema follows current source. Unknown configuration keys and unsupported adapter names are rejected.
 
-Use the schema shipped with a release when possible. The `main` URL can change. The bundled [raw-webhook example](../examples/raw-webhook-bot/discord-simulator.config.json) is exercised by repository tests.
+## Bot and interpreter
 
-## Implemented fields
+| Field                  | Meaning                                             |
+| ---------------------- | --------------------------------------------------- |
+| `version`              | Configuration format, currently `1`                 |
+| `bot.name`             | Display name, 1–100 characters                      |
+| `bot.runtime`          | `node`, `python`, or `executable`                   |
+| `bot.startCommand`     | Executable and arguments, parsed without a shell    |
+| `bot.entryPoint`       | Project-relative file, required for Node and Python |
+| `bot.workingDirectory` | Project-relative working directory                  |
 
-- `version`: must be `1`.
-- `bot.name`: display name.
-- `bot.runtime`: launch-runtime label (`node`, `python`, or `executable`). This label does not provide a framework adapter.
-- `bot.startCommand`: parsed into an executable and arguments; shell operators/interpolation are not accepted as a generic script surface.
-- `bot.entryPoint`: optional project-relative regular file checked during validation.
-- `bot.workingDirectory`: project-relative directory constrained to the selected workspace.
-- `adapter.type`: v0.1 accepts only `raw-interaction-webhook`; other adapter names fail closed.
-- `adapter.interactionEndpoint`: loopback HTTP template for the bot-owned endpoint. `${DISRUNNER_BOT_PORT}` is the supported dynamic port placeholder.
-- `environment`: explicit non-secret string values. Credential-like names cannot override supervisor-owned values: they are dropped by the process boundary and protected values are written afterward. Production-shaped token values are rejected; the UI displays names, not a value preview.
-- `profile.mode`: passed to the current core/REST profile. It is not a promise that every parser has universal strict/lenient behavior.
-- `profile.ordinaryMessagePermissions`: optional `legacy-unenforced` (the default) or `guild-text-own-messages-v1`. Unknown or non-string values fail validation. Independent of `profile.mode`; either payload-validation mode can use either permission profile.
-- `profile.commandRegistry`: optional `command-registry-v1` descriptor with an explicit guild installation allowlist. Omission disables registration; see below. Independent of mode and ordinary message permissions.
-- `profile.seed`: deterministic input for runtime core IDs/randomness.
-- `profile.networkPolicy`: must be `offline`.
-- `fixtures.guild` / `fixtures.user`: optional bounded JSON files loaded into runtime core state. `fixtures.user` supplies the invocation actor, not the authenticated bot.
-- `fixtures.bot`: required only with `guild-text-own-messages-v1`; forbidden with omitted or explicit `legacy-unenforced`. See below. Desktop diagnostic projections do not guarantee viewer permissions.
+For Node/Python, the start command must name the configured entry point from its working directory. DisRunner replaces that argument with the validated absolute entry path. An executable name such as `node` or `python3` resolves through the inherited `PATH`. A quoted absolute interpreter path is also accepted:
+
+```json
+{
+  "runtime": "python",
+  "startCommand": "\"/home/developer/My Bot/.venv/bin/python\" bot.py",
+  "entryPoint": "bot.py",
+  "workingDirectory": "."
+}
+```
+
+On Windows, quote the absolute `.venv\\Scripts\\python.exe` path and escape its quotes and backslashes in JSON. The interpreter must be an existing Node or Python executable. Python virtual-environment paths retain their environment selection.
+
+`executable` launches a project-contained regular file and is available only with the raw-webhook contract; it is not a generic Gateway or stdio adapter. Pipes, redirects, variable assignments, and chained commands are not interpreted as shell syntax. Credential arguments are rejected.
+
+Entry points, working directories, and fixture files must stay inside the selected project after path resolution. Config files are limited to 1 MiB and each fixture to 8 MiB. Paths are limited to 4,096 characters. Escaping symlinks are rejected; internal symlinks may be used.
+
+## Adapters
+
+| `adapter.type`            | Runtime                          | Prepared dependency          | Interaction transport                     |
+| ------------------------- | -------------------------------- | ---------------------------- | ----------------------------------------- |
+| `raw-interaction-webhook` | Node, Python, or executable      | User's signed webhook server | `adapter.interactionEndpoint` is required |
+| `discord.js`              | Node.js 22, tested with 22.23.2  | `discord.js` 14.27.0         | Local JSON Gateway and API v10            |
+| `discord.py`              | Python 3.12, tested with 3.12.14 | `discord.py` 2.6.4           | Local JSON Gateway and API v10            |
+
+SDK versions are exact pins. An incompatible SDK or interpreter produces a startup diagnostic. JavaScript entry points may be ESM or CommonJS; compile TypeScript with the project's normal build command first. SDK projects must not set `interactionEndpoint` because their interactions arrive through Gateway. See [SDK adapters](sdk-adapters.md) for setup.
+
+A raw webhook adapter uses:
+
+```json
+{
+  "type": "raw-interaction-webhook",
+  "interactionEndpoint": "http://127.0.0.1:${DISRUNNER_BOT_PORT}/interactions"
+}
+```
+
+The runtime binds REST and Gateway on dynamic loopback ports. Optional `adapter.restBaseUrl` and `adapter.gatewayUrl` are retained for configuration compatibility and validated as loopback templates; the runtime supplies its actual bound endpoints. They do not select a remote server or fixed listener port.
+
+## Profile
+
+`profile.mode` accepts `strict` or `lenient`; individual payload validators define what warnings lenient mode permits. Invalid lifecycle transitions, authentication, and permissions still fail. `profile.seed` is an integer from 0 through 4294967295, and `networkPolicy` must be `offline`.
+
+`profile.intents` contains unique names from the Gateway intent catalog. It supplies the local privileged-intent allowlist. The SDK still chooses its requested intents in its own code; enabling a profile intent does not add an event implementation. Invalid or disallowed SDK intents close the Gateway with 4013 or 4014. Message-content filtering distinguishes guild messages from DM, mention, and own-message exceptions.
+
+`hotReload` must be omitted or `false`. `true` is rejected. Stop and restart after code or fixture changes; reselect the project to reload edited configuration.
 
 ## Command registry opt-in
 
-To enable [application-command registration](application-command-registry.md), add this field inside the existing `profile` object:
+Raw-webhook projects leave command registration disabled unless configured. SDK projects default to `command-registry-v2` for global commands and all loaded guilds. An explicit descriptor overrides that default:
 
 ```json
 {
   "commandRegistry": {
-    "profile": "command-registry-v1",
+    "profile": "command-registry-v2",
     "guildIds": ["1000"]
   }
 }
 ```
 
-Both descriptor fields are required and additional fields are rejected. Omission disables the registry; there is no `false`, `null` or default descriptor. `guildIds: []` enables global-only registration without requiring a guild fixture.
+Both `profile` and `guildIds` are required within the descriptor. `command-registry-v1` preserves the earlier empty-slash-option subset. `command-registry-v2` adds typed options, subcommands/groups, choices, autocomplete definitions, context commands, and supported SDK registration fields. See [Application command registry](application-command-registry.md).
 
-`guildIds` accepts at most 128 unique canonical positive decimal uint64 strings, from `"1"` through `"18446744073709551615"`. Numbers, zero, leading zeros, signs, spaces and exponent notation are rejected rather than normalized. Each configured ID must reference a loaded `guild` fixture. Version 1 still accepts only one `fixtures.guild` file containing one guild envelope, not an array of guild fixtures; listing additional absent guilds fails validation. Fixture presence alone never installs a guild for registration.
-
-The JSON Schema checks the descriptor structure, uniqueness, length and digit pattern. Runtime validation additionally checks the uint64 numeric upper bound and loaded guild existence; the schema pattern alone proves neither. Invalid configuration fails project loading before listeners or a child process start, with fixed errors that do not echo submitted values:
-
-- Invalid descriptor: `profile.commandRegistry must be a command-registry-v1 descriptor with unique canonical guildIds (maximum 128).`
-- Missing fixture guild: `profile.commandRegistry.guildIds must reference loaded guild fixtures.`
-
-Registration is independent of strict/lenient mode and `ordinaryMessagePermissions`. Registry-only enablement does not require `fixtures.bot`; that fixture remains required only for the enforcing ordinary-message permission profile and forbidden for the legacy permission profile. No membership, role or permission grant supplies registry installation authority.
-
-The shared runtime passes this descriptor to its existing REST instance with the same state, synthetic credential and bootstrap application identity. The raw child discovers its application through authenticated `GET /oauth2/applications/@me`, not a new config field or application-ID environment variable. The only adapter remains `raw-interaction-webhook`. Successful restarts create fresh command state and credentials. To load edited configuration, reselect the project; editing the file alone does not update the selected configuration.
+`guildIds` contains at most 128 unique canonical positive decimal uint64 strings. Every ID must reference a loaded guild. `[]` enables global-only registration. The runtime checks numeric range and fixture relationships in addition to the schema's structural checks. Command registration does not publish anything to Discord.
 
 ## Ordinary message permission opt-in
 
-Keep the existing runnable example unchanged for legacy behavior. To opt in, replace its `profile` and `fixtures` sections with:
+`profile.ordinaryMessagePermissions` accepts `legacy-unenforced` or `guild-text-own-messages-v1`. Raw projects default to the legacy profile. SDK projects default to the enforcing profile.
 
-```json
-{
-  "profile": {
-    "mode": "strict",
-    "seed": 42,
-    "networkPolicy": "offline",
-    "ordinaryMessagePermissions": "guild-text-own-messages-v1"
-  },
-  "fixtures": {
-    "guild": "fixtures/permission-guild.json",
-    "user": "fixtures/human.json",
-    "bot": "fixtures/bot.json"
-  }
-}
-```
-
-This is a configuration fragment, not a replacement for the required bot and adapter fields. Create `fixtures/bot.json`:
+An enforcing raw project requires `fixtures.bot`; a legacy raw project must omit it. SDK projects may provide a bot fixture to select its identity, or use a synthetic bot identity and membership created for the local session. An absent SDK everyone role receives the local basic-text permission profile; existing fixture roles and permission values are retained. Use explicit permission fixtures when testing denial or hierarchy behavior.
 
 ```json
 { "version": 1, "user": { "id": "5000", "username": "Local Bot", "bot": true } }
 ```
 
-`user.id` must be a string from `"1"` through `"18446744073709551615"`, without leading zeros, signs or whitespace; numeric JSON values are rejected. `user.bot` must be literal `true`. The `version: 1` and `user` object envelope are required. The ID and `bot: true` identify the bot across Gateway READY, REST current-user bootstrap, ordinary messages and interaction messages. Display fields remain synthetic on bootstrap/READY surfaces; fixture presentation is not guaranteed everywhere. Application and application-owner identities remain separately generated.
-
-Create `fixtures/human.json` for the separate invocation actor:
+The separate `fixtures.user` file provides a human invocation actor:
 
 ```json
 { "version": 1, "user": { "id": "3000", "username": "Developer", "bot": false } }
 ```
 
-The configured bot is excluded from selectable/default invocation contexts. Explicitly using its ID as `actorId` fails context preflight, rather than substituting a human. Omitting a usable actor fixture does not generate one. Legacy actor selection is unchanged.
+The bot is excluded from selectable human actors. Guild fixtures use a version-1 envelope with a `guild` object and optional `roles`, `channels`, and `members` arrays. A member binds to a user through `user_id`; resource IDs and permission bitfields are strings. Enforcing guild contexts require explicit membership for the selected human actor as well as the Bot's membership. Give each the permissions needed for the behavior being tested. Nested records inherit the parent guild ID and explicit conflicting IDs are rejected in the enforcing profile. See [Ordinary message permissions](ordinary-message-permissions.md) for the route-level subset.
 
-Create `fixtures/permission-guild.json`:
+## Workspace precedence
 
-```json
-{
-  "version": 1,
-  "guild": {
-    "id": "1000",
-    "owner_id": "9000",
-    "roles": [
-      { "id": "1000", "permissions": "0" },
-      { "id": "1100", "permissions": "68608" }
-    ],
-    "channels": [{ "id": "2000", "name": "bot-tests", "type": 0, "permission_overwrites": [] }],
-    "members": [{ "id": "5100", "user_id": "5000", "roles": ["1100"] }]
-  }
-}
-```
-
-`68608` grants VIEW_CHANNEL, SEND_MESSAGES and READ_MESSAGE_HISTORY. The member resource ID `5100` is not the bot identity: membership is bound by `user_id: "5000"`, not `member.id` or nested `member.user.id`.
-
-In the enforcing profile, optional `guild.roles`, `guild.channels` and `guild.members` must be arrays of objects when present and become standalone resources. Missing collections stay empty. Nested records inherit the parent guild ID only when `guild_id` is absent; any explicitly different value is rejected. Resources load in guild, roles, channels, members, human user, bot user order. Duplicate `(resourceType, id)` pairs are rejected, including a shared ID between the human and bot fixtures; the guild and its everyone role may share an ID because their resource types differ.
-
-No everyone role, membership, assigned role, owner, administrator privilege or channel overwrite is inferred. Keep negative fixtures explicit: otherwise structurally admitted fixtures with no bot membership, zero permissions, missing roles/overwrites, malformed permission context or ambiguous bot membership can start, then deny ordinary guild-text operations with `403 {"code":50013,"message":"Missing Permissions"}`. Two differently identified member resources with the same bot `user_id` are an ambiguous-membership negative case, not duplicate resource keys. See [Ordinary message permissions](ordinary-message-permissions.md) for exact operation rules and exclusions.
-
-Configuration/fixture structural validation and initial-state preflight happen before listeners or the child start. Config JSON is limited to 1 MiB, each fixture to 8 MiB, and configured paths to 4,096 characters. Fixture paths must resolve to regular files inside the project; escaping symlinks are rejected, internal relative symlinks are allowed. Existing core resource/state capacity limits still apply. These checks do not repair permission-negative fixtures or change legacy fixture interpretation.
-
-## Accepted but not connected in v0.1
-
-The schema retains `adapter.restBaseUrl`, `adapter.gatewayUrl`, `profile.intents`, and `profile.hotReload` for forward compatibility. Do not rely on them in v0.1:
-
-- Electron binds and injects its own REST/Gateway loopback endpoints; config URL overrides are not used.
-- `profile.intents` is validated but not applied to the desktop Gateway session.
-- `profile.hotReload` does not watch or restart the process.
-
-Omit these fields unless you are testing schema compatibility itself.
+After a workspace is saved, `.disrunner/workspace.json` supplies resources, scenarios, seed, and mode for subsequent runs. The project config continues to supply the executable, adapter, environment, and remaining profile fields. Invalid, corrupted, or future-version workspace data is diagnosed before starting a Bot. See [Workspaces](workspaces.md) for backups, conflicts, and recovery.
 
 ## Environment injection
 
-For each run, Electron creates a synthetic `disrunner.offline.*` credential, an ephemeral Ed25519 interaction key pair, and an independent random 32-byte webhook peer secret. It injects local REST/Gateway URLs, `DISRUNNER_PUBLIC_KEY`, and the protected `DISRUNNER_WEBHOOK_PEER_SECRET` into the supervised child. The peer secret is not a project-config field, cannot be overridden through `environment`, is added to output/export redaction, and is replaced on every start. A conforming raw-webhook process uses it only to HMAC-authenticate response status and exact bytes back to Electron.
+`environment` accepts non-secret strings. It cannot alter `PATH`, Node/Python module resolution, or dynamic-library injection. Production-shaped credentials are rejected. Supervisor-owned credentials and endpoints override protected environment names. Project `.env` files are not imported by DisRunner; a Bot's own code may still load them.
 
-Bot stdout/stderr and supported exports are bounded/redacted, but arbitrary child code can still read its own environment, inspect files, or open network connections. A process with sufficient same-user inspection rights may also read another process's memory or environment; that remains outside the application-level isolation boundary.
+An environment can contain up to 252 project variables; four slots are reserved for runtime ports and the raw-webhook public key. Names use ASCII letters, digits and underscores, begin with a letter or underscore, and contain at most 256 characters. Each value is limited to 32,768 UTF-16 code units and 65,536 UTF-8 bytes; all names and values together must fit within 1 MiB. The complete config file also has a 1 MiB limit.
 
-The project `.env` file is not imported by DisRunner. A bot's own launcher may still load it, so remove live secrets or use an isolated project copy.
+Every run receives fresh synthetic credentials and local endpoints. Raw projects also receive an ephemeral Ed25519 public key and a protected response-authentication secret. The raw server verifies signed requests and authenticates its response bytes with the bundled peer-auth helper; that HMAC protocol belongs to DisRunner, not Discord's public API.
+
+Bot output and reports are bounded and redacted. The selected process still runs with the current OS user's filesystem and process privileges. Supported SDK transports reject external endpoints, but arbitrary project networking is outside that adapter boundary. See [Offline mode](offline-mode.md).
 
 ## Port behavior
 
-Electron binds its REST and Gateway services to loopback dynamic ports. It probes a loopback port for the bot-owned interaction server before process launch and substitutes `${DISRUNNER_BOT_PORT}`. Because the bot binds after the probe is released, another same-user process can still win the port race and deny startup. Mere port ownership is not accepted as bot identity: readiness sends an Ed25519-signed PING and verifies the returned HMAC before parsing JSON. A listener without the per-run peer secret fails readiness or command invocation and cannot fabricate successful callback evidence.
-
-Hard-coded ports reduce parallel reliability. Do not use hostnames other than explicit loopback addresses.
-
-## One profile per project config
-
-Version 1 has one `profile` object and one fixed config filename. Multiple named profiles, inheritance, hot reload, and profile switching are planned. Use separate trusted project copies/config revisions when different settings are required.
-
-The desktop validator must succeed before **Start Bot** is enabled. CLI `validate` validates scenario files, not project configuration. Validation is not a trust decision; use [hard isolation](offline-mode.md#running-untrusted-code) for unknown code.
+REST and Gateway bind `127.0.0.1` on operating-system-selected ports. A raw Bot receives a dynamically selected webhook port. A competing local process can occupy that port and prevent startup; signed readiness and response authentication prevent accepting an unrelated listener as the Bot. Stop the active run before selecting another project.

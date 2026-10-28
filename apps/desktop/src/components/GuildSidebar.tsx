@@ -18,6 +18,7 @@ interface GuildSidebarProps {
   readonly selectedChannelId: string;
   readonly onGuildSelect: (guildId: string) => void;
   readonly onChannelSelect: (channelId: string) => void;
+  readonly live?: boolean | undefined;
 }
 
 export function GuildSidebar({
@@ -26,6 +27,7 @@ export function GuildSidebar({
   selectedChannelId,
   onGuildSelect,
   onChannelSelect,
+  live,
 }: GuildSidebarProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(new Set());
 
@@ -50,7 +52,7 @@ export function GuildSidebar({
         <div className="selected-server">
           <span className="server-sample-dot" />
           <strong>{selectedGuild.name}</strong>
-          <span className="preview-label">Sample</span>
+          <span className="preview-label">{live ? 'Local' : 'Sample'}</span>
         </div>
 
         <div className="channel-groups">
@@ -75,6 +77,7 @@ export function GuildSidebar({
                         <button
                           aria-current={active ? 'page' : undefined}
                           className={`channel-row ${active ? 'active' : ''}`}
+                          data-channel-id={channel.id}
                           key={channel.id}
                           onClick={() => onChannelSelect(channel.id)}
                           type="button"

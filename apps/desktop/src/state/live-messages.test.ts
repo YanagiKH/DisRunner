@@ -124,6 +124,18 @@ describe('read-only live ordinary message selector', () => {
       ),
     ).toEqual(['Edited']);
   });
+  it('does not label intentional viewer filtering as capacity truncation', () => {
+    const current = snapshot();
+    expect(
+      selectLiveMessages(
+        {
+          ...current,
+          coreState: { ...current.coreState!, truncated: true, evidenceComplete: true },
+        },
+        context,
+      ).status,
+    ).toBe('available');
+  });
 });
 
 describe('interaction response rows in the live selector', () => {
@@ -135,6 +147,28 @@ describe('interaction response rows in the live selector', () => {
     timestamp: '2015-01-01T00:01:40.000Z',
     author: { id: '333333333333333333', username: 'fixture-bot', bot: true },
   };
+  it('renders a private response only for its bound actor', () => {
+    const privateReply = {
+      ...original,
+      id: 'private-1',
+      visibility: 'ephemeral',
+      flags: 64,
+      visibleTo: 'a',
+      content: 'For actor A',
+    };
+    const current = snapshot([privateReply]);
+    expect(selectLiveMessages(current, context).messages).toEqual([
+      expect.objectContaining({
+        id: 'private-1',
+        content: 'For actor A',
+        responseState: 'ephemeral',
+      }),
+    ]);
+    const other = { ...context, actorId: 'b' };
+    expect(selectLiveMessages({ ...current, contexts: [context, other] }, other).messages).toEqual(
+      [],
+    );
+  });
   it('accepts a public type 20 response with each supported flag value', () => {
     for (const flags of [0, 4, 4096, 4100]) {
       expect(

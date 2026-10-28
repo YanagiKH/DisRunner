@@ -65,6 +65,8 @@ const invalid = [
 
 test('omission stays absent and registry-only global opt-in needs no fixtures or bot', async () => {
   await fixture(async ({ root, config, save }) => {
+    delete config.profile.commandRegistry;
+    await save();
     const legacy = await loadProjectConfiguration(root);
     assert.equal(Object.hasOwn(legacy.profile, 'commandRegistry'), false);
     assert.equal(legacy.profile.ordinaryMessagePermissions, 'legacy-unenforced');
@@ -223,7 +225,7 @@ test('schema is the literal structural contract, with runtime-only range/fixture
     additionalProperties: false,
     required: ['profile', 'guildIds'],
     properties: {
-      profile: { const: 'command-registry-v1' },
+      profile: { enum: ['command-registry-v1', 'command-registry-v2'] },
       guildIds: {
         type: 'array',
         maxItems: 128,

@@ -45,6 +45,33 @@ export interface RiskCollectorOptions {
   readonly maxRetainedBytes?: number;
 }
 
+export interface TraceEvidence {
+  readonly startedSpans: number;
+  readonly completedSpans: number;
+  readonly retainedSpans: number;
+  readonly openSpans: number;
+  readonly evictedSpans: number;
+  readonly evictedByCount: number;
+  readonly evictedByBytes: number;
+  readonly discardedSpans: number;
+  readonly rejectedSpans: number;
+  readonly droppedSpans: number;
+  readonly truncatedPayloads: number;
+  readonly retainedBytes: number;
+  readonly complete: boolean;
+}
+
+export interface RiskEvidence {
+  readonly totalFindings: number;
+  readonly retainedFindings: number;
+  readonly aggregatedFindings: number;
+  readonly rejectedFindings: number;
+  readonly droppedFindings: number;
+  readonly truncatedFindings: number;
+  readonly retainedBytes: number;
+  readonly complete: boolean;
+}
+
 export class TraceCapacityError extends Error {
   public constructor(resource: 'open spans' | 'retained bytes') {
     super(`Trace ${resource} capacity was reached.`);
@@ -98,6 +125,13 @@ export class TraceCollector {
   #completedBytes = 0;
   #completedHead = 0;
   #completedCount = 0;
+  #startedSpans = 0;
+  #completedSpans = 0;
+  #evictedByCount = 0;
+  #evictedByBytes = 0;
+  #discardedSpans = 0;
+  #rejectedSpans = 0;
+  #truncatedPayloads = 0;
 
   public constructor(options: TraceCollectorOptions) {
     this.#clock = options.clock;
@@ -127,30 +161,41 @@ export class TraceCollector {
     metadata: Readonly<Record<string, unknown>> = {},
     parent?: SpanHandle,
   ): SpanHandle {
-    if (this.#open.size >= this.#maxOpenSpans) {
-      throw new TraceCapacityError('open spans');
+    try {
+      if (this.#open.size >= this.#maxOpenSpans) {
+        throw new TraceCapacityError('open spans');
+      }
+      const id = `span_${this.#random.token(12)}`;
+      const redactedName = redactString(name, TRACE_NAME_REDACTION_OPTIONS);
+      if (redactedName.includes('[REDACTION_')) this.#truncatedPayloads += 1;
+      const handle: OpenSpan = {
+        id,
+        traceId: parent?.traceId ?? `trace_${this.#random.token(16)}`,
+        startedAtMs: this.#clock.now(),
+        kind,
+        name: redactedName,
+        ...(parent === undefined ? {} : { parentId: parent.id }),
+        metadata: limitMetadata(
+          redact(metadata, TRACE_REDACTION_OPTIONS),
+          this.#payloadSizeLimitBytes,
+          () => {
+            this.#truncatedPayloads += 1;
+          },
+        ),
+      };
+      const sizeBytes = serializedByteLength(handle);
+      if (this.#openBytes + sizeBytes > this.#maxRetainedBytes) {
+        throw new TraceCapacityError('retained bytes');
+      }
+      this.#evictCompletedForBytes(sizeBytes);
+      this.#open.set(id, { span: handle, sizeBytes });
+      this.#openBytes += sizeBytes;
+      this.#startedSpans += 1;
+      return { id: handle.id, traceId: handle.traceId, startedAtMs: handle.startedAtMs };
+    } catch (error) {
+      this.#rejectedSpans += 1;
+      throw error;
     }
-    const id = `span_${this.#random.token(12)}`;
-    const handle: OpenSpan = {
-      id,
-      traceId: parent?.traceId ?? `trace_${this.#random.token(16)}`,
-      startedAtMs: this.#clock.now(),
-      kind,
-      name: redactString(name, TRACE_NAME_REDACTION_OPTIONS),
-      ...(parent === undefined ? {} : { parentId: parent.id }),
-      metadata: limitMetadata(
-        redact(metadata, TRACE_REDACTION_OPTIONS),
-        this.#payloadSizeLimitBytes,
-      ),
-    };
-    const sizeBytes = serializedByteLength(handle);
-    if (this.#openBytes + sizeBytes > this.#maxRetainedBytes) {
-      throw new TraceCapacityError('retained bytes');
-    }
-    this.#evictCompletedForBytes(sizeBytes);
-    this.#open.set(id, { span: handle, sizeBytes });
-    this.#openBytes += sizeBytes;
-    return { id: handle.id, traceId: handle.traceId, startedAtMs: handle.startedAtMs };
   }
 
   public end(
@@ -163,24 +208,33 @@ export class TraceCollector {
       throw new Error(`Unknown or already completed trace span: ${handle.id}`);
     this.#open.delete(handle.id);
     this.#openBytes -= storedOpen.sizeBytes;
-    const open = storedOpen.span;
-    const sanitizedEndMetadata = redact(metadata, TRACE_REDACTION_OPTIONS);
-    const span: TraceSpan = {
-      id: open.id,
-      traceId: open.traceId,
-      ...(open.parentId === undefined ? {} : { parentId: open.parentId }),
-      kind: open.kind,
-      name: open.name,
-      startedAtMs: open.startedAtMs,
-      durationMs: Math.max(0, this.#clock.now() - open.startedAtMs),
-      status,
-      metadata: limitMetadata(
-        { ...open.metadata, ...sanitizedEndMetadata },
-        this.#payloadSizeLimitBytes,
-      ),
-    };
-    this.#retainCompleted(span);
-    return structuredClone(span);
+    try {
+      const open = storedOpen.span;
+      const sanitizedEndMetadata = redact(metadata, TRACE_REDACTION_OPTIONS);
+      const span: TraceSpan = {
+        id: open.id,
+        traceId: open.traceId,
+        ...(open.parentId === undefined ? {} : { parentId: open.parentId }),
+        kind: open.kind,
+        name: open.name,
+        startedAtMs: open.startedAtMs,
+        durationMs: Math.max(0, this.#clock.now() - open.startedAtMs),
+        status,
+        metadata: limitMetadata(
+          { ...open.metadata, ...sanitizedEndMetadata },
+          this.#payloadSizeLimitBytes,
+          () => {
+            this.#truncatedPayloads += 1;
+          },
+        ),
+      };
+      this.#retainCompleted(span);
+      this.#completedSpans += 1;
+      return structuredClone(span);
+    } catch (error) {
+      this.#discardedSpans += 1;
+      throw error;
+    }
   }
 
   public async withSpan<T>(
@@ -227,6 +281,27 @@ export class TraceCollector {
     return this.#openBytes + this.#completedBytes;
   }
 
+  /** Retention history since clear(); spans(limit) never changes these counters. */
+  public evidence(): TraceEvidence {
+    const evictedSpans = this.#evictedByCount + this.#evictedByBytes;
+    const droppedSpans = evictedSpans + this.#discardedSpans + this.#rejectedSpans;
+    return {
+      startedSpans: this.#startedSpans,
+      completedSpans: this.#completedSpans,
+      retainedSpans: this.#completedCount,
+      openSpans: this.#open.size,
+      evictedSpans,
+      evictedByCount: this.#evictedByCount,
+      evictedByBytes: this.#evictedByBytes,
+      discardedSpans: this.#discardedSpans,
+      rejectedSpans: this.#rejectedSpans,
+      droppedSpans,
+      truncatedPayloads: this.#truncatedPayloads,
+      retainedBytes: this.retainedByteCount(),
+      complete: droppedSpans === 0 && this.#truncatedPayloads === 0,
+    };
+  }
+
   public clear(): void {
     this.#open.clear();
     this.#completed.fill(undefined);
@@ -234,15 +309,25 @@ export class TraceCollector {
     this.#completedBytes = 0;
     this.#completedHead = 0;
     this.#completedCount = 0;
+    this.#startedSpans = 0;
+    this.#completedSpans = 0;
+    this.#evictedByCount = 0;
+    this.#evictedByBytes = 0;
+    this.#discardedSpans = 0;
+    this.#rejectedSpans = 0;
+    this.#truncatedPayloads = 0;
   }
 
   #retainCompleted(span: TraceSpan): void {
     const sizeBytes = serializedByteLength(span);
     // An end operation always releases its open span. If this completed record cannot fit
     // alongside other live spans, return it to the caller without retaining it.
-    if (this.#openBytes + sizeBytes > this.#maxRetainedBytes) return;
+    if (this.#openBytes + sizeBytes > this.#maxRetainedBytes) {
+      this.#discardedSpans += 1;
+      return;
+    }
     while (this.#completedCount >= this.#maxCompletedSpans) {
-      this.#evictOldestCompleted();
+      this.#evictOldestCompleted('count');
     }
     this.#evictCompletedForBytes(sizeBytes);
     const index = (this.#completedHead + this.#completedCount) % this.#maxCompletedSpans;
@@ -256,17 +341,19 @@ export class TraceCollector {
       this.retainedByteCount() + additionalBytes > this.#maxRetainedBytes &&
       this.#completedCount > 0
     ) {
-      this.#evictOldestCompleted();
+      this.#evictOldestCompleted('bytes');
     }
   }
 
-  #evictOldestCompleted(): void {
+  #evictOldestCompleted(reason: 'count' | 'bytes'): void {
     const stored = this.#completed[this.#completedHead];
     if (stored === undefined) throw new Error('Trace completion ring is inconsistent.');
     this.#completed[this.#completedHead] = undefined;
     this.#completedHead = (this.#completedHead + 1) % this.#maxCompletedSpans;
     this.#completedCount -= 1;
     this.#completedBytes -= stored.sizeBytes;
+    if (reason === 'count') this.#evictedByCount += 1;
+    else this.#evictedByBytes += 1;
   }
 }
 
@@ -279,6 +366,10 @@ export class RiskCollector {
   readonly #maxFindings: number;
   readonly #maxRetainedBytes: number;
   #retainedBytes = 0;
+  #totalFindings = 0;
+  #aggregatedFindings = 0;
+  #rejectedFindings = 0;
+  #truncatedFindings = 0;
 
   public constructor(clock: VirtualClock, options: RiskCollectorOptions = {}) {
     this.#clock = clock;
@@ -295,29 +386,46 @@ export class RiskCollector {
   }
 
   public add(finding: RiskFinding): RiskFinding {
-    if (!Number.isFinite(finding.confidence) || finding.confidence < 0 || finding.confidence > 1) {
-      throw new RangeError('Risk confidence must be between 0 and 1.');
+    this.#totalFindings += 1;
+    try {
+      if (
+        !Number.isFinite(finding.confidence) ||
+        finding.confidence < 0 ||
+        finding.confidence > 1
+      ) {
+        throw new RangeError('Risk confidence must be between 0 and 1.');
+      }
+      const sanitized = redact(finding, RISK_REDACTION_OPTIONS);
+      const key = `${sanitized.ruleId}:${sanitized.traceId ?? ''}:${sanitized.eventId ?? ''}`;
+      const previous = this.#findings.get(key);
+      const representative =
+        previous !== undefined &&
+        severityRank(previous.finding.severity) > severityRank(sanitized.severity)
+          ? previous.finding
+          : sanitized;
+      const merged: RiskFinding = {
+        ...representative,
+        firstSeenAtMs:
+          previous?.finding.firstSeenAtMs ?? sanitized.firstSeenAtMs ?? this.#clock.now(),
+        lastSeenAtMs: sanitized.lastSeenAtMs ?? this.#clock.now(),
+      };
+      if (previous === undefined && this.#findings.size >= this.#maxFindings) {
+        throw new RiskCapacityError('findings');
+      }
+      const sizeBytes = serializedByteLength(merged);
+      const nextRetainedBytes = this.#retainedBytes - (previous?.sizeBytes ?? 0) + sizeBytes;
+      if (nextRetainedBytes > this.#maxRetainedBytes) {
+        throw new RiskCapacityError('retained bytes');
+      }
+      this.#findings.set(key, { finding: merged, sizeBytes });
+      this.#retainedBytes = nextRetainedBytes;
+      if (previous !== undefined) this.#aggregatedFindings += 1;
+      if (hasRepresentationMarker(merged)) this.#truncatedFindings += 1;
+      return structuredClone(merged);
+    } catch (error) {
+      this.#rejectedFindings += 1;
+      throw error;
     }
-    const sanitized = redact(finding, RISK_REDACTION_OPTIONS);
-    const key = `${sanitized.ruleId}:${sanitized.traceId ?? ''}:${sanitized.eventId ?? ''}`;
-    const previous = this.#findings.get(key);
-    const merged: RiskFinding = {
-      ...sanitized,
-      firstSeenAtMs:
-        previous?.finding.firstSeenAtMs ?? sanitized.firstSeenAtMs ?? this.#clock.now(),
-      lastSeenAtMs: sanitized.lastSeenAtMs ?? this.#clock.now(),
-    };
-    if (previous === undefined && this.#findings.size >= this.#maxFindings) {
-      throw new RiskCapacityError('findings');
-    }
-    const sizeBytes = serializedByteLength(merged);
-    const nextRetainedBytes = this.#retainedBytes - (previous?.sizeBytes ?? 0) + sizeBytes;
-    if (nextRetainedBytes > this.#maxRetainedBytes) {
-      throw new RiskCapacityError('retained bytes');
-    }
-    this.#findings.set(key, { finding: merged, sizeBytes });
-    this.#retainedBytes = nextRetainedBytes;
-    return structuredClone(merged);
   }
 
   public analyzeSpans(spans: readonly TraceSpan[]): readonly RiskFinding[] {
@@ -384,20 +492,41 @@ export class RiskCollector {
     return this.#retainedBytes;
   }
 
+  /** Aggregates are retained findings; rejected observations make evidence incomplete. */
+  public evidence(): RiskEvidence {
+    return {
+      totalFindings: this.#totalFindings,
+      retainedFindings: this.#findings.size,
+      aggregatedFindings: this.#aggregatedFindings,
+      rejectedFindings: this.#rejectedFindings,
+      droppedFindings: this.#rejectedFindings,
+      truncatedFindings: this.#truncatedFindings,
+      retainedBytes: this.#retainedBytes,
+      complete: this.#rejectedFindings === 0 && this.#truncatedFindings === 0,
+    };
+  }
+
   public clear(): void {
     this.#findings.clear();
     this.#retainedBytes = 0;
+    this.#totalFindings = 0;
+    this.#aggregatedFindings = 0;
+    this.#rejectedFindings = 0;
+    this.#truncatedFindings = 0;
   }
 }
 
 function limitMetadata(
   metadata: Readonly<Record<string, unknown>>,
   limitBytes: number,
+  onTruncate: () => void,
 ): Readonly<Record<string, unknown>> {
   const serialized = JSON.stringify(metadata, (_key, value: unknown) =>
     typeof value === 'bigint' ? value.toString() : value,
   );
-  if (Buffer.byteLength(serialized) <= limitBytes) return metadata;
+  const oversized = Buffer.byteLength(serialized) > limitBytes;
+  if (oversized || serialized.includes('[REDACTION_')) onTruncate();
+  if (!oversized) return metadata;
   const originalSizeBytes = Buffer.byteLength(serialized);
   let low = 0;
   let high = originalSizeBytes;
@@ -459,6 +588,15 @@ function serializedByteLength(value: unknown): number {
     typeof entry === 'bigint' ? entry.toString() : entry,
   );
   return Buffer.byteLength(serialized ?? 'null');
+}
+
+/** Reserved redaction markers also identify bounded or unsupported representations. */
+function hasRepresentationMarker(value: unknown): boolean {
+  return (
+    JSON.stringify(value, (_key, entry: unknown) =>
+      typeof entry === 'bigint' ? entry.toString() : entry,
+    ) ?? ''
+  ).includes('[REDACTION_');
 }
 
 function severityRank(severity: RiskFinding['severity']): number {

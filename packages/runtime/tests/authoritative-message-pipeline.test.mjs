@@ -3,6 +3,9 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { connect } from 'node:net';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +14,7 @@ import { createSessionWithDependencies } from '../dist/session.js';
 
 const requireCore = createRequire(import.meta.resolve('@disrunner/core'));
 const { WebSocket } = requireCore('ws');
-const project = fileURLToPath(new URL('../../../examples/raw-webhook-bot/', import.meta.url));
+const example = fileURLToPath(new URL('../../../examples/raw-webhook-bot/', import.meta.url));
 const messages = (peer) => peer.packets.filter((packet) => /^MESSAGE_/u.test(packet.t ?? ''));
 
 async function until(predicate, label) {
@@ -23,7 +26,28 @@ async function until(predicate, label) {
   assert.fail(`Timed out waiting for ${label}.`);
 }
 
-function harness() {
+async function harness({ modern = false } = {}) {
+  const project = await mkdtemp(join(tmpdir(), 'authoritative-pipeline-'));
+  await cp(example, project, { recursive: true });
+  if (!modern) {
+    const configPath = join(project, 'discord-simulator.config.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds: [] };
+    config.bot.entryPoint = 'src/legacy-pipeline-entry.mjs';
+    config.bot.startCommand = 'node src/legacy-pipeline-entry.mjs';
+    await writeFile(configPath, JSON.stringify(config));
+    // Launch the same signed server without the current example's v2 registry bootstrap.
+    await writeFile(
+      join(project, config.bot.entryPoint),
+      `import {createWebhookServer,loadServerOptionsFromEnvironment} from './server.mjs';
+const options=loadServerOptionsFromEnvironment();
+const server=createWebhookServer(options);
+server.listen(options.port,options.host);
+const shutdown=()=>{server.close(()=>{process.exitCode=0;});setTimeout(()=>server.closeAllConnections(),1000).unref();};
+process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
+`,
+    );
+  }
   // Keep the authoritative fixture unchanged, including its valid role records.
   // The runtime display projection omits roles and explicitly reports truncation;
   // these tests qualify selected message records, not a complete-state export.
@@ -147,6 +171,7 @@ function harness() {
         // Containment if an independent closure oracle fails; never call this proof.
         for (const peer of peers)
           if (peer.socket.readyState !== WebSocket.CLOSED) peer.socket.terminate();
+        await rm(project, { recursive: true, force: true });
       }
     },
   };
@@ -274,7 +299,7 @@ test(
   'real Session HTTP/WS/store share create/edit/delete authority and disconnected replay exactly once',
   { timeout: 30_000 },
   async () => {
-    const h = harness();
+    const h = await harness();
     try {
       await h.session.selectProject(h.project);
       const started = await h.start();
@@ -401,7 +426,7 @@ test(
   'real Session rejects invalid auth/context/visibility without state or Gateway mutation',
   { timeout: 30_000 },
   async () => {
-    const h = harness();
+    const h = await harness();
     try {
       await h.session.selectProject(h.project);
       const started = await h.start();
@@ -433,7 +458,7 @@ test(
       ];
       for (const [path, method, body, credential, status] of invalid) {
         const response = await request(started, credential, path, method, body);
-        assert.equal(response.status, status);
+        assert.equal(response.status, status, `${method} ${path} ${JSON.stringify(body)}`);
         await response.json();
         assert.equal(response.headers.get('x-disrunner-event-id'), null);
         await barrier(peer);
@@ -454,7 +479,7 @@ test(
   'failed cleanup retains authoritative owner; successful retry and restart isolate stale credentials/sockets',
   { timeout: 30_000 },
   async () => {
-    const h = harness();
+    const h = await harness();
     try {
       await h.session.selectProject(h.project);
       const first = await h.start();

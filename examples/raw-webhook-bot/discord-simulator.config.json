@@ -17,6 +17,7 @@
     "DISRUNNER_OFFLINE": "1"
   },
   "profile": {
+    "commandRegistry": { "profile": "command-registry-v2", "guildIds": ["1000"] },
     "mode": "strict",
     "seed": 42042,
     "intents": ["GUILDS", "GUILD_MESSAGES", "MESSAGE_CONTENT"],

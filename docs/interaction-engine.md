@@ -1,6 +1,6 @@
 # Interaction engine
 
-DisRunner v0.1 provides a generic core interaction lifecycle and one narrow Electron raw-webhook `/ping` path. It does not provide a complete command/context/component/modal/autocomplete profile.
+The interaction engine supplies the shared state and lifecycle for raw-webhook and supported SDK sessions. The `interactions-v1` profile handles the declared command, component, autocomplete, and text-input modal subset; earlier model and chat-input profiles remain available for compatibility.
 
 ## Core lifecycle subset
 
@@ -13,7 +13,7 @@ The in-process engine stores an interaction ID, synthetic token, caller-supplied
 - ephemeral flag recognition from response data;
 - double-response, follow-up-before-acknowledgement, timeout, and expired-token errors/findings.
 
-The core does not fully validate command definitions, installation contexts, resolved options, component authorization/staleness, modal field catalogs, visibility transitions, or every Discord callback restriction.
+The generic engine alone is not the command registry or action validator. In a real Session, the action driver adds registered command/option and resolved-resource checks, component availability, submitted modal-field validation, and actor context checks. User-installed application contexts and unlisted callback/control types remain unsupported.
 
 ## Capacity limits
 
@@ -31,17 +31,17 @@ received
                                └─ token expires at 900,000 ms
 ```
 
-Core/CLI scenarios evaluate this using virtual time. Electron's raw-webhook invocation instead uses a 3-second host-time abort and does not expose a controllable 15-minute token lifecycle.
+Version 1 model scenarios evaluate this using virtual time. Raw/SDK Sessions use realtime, with a default 3-second dispatch timeout and bounded Scenario v2 action/await overrides. Their token expiry follows the realtime core clock; Desktop does not advance arbitrary Bot timers or expose virtual-time token travel.
 
 ## Raw webhook path
 
-The bundled example receives a signed local HTTP request and verifies the raw body, Ed25519 signature, timestamp freshness, replay, and body size. A separate protected 32-byte secret authenticates each accepted HTTP response back to Electron. The HMAC covers a versioned domain, the request timestamp, HTTP status, request digest, and exact response digest; Electron verifies it on bounded bytes before status checks, JSON parsing, or callback validation. Electron uses this mutually authenticated transport for PING readiness and real local command payloads. The v0.1 acceptance behavior is `/ping`.
+The bundled raw example receives a signed local HTTP request and verifies the raw body, Ed25519 signature, timestamp freshness, replay, and body size. A separate protected 32-byte secret authenticates each accepted response. The HMAC covers a versioned domain, request timestamp, HTTP status, request digest, and exact response digest; the shared runtime verifies bounded bytes before status checks, JSON parsing, or callback validation. This transport handles readiness and supported command, autocomplete, component, and modal payloads.
 
-This does not imply that Gateway-delivered interactions and REST callbacks are connected end to end in the desktop, or that user/message commands, autocomplete, components, and modal submissions can be composed from the UI.
+Pinned SDK sessions instead deliver interactions through the local Gateway and accept actual SDK callbacks on the shared REST routes. Command Explorer, message controls, and modal dialogs use that path. Both adapters commit supported original/followup changes to the same retained state; they do not provide unlisted Discord interaction types.
 
 ## Chat-input message profile
 
-`chat-input-messages-v1` is an opt-in profile for chat-input commands that are created with a context (`engine.create({ ..., messageProfile: 'chat-input-messages-v1' })`). The engine needs a `messageAuthority` (`state`, `gateway`, `author`, `context`), and its application ID must equal the Gateway application ID. Interactions created without the profile keep the model behavior described above. The shared runtime selects the profile for its context-bound chat-input invocations; its contextless path stays model-only.
+`chat-input-messages-v1` is the legacy opt-in profile for chat-input commands created with a context (`engine.create({ ..., messageProfile: 'chat-input-messages-v1' })`). The engine needs a `messageAuthority` (`state`, `gateway`, `author`, `context`), and its application ID must equal the Gateway application ID. Raw `Session.invoke` selects this compatibility profile when the project uses an earlier registry profile or no registry; contextless calls retain model behavior. Raw projects with `command-registry-v2`, structured Session actions and Scenario v2 use `interactions-v1` below. The following narrow callback/query rules describe the legacy profile.
 
 ### Routes
 
@@ -90,10 +90,16 @@ A Gateway delivery failure does not undo a committed message: the response is st
 
 `SessionSnapshot.coreState.resources` keeps a public original as type 20 and a public followup as type 0. An interaction message is projected only when its core record is consistent: interaction origin, a kind that matches its type, an interaction ID, an application ID equal to the webhook ID, matching channel and guild, and a bot author. This is a data consistency check on local records, not proof of where a message came from. Ephemeral (flag 64), loading (flag 128) and deleted messages are not projected, and the projection adds no origin field.
 
-The desktop live feed shows type 0 and type 20 messages with flags 0, 4, 4096 or 4100 for the selected context. Its status line reads: Public interaction responses appear once posted; raw callback data, responses still loading and ephemeral responses are not shown.
+These are the legacy public projection rules. The current Desktop actor view additionally supports the richer `interactions-v1` records described below, including that actor's ephemeral replies. Callback diagnostics and retained conversation messages remain separate observations.
 
-## Planned profiles
+## Shared runtime interaction profile
 
-Complete chat-input/user/message/entry-point command definitions, install/context rules, option/localization bounds, autocomplete choices/order, component layouts/click authorization, modal fields/expiry, and Components V2 semantics are roadmap items. Static Command Explorer and inspector examples are design fixtures, not registration discovery or protocol evidence.
+`interactions-v1` uses the same authoritative message model for slash/context commands, legacy components, autocomplete, and modal submissions. It binds actor/channel/guild context, validates applicable callback kinds, and preserves original/followup identity through fetch, partial edit, and deletion. A deferred original is completed by edit or the documented first-followup behavior; editing a deleted response does not recreate it.
+
+Public snapshots omit ephemeral messages and DMs. `snapshotForActor(actorId)` includes only that actor's private responses and recipient DMs; enforcing profiles also filter guild channels/messages by VIEW_CHANNEL. Private replies do not become guild Gateway broadcasts. Desktop uses the selected actor, while callback diagnostics retain their initiating request context. The earlier public-only projection remains available through the public snapshot API.
+
+## Unsupported extensions
+
+Full user-installed/entry-point command contexts, new modal controls, Components V2, and unlisted callback/resource fields remain outside the local profile. Command Explorer reads current command registration. The action driver validates registered options, resolved resources, component state, and submitted modal fields before dispatching to the actual Bot.
 
 Implemented interaction finding IDs and their actual fields are documented in [Risk engine](risk-engine.md).

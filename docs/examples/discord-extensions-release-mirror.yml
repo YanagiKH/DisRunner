@@ -43,6 +43,7 @@ jobs:
           test "$status" = 200
 
           tag="$(jq -er '.tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' release.json)"
+          version="${tag#v}"
           jq -e '.draft == false and .prerelease == false' release.json >/dev/null
           source_url="$(jq -er '.html_url' release.json)"
 
@@ -60,21 +61,67 @@ jobs:
             "https://api.github.com/repos/${SOURCE_REPOSITORY}/compare/${tag_sha}...main" | jq -er '.status')"
           [[ "$comparison" = identical || "$comparison" = ahead ]]
 
-          jq -e '.assets | any(.name | endswith(".exe"))' release.json >/dev/null
-          jq -e '.assets | any(.name | endswith(".dmg"))' release.json >/dev/null
-          jq -e '.assets | any(.name | endswith(".AppImage"))' release.json >/dev/null
-          jq -e '.assets | any(.name == "SHA256SUMS.txt")' release.json >/dev/null
-          jq -e '.assets | any(.name | endswith("-sbom.cdx.json"))' release.json >/dev/null
           provenance_name="disrunner-${tag}-provenance.sigstore.json"
-          jq -e --arg name "$provenance_name" '.assets | any(.name == $name)' release.json >/dev/null
+          for required_name in \
+            "DisRunner-${version}-win-x64.exe" \
+            "DisRunner-${version}-mac-arm64.dmg" \
+            "DisRunner-${version}-mac-x64.dmg" \
+            "DisRunner-${version}-linux-x86_64.AppImage" \
+            "disrunner-cli-${version}.tar.gz" \
+            "disrunner-${tag}-runtime-qualification.json" \
+            "disrunner-${tag}-sbom.cdx.json" \
+            SHA256SUMS.txt "$provenance_name"; do
+            jq -e --arg name "$required_name" '.assets | any(.name == $name)' release.json >/dev/null
+          done
+          for platform in linux-x64 windows-x64 macos-arm64 macos-x64; do
+            jq -e --arg name "disrunner-${tag}-installation-${platform}.json" \
+              '.assets | any(.name == $name)' release.json >/dev/null
+          done
+          for platform in windows-x64 macos-arm64 macos-x64; do
+            jq -e --arg name "disrunner-${tag}-signing-${platform}.json" \
+              '.assets | any(.name == $name)' release.json >/dev/null
+          done
 
           mkdir -p assets
           while IFS=$'\t' read -r name url; do
             [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$ ]]
+            case "$name" in
+              "DisRunner-${version}-win-x64.exe" | \
+                "DisRunner-${version}-win-x64.exe.blockmap" | \
+                "DisRunner-${version}-mac-arm64.dmg" | \
+                "DisRunner-${version}-mac-arm64.dmg.blockmap" | \
+                "DisRunner-${version}-mac-x64.dmg" | \
+                "DisRunner-${version}-mac-x64.dmg.blockmap" | \
+                "DisRunner-${version}-linux-x86_64.AppImage" | \
+                "DisRunner-${version}-linux-x86_64.AppImage.blockmap" | \
+                "disrunner-cli-${version}.tar.gz" | \
+                "disrunner-${tag}-runtime-qualification.json" | \
+                "disrunner-${tag}-installation-linux-x64.json" | \
+                "disrunner-${tag}-installation-windows-x64.json" | \
+                "disrunner-${tag}-installation-macos-arm64.json" | \
+                "disrunner-${tag}-installation-macos-x64.json" | \
+                "disrunner-${tag}-signing-windows-x64.json" | \
+                "disrunner-${tag}-signing-macos-arm64.json" | \
+                "disrunner-${tag}-signing-macos-x64.json" | \
+                "disrunner-${tag}-sbom.cdx.json" | \
+                SHA256SUMS.txt | "$provenance_name") ;;
+              *) echo "Unexpected canonical release asset: $name" >&2; exit 1 ;;
+            esac
             test ! -e "assets/$name"
             curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
               --max-filesize 536870912 "$url" --output "assets/$name"
           done < <(jq -r '.assets[] | [.name, .browser_download_url] | @tsv' release.json)
+          jq -e --arg sha "$tag_sha" --arg version "$version" '
+            .schemaVersion == 1 and .kind == "runtime-qualification" and
+            .state == "completed" and .qualified == true and .verdict == "passed" and
+            .cancelled == false and .errors == [] and .failures == [] and
+            .environment.version == $version and
+            .source.start.sha == $sha and .source.end.sha == $sha and
+            .source.start.dirty == false and .source.end.dirty == false and
+            .options.cycles >= 100 and .options.durationSeconds >= 7200 and
+            .artifacts.start.sha256 == .artifacts.end.sha256 and
+            (.artifacts.start.sha256 | test("^[a-f0-9]{64}$"))
+          ' "assets/disrunner-${tag}-runtime-qualification.json" >/dev/null
           (
             cd assets
             awk '{ name = $2; sub(/^\*/, "", name); sub(/^\.\//, "", name); print name }' SHA256SUMS.txt | sort > ../expected-assets.txt

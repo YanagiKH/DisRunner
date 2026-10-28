@@ -3,6 +3,7 @@ import type { Member } from '../types';
 
 interface MemberListProps {
   readonly members: readonly Member[];
+  readonly live?: boolean | undefined;
 }
 
 function MemberRow({ member }: { readonly member: Member }) {
@@ -26,7 +27,7 @@ function MemberRow({ member }: { readonly member: Member }) {
   );
 }
 
-export function MemberList({ members }: MemberListProps) {
+export function MemberList({ members, live }: MemberListProps) {
   const bots = members.filter((member) => member.role === 'bot');
   const online = members.filter((member) => member.role !== 'bot' && member.status === 'online');
   const offline = members.filter((member) => member.role !== 'bot' && member.status === 'offline');
@@ -37,7 +38,9 @@ export function MemberList({ members }: MemberListProps) {
   ];
   return (
     <aside className="member-list" aria-label="Virtual guild members">
-      <div className="member-list-heading">Sample members — {members.length}</div>
+      <div className="member-list-heading">
+        {live ? 'Local actors' : 'Sample members'} — {members.length}
+      </div>
       {sections.map(({ label, members: sectionMembers }) => (
         <section className="member-section" key={label}>
           <h2>

@@ -1,12 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Braces, Gift, Plus, SendHorizonal, Smile } from 'lucide-react';
 import { COMMANDS } from '../data';
+import type { CommandSpec } from '../types';
 
 interface ComposerProps {
   readonly channelName: string;
   readonly botRunning: boolean;
   readonly invocationBlockReason?: string | undefined;
   readonly onSubmit: (value: string) => void;
+  readonly commands?: readonly CommandSpec[] | undefined;
 }
 
 export function Composer({
@@ -14,14 +16,15 @@ export function Composer({
   botRunning,
   onSubmit,
   invocationBlockReason,
+  commands = COMMANDS,
 }: ComposerProps) {
   const [value, setValue] = useState('');
   const [focusedCommand, setFocusedCommand] = useState(0);
   const matchingCommands = useMemo(() => {
     if (!value.startsWith('/')) return [];
     const query = value.toLowerCase();
-    return COMMANDS.filter((command) => command.name.startsWith(query));
-  }, [value]);
+    return commands.filter((command) => command.name.startsWith(query));
+  }, [value, commands]);
 
   const submit = () => {
     if (!value.trim() || invocationBlockReason !== undefined) return;
@@ -65,11 +68,7 @@ export function Composer({
       )}
       {invocationBlockReason && <p id="invocation-unavailable">{invocationBlockReason}</p>}
       <div className={`composer ${botRunning ? '' : 'bot-offline'}`}>
-        <button
-          aria-label="Attach local fixture"
-          onClick={() => setValue((current) => `${current}${current ? ' ' : ''}[fixture.json]`)}
-          type="button"
-        >
+        <button aria-label="Choose attachments in Command Explorer" disabled type="button">
           <Plus size={18} />
         </button>
         <input
@@ -101,16 +100,12 @@ export function Composer({
           placeholder={
             invocationBlockReason ??
             (botRunning
-              ? `Message #${channelName}  ·  try /ping`
-              : 'Start TestBot to invoke local commands')
+              ? `Message #${channelName}${commands.some((command) => command.name === '/ping') ? '  ·  try /ping' : ''}`
+              : 'Start the bot to send local events')
           }
           value={value}
         />
-        <button
-          aria-label="Insert test component"
-          onClick={() => setValue((current) => `${current}${current ? ' ' : ''}[Button: Confirm]`)}
-          type="button"
-        >
+        <button aria-label="Bot components appear on messages" disabled type="button">
           <Gift size={18} />
         </button>
         <button

@@ -1,6 +1,6 @@
 {
   "name": "disrunner",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Deterministic offline Discord bot simulator for local development and CI.",
   "license": "MIT",
@@ -36,14 +36,16 @@
     "test:desktop": "pnpm --filter @disrunner/desktop test",
     "test:raw-webhook": "pnpm --filter @disrunner/example-raw-webhook-bot test",
     "test:secret-scanner": "node .github/scripts/scan-secrets.test.mjs",
+    "test:linux-sandbox": "node --test .github/scripts/prepare-linux-sandbox.test.mjs apps/desktop/tests/e2e/linux-sandbox.test.mjs",
     "test:e2e": "pnpm --filter @disrunner/desktop test:e2e",
     "test:perf": "pnpm --filter @disrunner/core test:perf",
-    "verify": "pnpm run check:versions && pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test:unit && pnpm run test:contract && pnpm run test:integration && pnpm run test:offline && pnpm run test:security && pnpm run test:desktop && pnpm run test:raw-webhook && pnpm run test:secret-scanner && pnpm run build",
+    "verify": "pnpm run check:versions && pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test:unit && pnpm run test:contract && pnpm run test:integration && pnpm run test:offline && pnpm run test:security && pnpm run test:desktop && pnpm run test:raw-webhook && pnpm run test:secret-scanner && pnpm run test:linux-sandbox && pnpm run build",
     "verify:release": "pnpm run verify && pnpm run test:e2e && pnpm run test:perf",
     "cli": "pnpm --filter @disrunner/cli start",
     "clean": "node scripts/clean.mjs",
     "build:runtime": "pnpm run build:core && pnpm --filter @disrunner/runtime build",
-    "test:runtime": "pnpm run build:runtime && pnpm --filter @disrunner/runtime test"
+    "test:runtime": "pnpm run build:runtime && pnpm --filter @disrunner/runtime test",
+    "test:conformance": "pnpm run build:runtime && node --test --test-concurrency=1 tests/conformance/*.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
@@ -56,6 +58,7 @@
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.72.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "esbuild": "^0.28.2"
   }
 }

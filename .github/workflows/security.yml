@@ -32,9 +32,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - uses: ./.github/actions/setup-python
       - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:
-          languages: javascript-typescript
+          languages: javascript-typescript, python
           queries: security-extended
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -49,7 +50,32 @@ jobs:
       - run: pnpm run build
       - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:
+          upload: never
+          output: codeql-results
+      - name: Assign distinct language analysis identities
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises';
+          for (const [file, language] of [['javascript', 'javascript-typescript'], ['python', 'python']]) {
+            const filename = `codeql-results/${file}.sarif`;
+            const sarif = JSON.parse(await readFile(filename, 'utf8'));
+            if (!Array.isArray(sarif.runs) || sarif.runs.length === 0) throw new Error(`Missing ${language} CodeQL result.`);
+            for (const run of sarif.runs) run.automationDetails = { ...run.automationDetails, id: `/language:${language}/` };
+            await writeFile(filename, JSON.stringify(sarif));
+          }
+          NODE
+      - name: Upload JavaScript and TypeScript security analysis
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          sarif_file: codeql-results/javascript.sarif
           category: /language:javascript-typescript
+          wait-for-processing: true
+      - name: Upload Python security analysis
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          sarif_file: codeql-results/python.sarif
+          category: /language:python
+          wait-for-processing: true
 
   code-scanning-policy:
     name: Code scanning high-severity policy
@@ -69,16 +95,20 @@ jobs:
           set -euo pipefail
           found=false
           for attempt in $(seq 1 40); do
-            analyses="$(gh api "repos/${GITHUB_REPOSITORY}/code-scanning/analyses?ref=refs/heads/main&per_page=100" \
-              --jq "map(select(.commit_sha == \"${GITHUB_SHA}\" and .tool.name == \"CodeQL\")) | length")"
-            if [ "$analyses" -gt 0 ]; then
+            analyses="$(gh api "repos/${GITHUB_REPOSITORY}/code-scanning/analyses?ref=refs/heads/main&per_page=100")"
+            ready="$(printf '%s' "$analyses" | jq -r --arg sha "$GITHUB_SHA" '
+              [.[] | select(.commit_sha == $sha and .tool.name == "CodeQL") | .category] as $categories |
+              (($categories | index("/language:javascript-typescript/")) != null and
+               ($categories | index("/language:python/")) != null)
+            ')"
+            if [ "$ready" = true ]; then
               found=true
               break
             fi
             sleep 15
           done
           test "$found" = true || {
-            echo 'The CodeQL result for this commit was not available before the policy timeout.' >&2
+            echo 'Both JavaScript/TypeScript and Python CodeQL results must be available for this commit before the policy timeout.' >&2
             exit 1
           }
           for severity in critical high; do
@@ -124,5 +154,28 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --audit-level=high
+      - uses: ./.github/actions/setup-python
+      - name: Audit the complete pinned Python SDK requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_environment="$RUNNER_TEMP/disrunner-pip-audit"
+          "$DISRUNNER_TEST_PYTHON" -m venv "$audit_environment"
+          audit_python="$audit_environment/bin/python"
+          "$audit_python" -m pip install --disable-pip-version-check pip-audit==2.10.1
+          "$audit_python" -m pip_audit --version > "$RUNNER_TEMP/disrunner-python-audit-version.txt"
+          "$audit_python" -m pip_audit --disable-pip --no-deps \
+            --requirement packages/adapter-discordpy/requirements.txt \
+            --format json --output "$RUNNER_TEMP/disrunner-python-audit.json"
       - run: pnpm run test:security
       - run: pnpm run test:offline
+      - name: Upload Python dependency audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-dependency-audit-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/disrunner-python-audit.json
+            ${{ runner.temp }}/disrunner-python-audit-version.txt
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,84 +1,72 @@
 # Getting started
 
-This guide exercises the two authoritative v0.1 paths: deterministic CLI scenarios and the Electron raw-webhook `/ping` Preview.
+DisRunner can run a real local Bot from Desktop or CLI without a Discord connection or production token. Prepare the runtime and Bot dependencies first, then keep the project offline while developing.
 
-## 1. Install and verify
+## 1. Prepare the source checkout
 
-From a source checkout:
+Use Node.js 22.23.2 and pnpm 11.19.0:
 
-```bash
+```sh
 corepack enable
 corepack prepare pnpm@11.19.0 --activate
 pnpm install --frozen-lockfile
-pnpm run verify
+pnpm run build
 ```
 
-The required runtime is Node.js `>=22.23.2 <23`.
+For packaged Desktop or the standalone CLI bundle, follow [Installation](installation.md). Python projects additionally need the documented [SDK environment](sdk-adapters.md).
 
-## 2. Run the deterministic core scenario
+## 2. Run the raw-webhook example
 
-```bash
+The bundled raw example uses Node's built-in modules and needs no Discord token:
+
+```sh
+pnpm run cli -- validate scenarios/v2/raw-ping.json
+pnpm run cli -- test scenarios/v2/raw-ping.json
+pnpm run cli -- report scenarios/v2/raw-ping.json --format html --out ping-report.html
+```
+
+This starts the real example process, waits for authenticated readiness, sends `/ping`, checks the Bot's actual message, and stops the process. Editing the expected response to a different value fails the test. A missing response, crash, invalid project, or cancellation does not produce a pass.
+
+## 3. Open Desktop
+
+```sh
+pnpm run dev
+```
+
+In **Settings**, use **Browse folders** to open `examples/raw-webhook-bot`. Review its `discord-simulator.config.json` for the Bot executable, entry point, working directory, adapter, and fixture, then press **Start bot**. The runtime strip shows phase, PID, errors, and bounded process output.
+
+Select an actor and channel, send `/ping`, and inspect the message and trace. The reply stays attached to its initiating channel even if you navigate elsewhere. Supported buttons/selects send real component interactions; modal submission sends its entered fields, while cancellation sends nothing.
+
+## 4. Try a JavaScript or Python Bot
+
+The repository includes [discord.js](../examples/discordjs-bot/README.md) and [discord.py](../examples/discordpy-bot/README.md) examples. Their exact SDK versions are 14.27.0 and 2.6.4. Python tests use 3.12.14; point the start command at the intended virtual environment.
+
+Open the example directory as a project and start it. Command Explorer reads its local command registration. Text such as `!ping` uses the actual SDK message event pipeline. Use your own Bot's normal startup code and prepared dependencies, then choose its matching adapter in [Project configuration](project-configuration.md).
+
+## 5. Save your fixtures and scenarios
+
+Stop the Bot and open Guild Editor to edit validated resource JSON. Scenario Lab supports JSON/YAML scenario editing, validation, saving, running, cancellation, and report export. Save before a run so it uses the intended initial resources.
+
+Saved project data lives in `.disrunner/workspace.json`. Reopening the project restores fixtures, scenarios, seed, and mode. External edits cause a save conflict; a previous valid save is retained for explicit recovery. See [Workspaces](workspaces.md).
+
+## 6. Understand the two execution modes
+
+[Version 2 scenarios](scenario-v2.md) run a real Bot with host timers and loopback transport. They support bounded faults and a declared failure policy.
+
+[Version 1 scenarios](scenario-format.md) exercise the core model with virtual time. They are useful for exact acknowledgement/token deadlines and deterministic state tests:
+
+```sh
 pnpm run cli -- run scenarios/interaction-lifecycle.discord-scenario.yml --seed 42
-```
-
-This runs the version 1 scenario through the in-process core. Its assertions, final state hash, traces, and findings are authoritative for that run. It does not start an imported Discord SDK bot.
-
-Create a report when needed:
-
-```bash
-pnpm run cli -- report scenarios/interaction-lifecycle.discord-scenario.yml --format html --out disrunner-report.html --seed 42
-```
-
-## 3. Record and verify a replay
-
-`run` reruns a scenario; it is not the recording replay command. To create and verify a versioned recording:
-
-```bash
 pnpm run cli -- record scenarios/interaction-lifecycle.discord-scenario.yml --out recording.json --seed 42
 pnpm run cli -- replay recording.json --out verification.json
 ```
 
-Replay verifies the recorded scenario, canonical input, seed, state hash, assertions, events, and findings. A mismatch returns exit code `1`; invalid arguments or files return `2`.
+Model recordings do not capture arbitrary Bot process memory. To repeat a real Bot test, rerun its version 2 scenario from the saved initial project.
 
-## 4. Start the Electron Preview
+## 7. Stop and inspect failures
 
-```bash
-pnpm run dev
-```
+Stop the Bot before switching projects. Cancellation waits for cleanup and returns a cancelled result. Startup errors identify unsupported versions, missing dependencies, invalid fixtures, or transport failures. Inspect runtime output and the [troubleshooting guide](troubleshooting.md) when a run cannot start.
 
-Open **Settings → Runtime paths**, select the `examples/raw-webhook-bot` folder, and review the resolved executable, arguments, working directory, adapter, profile, and environment variable names.
+Closing the last desktop window stops the Bot and exits DisRunner on every platform. If the workspace has unsaved changes, you can cancel closing and keep editing.
 
-The v0.1 validator accepts only `raw-interaction-webhook`. `discord.js`, `discord.py`, generic Gateway, and SDK adapters fail closed because they do not yet have adapter contract tests.
-
-Remove real credentials from the selected project, parent shell, IDE launcher, and task runner. DisRunner injects synthetic values for its supported path, but the child process is not an OS sandbox.
-
-## 5. Start and invoke the bundled bot
-
-Press **Start Bot**. Electron validates the config, creates fresh request-signing and response-authentication credentials, binds local simulator services, launches the process, and sends a signed PING. Startup reaches `running` only after the bot verifies the request and Electron verifies the returned per-run HMAC on the exact response bytes. The runtime strip shows the phase, PID, resolved command, and latest bounded stdout/stderr entry; secret values are never shown.
-
-Type `/ping` in the composer, or choose `/ping` in Command Explorer. Electron sends a real signed local interaction request, reads the bounded response, verifies its HMAC before JSON parsing/callback validation, and then renders callback content and measured host duration. The invocation is aborted after the desktop's 3-second host-time timeout. A listener that only captures the dynamic port cannot fabricate success without the protected per-run peer secret.
-
-The selected visual guild, channel, user, command metadata, and most inspector fields remain seeded UI fixtures. They are not proof that the same resources were delivered over Gateway or mutated through REST.
-
-## 6. Understand the preview screens
-
-- **Simulator:** static guild/channel/member/message fixtures plus the latest local raw-webhook callback.
-- **Command Explorer:** static command descriptions; only behavior implemented by the selected raw-webhook process is real. The bundled example implements `/ping`.
-- **Guild Editor and Scenario Lab:** visual interactions only; save/run controls do not persist files or execute the CLI engine.
-- **Inspector:** callback outcome and duration can come from the real `/ping`; remaining payload/diff/permission/rate-limit panels are illustrative.
-- **Risk Center:** can show runtime findings, but export, baselines, trends, and suppression workflows are not implemented.
-- **Settings:** project selection is real; most other toggles and Save controls are preview-only.
-
-## 7. Exercise implemented failure behavior
-
-Use version 1 CLI scenarios for deterministic late acknowledgement, virtual-time expiry, in-process Gateway disconnect/resume, permission checks, and repeated rate-limit requests. Use only action types documented in [Scenario format](scenario-format.md).
-
-There is no generic v0.1 `faults` field and no desktop packet drop/duplicate/reorder, arbitrary dependency latency, CPU, memory, or event-loop injection control.
-
-## 8. Stop safely
-
-Press **Stop Bot** before switching projects. Electron requests process-tree shutdown and closes its local services. If the process does not stop, treat that as a failure and inspect the runtime output; do not assume cleanup succeeded from the visual bot state alone.
-
-CLI reports are sanitized before export, but redaction cannot recognize every project-specific secret. Inspect generated files before sharing them. See [Privacy](privacy.md).
-
-Next: [Project configuration](project-configuration.md), [Scenarios](scenario-format.md), and [Assertions](assertions.md).
+The supported SDK transports stay local, but a selected Bot still has the current OS user's process and file access. Keep production secrets out of the project and use separate OS isolation for untrusted code. See [Offline mode](offline-mode.md) and [Privacy](privacy.md).

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "bot": {
+    "name": "Discord.js Example",
+    "runtime": "node",
+    "startCommand": "node bot.mjs",
+    "entryPoint": "bot.mjs",
+    "workingDirectory": "."
+  },
+  "adapter": { "type": "discord.js" },
+  "profile": {
+    "mode": "strict",
+    "seed": 42042,
+    "intents": ["GUILDS", "GUILD_MEMBERS", "GUILD_MESSAGES", "DIRECT_MESSAGES", "MESSAGE_CONTENT"],
+    "networkPolicy": "offline",
+    "hotReload": false
+  },
+  "fixtures": { "guild": "guild.discord-fixture.json", "user": "user.discord-fixture.json" }
+}

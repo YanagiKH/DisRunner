@@ -1,6 +1,6 @@
 # Permission engine
 
-The v0.1 permission engine is an in-process calculator. It returns an effective `BigInt` bitfield, whether all requested bits are present, a reason, and the sources applied. It is core-tested and used by supported scenario helper paths; it is not enforced by Electron REST routes.
+The core permission calculator returns an effective `BigInt` bitfield, whether all requested bits are present, a reason, and the sources applied. Calling it does not itself authorize a REST operation. Shared runtime/domain services explicitly apply it to the supported message, resource, and actor-view operations described below.
 
 ## Implemented calculation
 
@@ -43,8 +43,14 @@ const decision = calculatePermissions({
 
 The returned `sources` identify the implemented grants, overwrites, and implicit removals. They are evidence for this local input, not proof of a production guild's current state.
 
+## Runtime enforcement
+
+The `guild-text-own-messages-v1` ordinary-message profile checks the live Bot member, roles, channel overwrites, ownership, and timeout before its covered reads/writes. It returns the documented Discord-shaped denials. Raw projects retain `legacy-unenforced` unless opted in; SDK projects default to enforcement. See [Ordinary message permissions](ordinary-message-permissions.md) for its narrower rules, including ordinary-only history and mutation ownership.
+
+With `command-registry-v2`, supported channel/role/member REST operations also apply Bot permission and hierarchy checks. The runtime action driver checks the selected human actor separately: VIEW_CHANNEL for interactions and VIEW_CHANNEL plus SEND_MESSAGES for message actions when enforcement is enabled. Actor snapshots filter channel/message visibility using the same retained resources; DMs use explicit recipients, and ephemeral responses belong to their invoking actor. These are local actor views, not complete Discord Gateway delivery filtering.
+
 ## Current limits
 
-The engine does not model owner-only operations, command installation/context/default-member permissions, invoking-user-versus-bot dual checks, private/archived/locked thread lifecycle, AutoMod, every Discord permission dependency, or API-version drift beyond the shipped constants. It does not automatically produce Discord-shaped `403` responses or the richer route-specific finding IDs described by the product roadmap.
+The calculator does not implement command installation policy, `default_member_permissions` invocation enforcement, private/archived/locked thread lifecycle, AutoMod, every Discord permission dependency, or API-version drift beyond the shipped constants. Registering permission metadata is distinct from enforcing it. Resource handlers must choose the required bits and hierarchy rules explicitly; no generic calculator call automatically creates a `403` or a risk finding.
 
-The desktop Permissions panel is seeded visual preview data. Use core tests or a CLI scenario permission action for current executable evidence. Full route integration and a persisted decision inspector are planned.
+Use the live route result, retained resources, and focused scenario assertions for permission evidence. A complete persisted inspector of every permission decision is not provided.

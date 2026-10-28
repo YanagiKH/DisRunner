@@ -19,7 +19,6 @@ export interface CommandWire extends Readonly<Record<string, unknown>>, CommandF
 }
 const active = new WeakSet<VirtualState>();
 const resourceType = 'application-command';
-const marker = 'command-registry-v1';
 const key = (c: CommandFields): string => JSON.stringify([c.type, c.name]);
 function wire(
   fields: CommandFields,
@@ -29,17 +28,22 @@ function wire(
   guild?: string,
 ): CommandWire {
   return {
+    ...fields,
     id,
     type: fields.type,
     application_id: app,
     name: fields.name,
     description: fields.description,
-    ...(fields.type === 1 ? { options: [] } : {}),
-    default_member_permissions: null,
-    nsfw: false,
+    ...(fields.type === 1 ? { options: fields.options ?? [] } : {}),
+    default_member_permissions: fields.default_member_permissions ?? null,
+    nsfw: fields.nsfw ?? false,
     version,
     ...(guild === undefined
-      ? { integration_types: [0], contexts: [0], dm_permission: false }
+      ? {
+          integration_types: fields.integration_types ?? [0],
+          contexts: fields.contexts ?? [0],
+          dm_permission: fields.dm_permission ?? false,
+        }
       : { guild_id: guild }),
   };
 }
@@ -67,6 +71,9 @@ export class ApplicationCommandRegistry {
       if (state.get('guild', id) === undefined)
         throw new DiscordApiError(404, 10004, 'Unknown guild.');
   }
+  public get profile(): CommandRegistryProfile['profile'] {
+    return this.#profile.profile;
+  }
   public verifyScope(app: string, guild?: string): void {
     if (!canonicalCommandId(app) || (guild !== undefined && !canonicalCommandId(guild)))
       throw commandError('route');
@@ -80,20 +87,33 @@ export class ApplicationCommandRegistry {
     const all: CommandWire[] = [];
     try {
       for (const raw of this.#state.list(resourceType)) {
-        const record = commandRecord(raw);
+        const record = commandRecord(raw, this.profile === 'command-registry-v2');
         if (
           !canonicalCommandId(record['id']) ||
           !canonicalCommandId(record['application_id']) ||
           !canonicalCommandId(record['version']) ||
           ('guild_id' in record && !canonicalCommandId(record['guild_id'])) ||
-          record['registry_profile'] !== marker ||
+          record['registry_profile'] !== this.profile ||
           record['resourceType'] !== resourceType
         )
           throw commandError('state');
         const rGuild = record['guild_id'] as string | undefined;
+        const fieldData: Record<string, unknown> = { ...record };
+        for (const name of [
+          'id',
+          'application_id',
+          'version',
+          'guild_id',
+          'registry_profile',
+          'resourceType',
+        ])
+          delete fieldData[name];
         const fields = parseCommandFields(
-          { type: record['type'], name: record['name'], description: record['description'] },
+          fieldData,
           rGuild !== undefined,
+          undefined,
+          false,
+          this.profile,
         );
         const expected = wire(
           fields,
@@ -102,7 +122,7 @@ export class ApplicationCommandRegistry {
           record['application_id'],
           rGuild,
         );
-        if (!equal(record, { ...expected, registry_profile: marker, resourceType }))
+        if (!equal(record, { ...expected, registry_profile: this.profile, resourceType }))
           throw commandError('state');
         if (record['application_id'] === app && rGuild === guild) all.push(expected);
       }
@@ -131,7 +151,7 @@ export class ApplicationCommandRegistry {
   ): { created: boolean; command: CommandWire } {
     return this.#mutate(() => {
       const old = this.list(app, guild),
-        fields = parseCommandFields(input, guild !== undefined);
+        fields = parseCommandFields(input, guild !== undefined, undefined, false, this.profile);
       const existing = old.find((c) => key(c) === key(fields));
       this.#counts(existing ? old : [...old, fields]);
       return { created: existing === undefined, command: this.#save(fields, existing, app, guild) };
@@ -140,7 +160,7 @@ export class ApplicationCommandRegistry {
   public patch(app: string, guild: string | undefined, id: string, input: unknown): CommandWire {
     return this.#mutate(() => {
       const current = this.get(app, guild, id),
-        fields = parseCommandFields(input, guild !== undefined, current);
+        fields = parseCommandFields(input, guild !== undefined, current, false, this.profile);
       if (this.list(app, guild).some((c) => c.id !== id && key(c) === key(fields)))
         throw commandError('payload');
       return this.#save(fields, current, app, guild);
@@ -155,10 +175,12 @@ export class ApplicationCommandRegistry {
   public put(app: string, guild: string | undefined, input: unknown): CommandWire[] {
     return this.#mutate(() => {
       const old = this.list(app, guild);
-      const data = inspectCommandData(input);
+      const data = inspectCommandData(input, this.profile === 'command-registry-v2');
       if (!Array.isArray(data)) throw commandError('payload');
       if (data.length > 130) throw commandError('capacity');
-      const fields = data.map((c) => parseCommandFields(c, guild !== undefined, undefined, true));
+      const fields = data.map((c) =>
+        parseCommandFields(c, guild !== undefined, undefined, true, this.profile),
+      );
       this.#counts(fields);
       if (new Set(fields.map(key)).size !== fields.length) throw commandError('payload');
       const used = new Set<string>();
@@ -191,12 +213,7 @@ export class ApplicationCommandRegistry {
     app: string,
     guild: string | undefined,
   ): CommandWire {
-    if (
-      old &&
-      old.type === fields.type &&
-      old.name === fields.name &&
-      old.description === fields.description
-    )
+    if (old && equal(old, wire(fields, old.id, old.version, app, guild)))
       return wire(fields, old.id, old.version, app, guild);
     const anticipated = BigInt(this.#state.revision) + 1n;
     const version =
@@ -205,10 +222,10 @@ export class ApplicationCommandRegistry {
     const candidate = wire(fields, old?.id ?? '1', String(version), app, guild);
     if (Buffer.byteLength(JSON.stringify(candidate)) > 65536) throw commandError('capacity');
     if (old) {
-      this.#state.update(resourceType, old.id, { ...candidate, registry_profile: marker });
+      this.#state.update(resourceType, old.id, { ...candidate, registry_profile: this.profile });
       return candidate;
     }
-    const data: Record<string, unknown> = { ...candidate, registry_profile: marker };
+    const data: Record<string, unknown> = { ...candidate, registry_profile: this.profile };
     delete data['id'];
     let created;
     try {

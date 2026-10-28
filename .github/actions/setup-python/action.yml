@@ -1,0 +1,24 @@
+name: Set up pinned Python
+description: Prepare CPython 3.12.14 and pip consistently on all supported CI platforms.
+outputs:
+  python_path:
+    description: Absolute path of the prepared virtual-environment interpreter.
+    value: ${{ steps.python.outputs.python_path }}
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      with:
+        version: '0.12.23'
+        enable-cache: 'false'
+    - name: Prepare exact managed Python and bundled pip
+      id: python
+      shell: bash
+      env:
+        DISRUNNER_PYTHON_SETUP_SCRIPT: ${{ github.action_path }}/../../scripts/setup-python.mjs
+      run: node "$DISRUNNER_PYTHON_SETUP_SCRIPT"
+    - name: Verify PATH and the test interpreter agree
+      shell: bash
+      run: |
+        python -c "import os, platform, sys; assert platform.python_version() == '3.12.14'; assert os.path.normcase(os.path.abspath(sys.executable)) == os.path.normcase(os.path.abspath(os.environ['DISRUNNER_TEST_PYTHON'])); assert os.path.normcase(os.path.abspath(sys.prefix)) == os.path.normcase(os.path.abspath(os.environ['VIRTUAL_ENV']))"
+        python -m pip --version

@@ -1,6 +1,6 @@
 # Trace and observability status
 
-DisRunner v0.1 records bounded core spans and includes them in scenario reports. The richer causal graph, runtime profiler, comparison workflow, and fully connected desktop inspector are design targets.
+DisRunner records bounded core spans and exposes real Session trace/risk summaries to Desktop and Scenario v2 reports. A full causal graph, dependency timing profiler, and semantic trace comparison are not available.
 
 ## Implemented core span shape
 
@@ -8,7 +8,7 @@ Each completed core span contains:
 
 - span ID and trace ID, with an optional parent ID;
 - kind and name;
-- virtual start time and duration;
+- start time and duration from the collector's clock (virtual in model runs, realtime in Bot sessions);
 - `ok`, `warning`, or `error` status;
 - bounded metadata.
 
@@ -16,7 +16,7 @@ Supported span kinds include user action, Gateway, interaction, bot handler, RES
 
 Core scenario reports include a run ID, seed, start time, pass/status, spans, findings, state hash, assertions, and selected metadata. The CLI sanitizes supported report values before rendering JSON/JUnit/HTML/SARIF.
 
-Raw trace/report/snapshot objects do **not** all carry a public format version, adapter/profile version set, redaction manifest, or complete correlation attributes in v0.1. Only CLI recording files have the versioned replay envelope described in [Protocol compatibility](protocol-compatibility.md).
+Individual spans do not carry a complete adapter/profile or correlation envelope. Session snapshots/events have `schemaVersion: 1`; Scenario v2 reports and diagnostic bundles have their own versioned formats and input hashes. Version 1 model recordings retain a separate replay envelope. See [Protocol compatibility](protocol-compatibility.md) and [Scenario v2](scenario-v2.md).
 
 ## Retention and capacity behavior
 
@@ -32,7 +32,9 @@ All of these capacities can be configured through the core constructors within h
 
 The byte budgets measure serialized records, not exact JavaScript heap overhead. The separate count limits bound Map/ring bookkeeping; callers that hold returned spans or cloned report arrays are responsible for bounding those copies too.
 
-`spans(limit)` clones only the newest requested completed spans. `all(limit)` clones only the requested highest-priority findings (severity descending, then rule ID); the no-argument methods retain their full-snapshot behavior. The Electron runtime uses these bounded queries for its 250 ms evidence refresh, with at most 100 traces and 100 risks per refresh.
+`spans(limit)` clones only the newest requested completed spans. `all(limit)` clones only the requested highest-priority findings (severity descending, then rule ID); the no-argument methods retain their full-snapshot behavior. The Electron runtime uses these bounded queries for its 250 ms evidence refresh, with at most 1,000 traces and 100 risks per refresh.
+
+`TraceCollector.evidence()` reports retained, evicted, discarded, rejected, and truncated span counts; `RiskCollector.evidence()` reports aggregation, rejection, and truncation. Bot output and fault receipts also expose completeness accounting. Session combines these signals, and Scenario v2 cannot pass after relevant evidence was dropped or truncated. Expected privacy filtering is distinct from evidence loss: the core projection's `truncated` field can reflect omitted private records, while `evidenceComplete` records capacity/sanitization completeness.
 
 Metadata is bounded while it is sanitized, before serialized retention sizing. Trace metadata uses a maximum depth of 16, 2,048 visited values, 512 entries per container, 16,384 characters per input string, and a 1 MiB source-string byte budget. Risk findings use the same depth with 4,096 values, 1,024 entries per container, 32,768 characters per string, and a 2 MiB source-string byte budget. Oversized arrays—including sparse arrays with a huge declared length—produce only the bounded prefix plus a truncation marker.
 
@@ -40,23 +42,23 @@ The public redactor also has finite defaults: 100,000 visited values, 10,000 ent
 
 ## Electron evidence
 
-Electron runtime entries can record a local interaction trace/risk and the renderer can display the raw-webhook callback outcome and duration. Bot stdout/stderr is shown separately and does not carry a guaranteed trace ID. Most inspector payload, state diff, permission, rate-limit, risk, waterfall, and timeline details are seeded visual fixtures.
+Desktop shows Session trace status/duration, runtime findings, bounded process output, and live interaction/message details. Registered commands and retained actor views come from the same run. Bot stdout/stderr has no guaranteed trace ID; supported SDK handler diagnostics are structured separately so a logged handler failure cannot be mistaken for a successful reply. The browser demo and sample timing panels remain illustrative.
 
-## Planned views
+## Observability limits
 
-Future connected-desktop work may add:
+The current runtime does not provide:
 
 - causal flow and sequence views across UI, transport, bot, REST/Gateway, state, and render;
 - a real timing waterfall separating queue, handler, dependency, REST, delivery, and render;
-- authoritative before/after state diffs and permission/intent/bucket decisions;
+- a complete per-request before/after diff with every permission, intent, and bucket decision;
 - search/filter and semantic trace comparison;
 - CPU, memory, event-loop, queue, concurrency, error-rate, and throughput measurements when instrumented;
-- versioned trace export with explicit redaction metadata.
+- a standalone replayable trace archive with complete dependency instrumentation.
 
-These are not v0.1 compatibility claims.
+Reports and reproduction bundles export the supported evidence; they do not supply those missing measurements.
 
 ## Interpretation and privacy
 
-Core virtual durations are deterministic simulation evidence. Electron `/ping` duration is host-time loopback evidence. Neither predicts Internet, regional Discord, production dependency, or user-render latency.
+Core virtual durations describe the deterministic model. Raw/SDK Bot session durations measure host-time local execution. Neither predicts Internet, regional Discord, production dependency, or user-render latency.
 
 Trace metadata and process output can contain sensitive values. CLI sanitization and bot-output redaction reduce common leakage but do not replace manual review. See [Privacy](privacy.md).

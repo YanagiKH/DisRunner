@@ -16,6 +16,7 @@ async function fixture(run) {
   try {
     await cp(example, root, { recursive: true });
     const config = JSON.parse(await readFile(join(root, 'discord-simulator.config.json'), 'utf8'));
+    config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds: [] };
     config.profile.ordinaryMessagePermissions = 'guild-text-own-messages-v1';
     config.fixtures.bot = 'fixtures/bot.json';
     const guild = {
@@ -28,7 +29,10 @@ async function fixture(run) {
           { id: '1100', permissions: '68608' },
         ],
         channels: [{ id: '2000', type: 0, permission_overwrites: [] }],
-        members: [{ id: '5100', user_id: '5000', roles: ['1100'] }],
+        members: [
+          { id: '5100', user_id: '5000', roles: ['1100'] },
+          { id: '5300', user_id: '3000', roles: [] },
+        ],
       },
     };
     const bot = { version: 1, user: { id: '5000', bot: true, username: 'Fixture Bot' } };
@@ -56,11 +60,12 @@ test('strict project opt-in materializes literal resources and preserves only th
         'role:1100',
         'channel:2000',
         'member:5100',
+        'member:5300',
         'user:3000',
         'user:5000',
       ],
     );
-    for (const resource of config.resources.slice(1, 5)) assert.equal(resource.guild_id, '1000');
+    for (const resource of config.resources.slice(1, 6)) assert.equal(resource.guild_id, '1000');
     assert.equal(config.resources[0].members, undefined);
     assert.deepEqual(config.resources[4], {
       id: '5100',
@@ -238,7 +243,11 @@ test('human/bot duplicate user keys fail, but ambiguous membership and semantic 
     guild.guild.owner_id = 'opaque';
     await save();
     const loaded = await loadProjectConfiguration(root);
-    assert.equal(loaded.resources.filter((r) => r.resourceType === 'member').length, 2);
+    const members = loaded.resources.filter((r) => r.resourceType === 'member');
+    assert.equal(members.length, 3);
+    assert.equal(members.filter((r) => r.user_id === '5000').length, 2);
+    assert.deepEqual(members.find((r) => r.id === '5200').roles, ['missing']);
+    assert.equal(members.find((r) => r.id === '5200').communication_disabled_until, 'tomorrow');
     assert.equal(loaded.resources[2].permissions, ' 68608');
     assert.equal(loaded.resources[3].permission_overwrites, undefined);
   });

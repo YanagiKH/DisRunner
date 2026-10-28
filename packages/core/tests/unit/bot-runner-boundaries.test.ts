@@ -63,6 +63,25 @@ beforeEach(() => {
     exitCode: null as number | null,
     signalCode: null as NodeJS.Signals | null,
   });
+  // A reaped fake child normally reaches readable EOF and then close, as Node does.
+  const ownedChild = child;
+  const emit = ownedChild.emit.bind(ownedChild);
+  ownedChild.emit = (event, ...args: unknown[]): boolean => {
+    const emitted = emit(event, ...args);
+    if (event === 'exit' && !ownedChild.stdout.writableEnded) {
+      let ended = 0;
+      const onEnd = (): void => {
+        ended += 1;
+        if (ended === 2) emit('close', ...args);
+      };
+      ownedChild.stdout.once('end', onEnd);
+      ownedChild.stderr.once('end', onEnd);
+      ownedChild.stdout.end();
+      ownedChild.stderr.end();
+      ownedChild.stdin.end();
+    }
+    return emitted;
+  };
   mocks.spawn.mockImplementation(() => {
     queueMicrotask(() => child.emit('spawn'));
     return child;
@@ -281,6 +300,136 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
     child.emit('exit', 0, null);
   }
 
+  it('observes an absent child before Node delivers exit and never taskkills its departed PID', async () => {
+    const runner = await started();
+    leader = errno('ENOENT');
+    expect(runner.snapshot()).toMatchObject({ status: 'running', pid });
+    expect(runner.observeExit()).toBe('exited');
+    expect(runner.snapshot()).toMatchObject({ status: 'running', pid });
+    const stopping = runner.stop(10);
+    void stopping.catch(() => {});
+    let settled = false;
+    void stopping.then(() => {
+      settled = true;
+    });
+    try {
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toEqual([]);
+      exitChild();
+      await expect(stopping).resolves.toMatchObject({ status: 'stopped', exitCode: 0 });
+      expect(runner.snapshot().pid).toBeUndefined();
+      expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    } finally {
+      // Also settle the old, incorrect helper path when demonstrating the regression.
+      killer.emit('exit', 0, null);
+      if (child.exitCode === null) exitChild();
+      await stopping.catch(() => {});
+    }
+  });
+
+  it.each(['present', 'EPERM'])(
+    'does not infer a live identity or exit from %s',
+    async (result) => {
+      const runner = await started();
+      if (result === 'EPERM')
+        killSpy.mockImplementation(() => {
+          throw errno('EPERM');
+        });
+      expect(runner.observeExit()).toBe('unknown');
+      expect(runner.snapshot()).toMatchObject({ status: 'running', pid });
+      expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+      exitChild();
+      await runner.stop();
+    },
+  );
+
+  it('retains a completed helper failure when the child disappears before its exit callback', async () => {
+    const runner = await started();
+    const stopping = runner.stop(10);
+    const rejected = expect(stopping).rejects.toThrow(/taskkill/i);
+    leader = errno('ENOENT');
+    killer.emit('exit', 1, null);
+    await rejected;
+    await expect(runner.stop(10)).rejects.toThrow(/taskkill/i);
+    expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(1);
+    expect(runner.snapshot()).toMatchObject({ pid, status: 'stopping' });
+    exitChild();
+    await expect(runner.stop(10)).rejects.toThrow(/taskkill/i);
+    await expect(runner.start({} as never)).rejects.toThrow('already running');
+    expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(1);
+    expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+  });
+
+  it('retains a prior helper failure if the PID disappears between retry probes', async () => {
+    const runner = await started();
+    const first = expect(runner.stop(10)).rejects.toThrow(/taskkill/i);
+    killer.emit('error', errno('ENOENT'));
+    await first;
+    killSpy
+      .mockImplementationOnce(() => true)
+      .mockImplementationOnce(() => {
+        throw errno('ESRCH');
+      });
+    const retry = runner.stop(10);
+    const rejected = expect(retry).rejects.toThrow(/taskkill/i);
+    await Promise.resolve();
+    exitChild();
+    await rejected;
+    await expect(runner.stop(10)).rejects.toThrow(/taskkill/i);
+    expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(1);
+  });
+
+  it('retains a graceful helper failure if the PID disappears between escalation probes', async () => {
+    const runner = await started();
+    killSpy
+      .mockImplementationOnce(() => true)
+      .mockImplementationOnce(() => true)
+      .mockImplementationOnce(() => {
+        throw errno('ESRCH');
+      });
+    const stopping = runner.stop(10);
+    const rejected = expect(stopping).rejects.toThrow(/taskkill/i);
+    killer.emit('exit', 1, null);
+    await Promise.resolve();
+    await Promise.resolve();
+    exitChild();
+    await rejected;
+    await expect(runner.stop(10)).rejects.toThrow(/taskkill/i);
+    expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(1);
+  });
+
+  it('never reclassifies a historical helper failure as a fresh escalation after PID disappearance', async () => {
+    const runner = await started();
+    const forced = new EventEmitter();
+    mocks.spawn.mockImplementationOnce(() => killer).mockImplementationOnce(() => forced);
+    const first = expect(runner.stop(10)).rejects.toThrow(/taskkill.*code 2/i);
+    killer.emit('exit', 1, null);
+    await Promise.resolve();
+    await Promise.resolve();
+    forced.emit('exit', 2, null);
+    await first;
+    killSpy
+      .mockImplementationOnce(() => true)
+      .mockImplementationOnce(() => {
+        throw errno('ESRCH');
+      })
+      .mockImplementationOnce(() => true);
+    const retry = runner.stop(10);
+    void retry.catch(() => {});
+    try {
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(2);
+      exitChild();
+      await expect(retry).rejects.toThrow(/taskkill.*code 2/i);
+    } finally {
+      killer.emit('exit', 0, null);
+      if (child.exitCode === null) exitChild();
+      await retry.catch(() => {});
+    }
+  });
+
   for (const failure of ['throw', 'error', 'signal'] as const) {
     it(`rejects taskkill ${failure} and retains live-child ownership for retry`, async () => {
       const runner = await started();
@@ -299,7 +448,7 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
       killer.emit('exit', 0, null);
       exitChild();
       await expect(retry).resolves.toMatchObject({ status: 'stopped' });
-      expect(killSpy).not.toHaveBeenCalled();
+      expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
     });
   }
 
@@ -336,7 +485,7 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
       expect(vi.getTimerCount()).toBe(0);
       expect(killer.listenerCount('exit')).toBe(0);
       expect(forced.listenerCount('exit')).toBe(0);
-      expect(killSpy).not.toHaveBeenCalled();
+      expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
     });
   }
 
@@ -372,7 +521,7 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
       expect(mocks.spawn.mock.calls.filter(([exe]) => exe === 'taskkill')).toHaveLength(2);
       expect(vi.getTimerCount()).toBe(0);
       expect(forced.listenerCount('exit')).toBe(0);
-      expect(killSpy).not.toHaveBeenCalled();
+      expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
     });
   }
 
@@ -416,7 +565,7 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
     expect(mocks.spawn.mock.calls.filter(([executable]) => executable === 'taskkill')).toHaveLength(
       1,
     );
-    expect(killSpy).not.toHaveBeenCalled();
+    expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
   });
 
   it('awaits the owned child after taskkill succeeds', async () => {
@@ -458,7 +607,7 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
     expect(mocks.spawn.mock.calls.filter(([executable]) => executable === 'taskkill')).toHaveLength(
       2,
     );
-    expect(killSpy).not.toHaveBeenCalled();
+    expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
   });
   for (const killOutcome of ['true', 'false', 'throw'] as const) {
     it(`bounds a hung taskkill helper whose kill returns ${killOutcome}, without allowing retry`, async () => {
@@ -485,7 +634,7 @@ describe('simulated Windows taskkill boundaries (not Windows tree qualification)
       expect(
         mocks.spawn.mock.calls.filter(([executable]) => executable === 'taskkill'),
       ).toHaveLength(1);
-      expect(killSpy).not.toHaveBeenCalled();
+      expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
     });
   }
 });

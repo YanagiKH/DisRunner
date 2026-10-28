@@ -8,15 +8,19 @@ import {
   type IdentifyPayload,
 } from './gateway.js';
 import { GatewayIntentError } from './intents.js';
+import type { FaultPolicy, GatewayFaultEffect } from './fault-policy.js';
 import type { TraceCollector } from './trace.js';
 
 export interface LocalGatewayServerOptions {
   readonly gateway: GatewayEmulator;
+  readonly faultPolicy?: FaultPolicy;
   readonly trace?: TraceCollector;
   readonly maxPayloadBytes?: number;
   readonly maxConnections?: number;
   /** Maximum time a new connection may remain unauthenticated. */
   readonly identifyTimeoutMs?: number;
+  /** Host-time deadline between authenticated heartbeats, independent of model time. */
+  readonly heartbeatTimeoutMs?: number;
 }
 
 export interface LocalGatewayAddress {
@@ -28,15 +32,19 @@ export interface LocalGatewayAddress {
 interface ConnectionState {
   sessionId?: string;
   identifyTimer?: NodeJS.Timeout;
+  heartbeatTimer?: NodeJS.Timeout;
 }
 
 /** Loopback-only WebSocket transport for the in-memory gateway protocol engine. */
 export class LocalGatewayServer {
   readonly #gateway: GatewayEmulator;
+  readonly #faultPolicy: FaultPolicy | undefined;
+  readonly #publicationFaults = new Map<number, GatewayFaultEffect | null>();
   readonly #trace: TraceCollector | undefined;
   readonly #maxPayloadBytes: number;
   readonly #maxConnections: number;
   readonly #identifyTimeoutMs: number;
+  readonly #heartbeatTimeoutMs: number;
   readonly #connections = new Map<WebSocket, ConnectionState>();
   readonly #sessionConnections = new Map<string, WebSocket>();
   #unsubscribeBroadcast: (() => void) | undefined;
@@ -45,6 +53,7 @@ export class LocalGatewayServer {
 
   public constructor(options: LocalGatewayServerOptions) {
     this.#gateway = options.gateway;
+    this.#faultPolicy = options.faultPolicy;
     this.#trace = options.trace;
     this.#maxPayloadBytes = boundedPositive(
       options.maxPayloadBytes ?? 1_048_576,
@@ -55,6 +64,13 @@ export class LocalGatewayServer {
       options.identifyTimeoutMs ?? 10_000,
       'identifyTimeoutMs',
     );
+    this.#heartbeatTimeoutMs = boundedPositive(
+      options.heartbeatTimeoutMs ?? this.#gateway.heartbeatIntervalMs * 2,
+      'heartbeatTimeoutMs',
+    );
+    if (this.#heartbeatTimeoutMs > 2_147_483_647) {
+      throw new RangeError('heartbeatTimeoutMs exceeds the host timer limit.');
+    }
   }
 
   public get address(): LocalGatewayAddress | undefined {
@@ -108,11 +124,13 @@ export class LocalGatewayServer {
     };
     try {
       this.#gateway.bindTransportEndpoint(boundAddress.url);
-      this.#unsubscribeBroadcast = this.#gateway.subscribeBroadcast((sessionId, packet) => {
-        const socket = this.#sessionConnections.get(sessionId);
-        if (socket !== undefined && socket.readyState === WebSocket.OPEN)
-          this.#send(socket, packet);
-      });
+      this.#unsubscribeBroadcast = this.#gateway.subscribeBroadcast(
+        (sessionId, packet, publicationId) => {
+          const socket = this.#sessionConnections.get(sessionId);
+          if (socket !== undefined && socket.readyState === WebSocket.OPEN)
+            this.#send(socket, packet, publicationId);
+        },
+      );
     } catch (error) {
       await this.stop();
       throw error;
@@ -127,8 +145,7 @@ export class LocalGatewayServer {
     if (packet === undefined) return false;
     const connection = this.#sessionConnections.get(sessionId);
     if (connection === undefined || connection.readyState !== WebSocket.OPEN) return false;
-    this.#send(connection, packet);
-    return true;
+    return this.#send(connection, packet);
   }
 
   public async stop(): Promise<void> {
@@ -136,6 +153,7 @@ export class LocalGatewayServer {
     if (server === undefined) return;
     for (const [socket, state] of this.#connections) {
       if (state.identifyTimer !== undefined) clearTimeout(state.identifyTimer);
+      if (state.heartbeatTimer !== undefined) clearTimeout(state.heartbeatTimer);
       if (
         state.sessionId !== undefined &&
         this.#sessionConnections.get(state.sessionId) === socket
@@ -151,6 +169,7 @@ export class LocalGatewayServer {
     }
     this.#connections.clear();
     this.#sessionConnections.clear();
+    this.#publicationFaults.clear();
     await new Promise<void>((resolvePromise, reject) =>
       server.close((error) => (error === undefined ? resolvePromise() : reject(error))),
     );
@@ -176,6 +195,7 @@ export class LocalGatewayServer {
     socket.on('error', () => undefined);
     socket.on('close', () => {
       if (state.identifyTimer !== undefined) clearTimeout(state.identifyTimer);
+      if (state.heartbeatTimer !== undefined) clearTimeout(state.heartbeatTimer);
       this.#connections.delete(socket);
       if (
         state.sessionId !== undefined &&
@@ -207,6 +227,7 @@ export class LocalGatewayServer {
         const result = this.#gateway.identify(asIdentify(packet.d));
         this.#bindSession(socket, state, result.sessionId);
         this.#send(socket, result.ready);
+        for (const packet of result.bootstrap ?? []) this.#send(socket, packet);
       } else if (packet.op === GatewayOpcodes.HEARTBEAT) {
         const sequence =
           packet.d === null ? null : requireSafeInteger(packet.d, 'heartbeat sequence');
@@ -218,6 +239,7 @@ export class LocalGatewayServer {
           this.#send(socket, { op: GatewayOpcodes.HEARTBEAT_ACK, d: null });
         } else {
           const ack = this.#gateway.heartbeat(state.sessionId, sequence);
+          this.#armHeartbeatDeadline(socket, state);
           if (ack !== undefined) this.#send(socket, ack);
         }
       } else if (packet.op === GatewayOpcodes.RESUME) {
@@ -257,9 +279,37 @@ export class LocalGatewayServer {
     }
   }
 
-  #send(socket: WebSocket, packet: unknown): void {
-    if (packet !== undefined && socket.readyState === WebSocket.OPEN)
-      socket.send(JSON.stringify(packet));
+  #send(socket: WebSocket, packet: unknown, publicationId?: number): boolean {
+    if (packet === undefined || socket.readyState !== WebSocket.OPEN) return false;
+    let copies = 1;
+    const dispatch = packet as GatewayPacket;
+    if (this.#faultPolicy !== undefined && dispatch.op === 0 && typeof dispatch.t === 'string') {
+      let effect: GatewayFaultEffect | null;
+      if (publicationId !== undefined && this.#publicationFaults.has(publicationId)) {
+        effect = this.#publicationFaults.get(publicationId)!;
+      } else {
+        effect = this.#faultPolicy.consumeGateway(dispatch.t);
+        if (publicationId !== undefined) {
+          this.#publicationFaults.set(publicationId, effect);
+          while (this.#publicationFaults.size > 128) {
+            this.#publicationFaults.delete(this.#publicationFaults.keys().next().value!);
+          }
+        }
+      }
+      if (effect?.kind === 'disconnect') {
+        const state = this.#connections.get(socket);
+        if (state?.sessionId !== undefined) {
+          this.#gateway.disconnect(state.sessionId);
+          if (state.heartbeatTimer !== undefined) clearTimeout(state.heartbeatTimer);
+        }
+        socket.close(effect.closeCode, 'Injected Gateway disconnect.');
+        return false;
+      }
+      if (effect?.kind === 'duplicate') copies = effect.copies;
+    }
+    const json = JSON.stringify(packet);
+    for (let index = 0; index < copies; index += 1) socket.send(json);
+    return true;
   }
 
   #bindSession(socket: WebSocket, state: ConnectionState, sessionId: string): void {
@@ -272,6 +322,22 @@ export class LocalGatewayServer {
       clearTimeout(state.identifyTimer);
       delete state.identifyTimer;
     }
+    this.#armHeartbeatDeadline(socket, state);
+  }
+
+  #armHeartbeatDeadline(socket: WebSocket, state: ConnectionState): void {
+    if (state.heartbeatTimer !== undefined) clearTimeout(state.heartbeatTimer);
+    state.heartbeatTimer = setTimeout(() => {
+      if (state.sessionId !== undefined) {
+        try {
+          this.#gateway.disconnect(state.sessionId);
+        } catch {
+          // The protocol engine may already have expired this session.
+        }
+      }
+      socket.close(4009, 'Heartbeat timeout.');
+    }, this.#heartbeatTimeoutMs);
+    state.heartbeatTimer.unref();
   }
 }
 

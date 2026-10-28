@@ -111,8 +111,8 @@ test(
     };
     try {
       await cp(project, directory, { recursive: true });
-      const server = join(directory, 'src/server.mjs');
-      const source = await readFile(server, 'utf8');
+      const commands = join(directory, 'src/commands.mjs');
+      const source = await readFile(commands, 'utf8');
       const literal = "'Pong! Offline and deterministic.'";
       assert.equal(
         source.split(literal).length,
@@ -120,7 +120,7 @@ test(
         'Expected one fixture callback insertion point.',
       );
       await writeFile(
-        server,
+        commands,
         source.replace(
           literal,
           'JSON.stringify({ applicationId: interaction.application_id, actorId: interaction.member.user.id, guildId: interaction.guild_id, channelId: interaction.channel_id })',

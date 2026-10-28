@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "user": {
+    "id": "300000000000000001",
+    "username": "developer",
+    "discriminator": "0",
+    "avatar": null,
+    "bot": false
+  }
+}

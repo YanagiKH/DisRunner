@@ -1,6 +1,6 @@
 # Virtual Discord state
 
-`VirtualState` is an in-memory deterministic resource store used by the core and CLI. It stores Discord-shaped records without querying Discord. The word “Discord-shaped” does not mean every resource type or relationship is schema-validated.
+`VirtualState` is the in-memory resource store used by model scenarios and real Bot sessions. It stores Discord-shaped records without querying Discord. The generic store accepts broader records than the validated workspace and runtime domains.
 
 ## Implemented resource store
 
@@ -18,13 +18,13 @@ The store supports:
 
 Default capacities are 10,000 resources, 1 MiB per resource, 64 MiB total state, a 16 MiB fixture, 1,000 history entries, and 32 MiB of history. One resource is also bounded to 32 nested levels and 10,000 visited nodes. Callers can lower or explicitly change these positive safe-integer limits. If one mutation is too large to retain within the history-byte limit, it becomes an undo barrier rather than leaving older incompatible undo entries active.
 
-It does not automatically validate parent relationships, cascade deletes, maintain Discord caches, attach trace links to every record, or apply resource-specific lifecycle rules. Those behaviors must come from the calling engine where implemented.
+The generic store does not automatically validate parent relationships, cascade deletes, maintain SDK caches, or attach trace links to every record. The workspace validator checks supported resource relationships; runtime message/interaction/resource domain services add their declared authorization, mutation, deletion, and Gateway event rules. Those guarantees come from the domain layer rather than a generic `state.create` call.
 
 ## Virtual clock
 
 The core clock supports `paused`, `realtime`, and `accelerated` modes. Paused time can move forward explicitly, and scheduled callbacks run deterministically by due time and insertion order. Time cannot move backward. The default scheduler retains at most 100,000 tasks and executes at most 100,000 callbacks in one advance; both limits are configurable, cancellation is indexed, and recursive advance calls fail closed.
 
-Core scenarios use a paused clock. Electron currently uses a real-time clock for its runtime. External bot code is not forced to use either clock.
+Version 1 model scenarios use a paused clock. Desktop and CLI version 2 sessions use realtime. External Bot code is not forced to use the core scheduler, so seeded state alone cannot make host timers or SDK execution deterministic.
 
 ## Selected payload limits
 
@@ -42,10 +42,14 @@ Core scenarios use a paused clock. Electron currently uses a real-time clock for
 
 Strict mode reports these as errors. Lenient mode records them as warnings, although warning surfacing is not consistent across every caller. The validator does not implement the complete component catalog, every field/type constraint, upload byte limits, attachment presentation semantics, poll/sticker restrictions, or all Components V2 rules.
 
+This table describes the generic validator, not the full runtime protocol contract. Runtime domains additionally validate legacy component/modal fields and bounded attachment metadata/uploads. Components V2 remains unsupported even though the generic validator recognizes some of its structural constraints. See [REST emulator](rest-emulator.md) and [Interaction engine](interaction-engine.md).
+
 ## Persistence and desktop boundary
 
-Snapshots and fixture strings are core values. Export encodes `bigint` values in the stable JSON representation. CLI scenarios and recordings have their own current file contracts, but v0.1 has no persistent workspace database, migration system, automatic fixture save, archive format, or retention manager.
+Snapshots and fixture strings are core values. Export encodes `bigint` values in the stable JSON representation. Project persistence uses versioned `.disrunner/workspace.json`, with validated resources, saved scenarios/options, conflict checks, atomic saves, and backup/recovery files. Desktop fixture edits affect the next clean session after saving; they do not rewrite a running Session's frozen inputs. See [Workspaces](workspaces.md).
 
-The guild/channel/member data visible in the Discord-like renderer is seeded visual preview state. Editing those panels does not currently mutate `VirtualState`, persist a fixture, or change a CLI scenario run.
+Live Desktop resources/messages are projections of the current retained state. Public snapshots omit private records; actor views apply the supported channel/recipient rules and include that actor's ephemeral replies. CLI Scenario v2 uses those same views for assertions. The browser demo remains separate.
 
-Partial/stale-cache simulation, deleted-reference semantics, versioned Discord profiles, and full resource validation are planned. See [Compatibility](../COMPATIBILITY.md).
+The current Session profile considers up to 2,000 resources within a 1 MiB serialized projection. This includes the reference workspace with 1 guild, 10 channels, 100 users, 1,000 messages and 50 registered commands. If the count limit is exceeded, structural resources remain available and the newest timestamped messages fill the remaining slots. Earlier raw compatibility profiles retain their 1,000-resource bound. Count or byte loss sets `evidenceComplete: false`; Scenario v2 cannot pass with that incomplete view. Expected privacy filtering is reported separately from capture loss.
+
+There is no general stale-cache model, process-memory checkpoint, or complete Discord resource validator. Reproduction bundles describe inputs for a fresh Bot rerun and require the original project. See [Compatibility](../COMPATIBILITY.md).

@@ -1,771 +1,313 @@
 {
-  "manifest_schema_version": "0.1-draft",
-  "status": "proposal_not_implemented_or_certified",
-  "generated_date_utc": "2026-10-21",
-  "source": {
-    "repository": "https://github.com/YanagiKH/DisRunner",
-    "base_commit": "9f57ab6c8f9688513b880ccb283f8365b45be681",
-    "roadmap_filename": "DisRunner_v1.0_Implementation_Roadmap(2).md",
-    "roadmap_sha256": "560ea8156d4b2b38656d1f38ee852aeb2db4188d4fdd51edef2ec1ea4b370739",
-    "roadmap_size_bytes": 94824,
-    "requirements_section": "4.2",
-    "architecture_section": "5",
-    "milestones_section": "6"
-  },
-  "evidence_policy": {
-    "this_task": "Static source/document inspection and documentation structural validation only; no product tests performed for this manifest.",
-    "promotion": "Require exact commit, command, environment, exit, raw artifact hash, coverage and reviewer; no inference from declared targets or unit tests to end-to-end support.",
-    "statuses": [
-      "source_document_review_only",
-      "planned",
-      "pending",
-      "passed_at_exact_identity",
-      "failed",
-      "skipped",
-      "not_applicable"
-    ],
-    "current_gate": "G0 not established; SDK spikes, full v1 ownership and baseline/security acceptance remain pending."
-  },
-  "toolchain": {
-    "source_node_range": ">=22.23.2 <23",
-    "source_pnpm": "11.19.0",
-    "runtime_certification": "pending"
-  },
-  "execution_modes": {
+  "schemaVersion": 1,
+  "version": "1.0.0",
+  "apiVersion": 10,
+  "status": "implemented",
+  "execution": {
     "model": {
       "clock": "virtual",
-      "scope": "controlled core; not proof user Bot executed"
+      "replay": "deterministic model recording"
     },
     "bot": {
-      "clock": "realtime_with_monotonic_deadlines_and_host_watchdog",
-      "scope": "real process and loopback I/O; no fabricated replies",
-      "qualification": "pending_shared_runtime"
-    },
-    "replay_kinds": [
-      "trace_playback_no_bot",
-      "model_replay_controlled_determinism",
-      "bot_rerun_semantic_assertions_not_bitwise_determinism"
-    ]
+      "clock": "realtime",
+      "replay": "new process with semantic assertions",
+      "maxScenarioSteps": 100,
+      "maxActiveRuns": 1
+    }
   },
   "adapters": [
     {
       "id": "raw-interaction-webhook",
-      "exact_sdk_version": null,
-      "exact_language_runtime_version": null,
-      "version_selection": "M0_transport_spike_pending; do_not_guess",
-      "baseline": "narrow Desktop signed /ping with peer-auth; no SDK pin applicable, runtime pin still to certify",
-      "target": "formal_v1_entry",
-      "qualification": "not_established"
+      "protocol": "Ed25519 request / per-run HMAC response",
+      "node": "22.23.2"
     },
     {
       "id": "discord.js",
-      "exact_sdk_version": null,
-      "exact_language_runtime_version": null,
-      "version_selection": "M0_transport_spike_pending; do_not_guess",
-      "baseline": "Desktop config rejects unsupported adapter; SDK not declared",
-      "target": "formal_v1_entry",
-      "qualification": "not_established"
+      "sdk": "14.27.0",
+      "node": "22.23.2",
+      "entryPoints": ["ESM", "CommonJS"]
     },
     {
       "id": "discord.py",
-      "exact_sdk_version": null,
-      "exact_language_runtime_version": null,
-      "version_selection": "M0_transport_spike_pending; do_not_guess",
-      "baseline": "Desktop config rejects unsupported adapter; SDK not declared",
-      "target": "formal_v1_entry",
-      "qualification": "not_established"
+      "sdk": "2.6.4",
+      "python": "3.12.14"
     }
   ],
-  "platforms": [
-    {
-      "id": "windows-11-x64",
-      "artifact": "signed NSIS",
-      "status": "target_only",
-      "qualification_evidence_ids": [],
-      "required_evidence": "actual target install, packaged UI/IPC, real Bot scenario, cleanup and platform-specific upgrade/removal/signing checks"
-    },
-    {
-      "id": "ubuntu-24.04-x64",
-      "artifact": "AppImage",
-      "status": "target_only",
-      "qualification_evidence_ids": [],
-      "required_evidence": "actual target install, packaged UI/IPC, real Bot scenario, cleanup and platform-specific upgrade/removal/signing checks"
-    },
-    {
-      "id": "macos-14plus-arm64",
-      "artifact": "signed/notarized DMG",
-      "status": "target_only",
-      "qualification_evidence_ids": [],
-      "required_evidence": "actual target install, packaged UI/IPC, real Bot scenario, cleanup and platform-specific upgrade/removal/signing checks"
-    },
-    {
-      "id": "macos-14plus-x64",
-      "artifact": "signed/notarized DMG",
-      "status": "target_only",
-      "qualification_evidence_ids": [],
-      "required_evidence": "actual target install, packaged UI/IPC, real Bot scenario, cleanup and platform-specific upgrade/removal/signing checks"
-    }
-  ],
-  "offline_boundary": {
-    "target": "Discord-independent after dependency preparation; synthetic credentials and loopback endpoints; no fallback to real Discord",
-    "not_claimed": "General OS sandbox, containment of arbitrary Bot filesystem/process/network activity, or automatic offline installation of arbitrary dependencies",
-    "evidence_pending": "SDK transport interception and no-egress tests for each pinned profile"
+  "limits": {
+    "messageContentCharacters": 2000,
+    "legacyActionRows": 5,
+    "autocompleteChoices": 25,
+    "attachmentFiles": 10,
+    "attachmentFileBytes": 2097152,
+    "multipartBytes": 8388608,
+    "workspaceBytes": 8388608,
+    "sessionProjectionRecords": 2000,
+    "legacyProjectionRecords": 1000,
+    "sessionProjectionBytes": 1048576,
+    "maxFaultDelayMs": 30000
+  },
+  "profiles": {
+    "commands": "command-registry-v2",
+    "interactions": "interactions-v1",
+    "permissions": "guild-text-own-messages-v1",
+    "legacyCompatibility": [
+      "project version 1",
+      "model scenario version 1",
+      "command-registry-v1",
+      "legacy-unenforced raw project profile"
+    ]
   },
   "requirements": [
     {
       "id": "V01",
       "title": "Project lifecycle and diagnostics",
-      "priority": "must",
-      "target_subset": "Open, validate, save; explicit runtime path and SDK version diagnostics; dependencies prepared by user; no automatic arbitrary install scripts.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Desktop project validation exists; saving and full three-adapter diagnostics not certified.",
-        "source_refs": ["E-SOURCE", "apps/desktop/electron/project-config.cts"]
-      },
-      "planned_owner_role": "project/runtime",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["schema", "CLI integration", "packaged UI"],
-      "planned_milestones": ["M1", "M6"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "implementation": "available",
+      "evidence": [
+        "packages/runtime/src/project-config.ts",
+        "packages/runtime/tests/runtime-command-registry-config.test.mjs",
+        "tests/conformance/adapter-boundaries.test.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V02",
       "title": "Real Bot lifecycle",
-      "priority": "must",
-      "target_subset": "Raw webhook, pinned discord.js and pinned discord.py; start/ready/stop/restart and headless CLI; documented bootstrap permitted.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Raw Desktop /ping path documented; generic process primitive is not SDK support.",
-        "source_refs": ["E-SOURCE", "apps/desktop/electron/runtime-manager.cts"]
-      },
-      "planned_owner_role": "runtime/adapters",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["real-process integration", "wrong/no-reply/crash controls"],
-      "planned_milestones": ["M1", "M3"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "implementation": "available",
+      "evidence": [
+        "packages/runtime/src/session.ts",
+        "tests/conformance/sdk-sessions.test.mjs",
+        "tests/conformance/raw-session.test.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V03",
-      "title": "Fixture domain",
-      "priority": "must",
-      "target_subset": "Guild, text channel, DM, role, user, member, message with validated relations and captured actor context; no advanced thread/forum/stage.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Core state exists; Desktop synchronization not complete.",
-        "source_refs": ["E-SOURCE", "packages/core/src/state.ts"]
-      },
-      "planned_owner_role": "domain",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["unit", "schema", "REST/Gateway/UI integration"],
-      "planned_milestones": ["M2"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Fixtures and authoritative state",
+      "implementation": "available",
+      "evidence": [
+        "packages/runtime/src/workspace.ts",
+        "packages/core/tests/integration/resource-domain.test.ts",
+        "packages/runtime/tests/workspace.test.mjs",
+        "packages/runtime/tests/normal-workspace-view.test.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V04",
-      "title": "Command registry",
-      "priority": "must",
-      "target_subset": "Guild-installed application global/guild command CRUD and bulk overwrite; no global propagation delay.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Command registry planned in compatibility document.",
-        "source_refs": ["E-SOURCE", "packages/core/src/rest-emulator.ts"]
-      },
-      "planned_owner_role": "protocol",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["route contracts", "adapter conformance"],
-      "planned_milestones": ["M2", "M3"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Application command registry",
+      "implementation": "available",
+      "evidence": [
+        "packages/core/src/application-command-registry.ts",
+        "packages/core/tests/unit/application-command-v2.test.ts",
+        "tests/conformance/sdk-transports.test.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V05",
-      "title": "Command invocation",
-      "priority": "must",
-      "target_subset": "Slash, subcommands/groups, user/message context commands, autocomplete; typed resolved payloads and small local attachment option profile.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Narrow raw /ping integration is not this command matrix.",
-        "source_refs": ["E-SOURCE", "packages/core/src/interactions.ts"]
-      },
-      "planned_owner_role": "protocol/adapters",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["payload unit", "real-handler conformance"],
-      "planned_milestones": ["M2", "M3"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Typed commands and autocomplete",
+      "implementation": "available",
+      "evidence": [
+        "packages/runtime/src/runtime-actions.ts",
+        "packages/runtime/tests/runtime-action-contract.test.mjs",
+        "tests/conformance/sdk-transports.test.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V06",
-      "title": "Interaction responses",
-      "priority": "must",
-      "target_subset": "Reply/defer; original and followup fetch/edit/delete; authoritative messages; ephemeral token/visibility, PATCH omission/clear/update and deletion contracts.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Core lifecycle declared; known baseline regressions prevent inferring v1 completion.",
-        "source_refs": ["E-SOURCE", "packages/core/src/interactions.ts"]
-      },
-      "planned_owner_role": "domain/protocol",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["callback matrix", "route integration", "pinned SDK corpus"],
-      "planned_milestones": ["M0", "M2", "M3"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {
-        "interaction-lifecycle": "F05 interaction lifecycle"
-      }
+      "title": "Interaction response lifecycle",
+      "implementation": "available",
+      "evidence": [
+        "packages/core/src/interactions.ts",
+        "packages/core/tests/integration/interaction-v1-profile.test.ts",
+        "packages/core/tests/integration/interaction-message-route-contract.test.ts"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V07",
-      "title": "Legacy components and modals",
-      "priority": "must",
-      "target_subset": "Buttons; string/user/role/mentionable/channel selects; text-input modals; enumerate fields; full Components V2/new modal controls deferred.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Selected validators only; complete Bot component support not certified.",
-        "source_refs": ["E-SOURCE", "packages/core/src/protocol-limits.ts"]
-      },
-      "planned_owner_role": "protocol/adapters",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["component matrix", "collector/View timeout/stop tests"],
-      "planned_milestones": ["M2", "M3"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Legacy components and modal controls",
+      "implementation": "available",
+      "evidence": [
+        "packages/core/src/interaction-controls.ts",
+        "packages/core/tests/unit/interaction-message-components.test.ts",
+        "tests/conformance/sdk-transports.test.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V08",
-      "title": "Message rendering",
-      "priority": "must",
-      "target_subset": "Text, basic Markdown, embeds, local attachments, supported components; not pixel clone; no remote CDN fetch.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Desktop surfaces include visual previews.",
-        "source_refs": ["E-SOURCE", "apps/desktop/src"]
-      },
-      "planned_owner_role": "desktop",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["rendering", "real-session projection", "no-fetch tests"],
-      "planned_milestones": ["M4"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Message rendering and local attachments",
+      "implementation": "available",
+      "evidence": [
+        "apps/desktop/src/components/MessageFeed.tsx",
+        "packages/core/tests/integration/local-attachments.test.ts",
+        "apps/desktop/tests/e2e/sdk-ui-smoke.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V09",
-      "title": "Authorization and intents",
-      "priority": "must",
-      "target_subset": "Guild/channel permissions, role/member overwrites, declared-route enforcement and content filtering; calculator units alone insufficient.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Core calculators/filtering declared; Desktop intents not wired; route-wide qualification pending.",
-        "source_refs": ["E-SOURCE", "packages/core/src/permissions.ts"]
-      },
-      "planned_owner_role": "domain/protocol",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["unit plus REST/Gateway end-to-end authorization"],
-      "planned_milestones": ["M0", "M2", "M3"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {
-        "baseline-and-gateway": "F08 Gateway close-code baseline"
-      }
+      "title": "Permissions and intents",
+      "implementation": "available",
+      "evidence": [
+        "packages/runtime/src/viewer-permissions.ts",
+        "packages/core/tests/integration/sdk-rest-profile.test.ts",
+        "packages/runtime/tests/runtime-action-contract.test.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V10",
-      "title": "Bounded Gateway",
-      "priority": "must",
-      "target_subset": "Single-shard JSON; heartbeat, close codes, reconnect, resume, bounded replay and pinned SDK cache bootstrap; extra required routes explicitly declared.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Partial core/WebSocket lifecycle; not a supported imported-Bot adapter.",
-        "source_refs": ["E-SOURCE", "packages/core/src/gateway-server.ts"]
-      },
-      "planned_owner_role": "gateway/adapters",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["real WS lifecycle", "cache bootstrap", "no-egress conformance"],
-      "planned_milestones": ["M0", "M2", "M3"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "not_applicable_to_webhook_transport; shared_runtime_Gateway_remains_required_for_SDKs",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {
-        "baseline-and-gateway": "F08 Gateway close-code baseline"
-      }
+      "title": "Gateway lifecycle and cache bootstrap",
+      "implementation": "available",
+      "evidence": [
+        "packages/core/src/gateway-server.ts",
+        "packages/core/tests/integration/gateway-fixture-bootstrap.test.ts",
+        "packages/core/tests/integration/gateway-faults.test.ts"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V11",
-      "title": "Real Bot scenarios",
-      "priority": "must",
-      "target_subset": "Explicit model versus bot; positive/negative assertions, cancellation and overall timeout; Bot mode never fabricates Bot replies.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Existing model scenario results do not establish real Bot correctness.",
-        "source_refs": ["E-SOURCE", "packages/core/src/scenario.ts"]
-      },
-      "planned_owner_role": "scenario/runtime",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["negative controls", "real Bot CLI/Desktop parity"],
-      "planned_milestones": ["M0", "M1", "M5"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {
-        "scenario-validation": "F04 result trust and F09 strict scenario validation"
-      }
+      "title": "Real Bot scenarios and assertions",
+      "implementation": "available",
+      "evidence": [
+        "packages/runtime/src/scenario-v2.ts",
+        "packages/runtime/tests/scenario-v2.test.mjs",
+        "apps/cli/tests/scenario-v2-command.test.ts"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V12",
-      "title": "Persistence and repro",
-      "priority": "must",
-      "target_subset": "Versioned scenarios, recordings, reports, minimal repro; compatibility metadata, redaction, bounded capacity.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Versioned CLI recordings exist; complete workspace roundtrip pending.",
-        "source_refs": ["E-SOURCE", "packages/core/src/trace.ts"]
-      },
-      "planned_owner_role": "persistence/contracts",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["schema", "roundtrip", "migration", "redaction", "capacity"],
-      "planned_milestones": ["M5", "M6"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Workspaces, recordings and diagnostic bundles",
+      "implementation": "available",
+      "evidence": [
+        "packages/runtime/src/reproduction.ts",
+        "packages/runtime/tests/reproduction.test.mjs",
+        "apps/cli/src/recording.ts"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V13",
-      "title": "Reports and exit policy",
-      "priority": "must",
-      "target_subset": "JSON/JUnit/HTML/SARIF; consistent failure/exit policy; independent parser/schema; high findings fail only under declared policy.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "CLI model reports declared; not real-Bot evidence; current false-green baseline under repair.",
-        "source_refs": ["E-SOURCE", "apps/cli"]
-      },
-      "planned_owner_role": "reports/scenario",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["independent parser", "policy and failure-classification tests"],
-      "planned_milestones": ["M0", "M5"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {
-        "scenario-validation": "F04 result trust and F09 strict scenario validation"
-      }
+      "title": "Reports and result policy",
+      "implementation": "available",
+      "evidence": [
+        "apps/cli/src/index.ts",
+        "packages/runtime/tests/scenario-v2.test.mjs",
+        "apps/cli/tests/reporters.test.ts"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V14",
-      "title": "Bounded fault injection",
-      "priority": "must",
-      "target_subset": "Delay, timeout, HTTP 429/5xx, WS disconnect, duplicate events; each has scope, limits and reset.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Generic fault policy planned; rate engine alone is not this feature.",
-        "source_refs": ["E-SOURCE", "packages/core/src/rate-limits.ts"]
-      },
-      "planned_owner_role": "runtime/protocol",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["fault scope/reset", "negative and recovery tests"],
-      "planned_milestones": ["M5"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Scoped faults",
+      "implementation": "available",
+      "evidence": [
+        "packages/core/src/fault-policy.ts",
+        "packages/core/tests/unit/fault-policy.test.ts",
+        "tests/conformance/sdk-sessions.test.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V15",
-      "title": "Recovery and cleanup",
-      "priority": "must",
-      "target_subset": "Crash, hang, output flood, port collision, cancellation terminate safely; process tree/listener/port cleanup.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Bounded process primitive and Desktop status/stop exist; shared lifecycle not certified.",
-        "source_refs": ["E-SOURCE", "packages/core/src/bot-runner.ts"]
-      },
-      "planned_owner_role": "runtime",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["failure integration", "20 restart cycles", "packaged smoke"],
-      "planned_milestones": ["M1", "M7"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Recovery, cancellation and cleanup",
+      "implementation": "available",
+      "evidence": [
+        "packages/core/src/bot-runner.ts",
+        "packages/core/tests/integration/bot-runner-lifecycle.test.ts",
+        "packages/runtime/tests/cleanup-failures.test.mjs",
+        "scripts/qualify-runtime.mjs"
+      ],
+      "releaseVerification": "automated tests, 100 lifecycle cycles per adapter and two-hour runtime soak receipt"
     },
     {
       "id": "V16",
-      "title": "Real-data UI",
-      "priority": "must",
-      "target_subset": "Complete workflow connected to session state; demo samples isolated from actual Inspector/Risk/evidence.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Guild/command/scenario UI and parts of Inspector/Risk are previews.",
-        "source_refs": ["E-SOURCE", "apps/desktop/src"]
-      },
-      "planned_owner_role": "desktop",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["packaged end-to-end", "revision resync", "context isolation"],
-      "planned_milestones": ["M4"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Desktop workflows and live evidence",
+      "implementation": "available",
+      "evidence": [
+        "apps/desktop/src/features/ProjectSurface.tsx",
+        "apps/desktop/tests/e2e/package-smoke.mjs",
+        "apps/desktop/tests/e2e/sdk-ui-smoke.mjs"
+      ],
+      "releaseVerification": "automated tests and conformance"
     },
     {
       "id": "V17",
-      "title": "Platform qualification",
-      "priority": "must",
-      "target_subset": "Windows 11 x64 NSIS, Ubuntu 24.04 x64 AppImage, macOS 14+ arm64 and x64 DMG; actual minimum-target operation evidence.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Targets declared; packaging workflow is not platform certification.",
-        "source_refs": ["E-SOURCE", "COMPATIBILITY.md"]
-      },
-      "planned_owner_role": "release/platform",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["install", "UI/IPC/Bot", "stop", "upgrade/uninstall on target"],
-      "planned_milestones": ["M7", "M8", "M9"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {}
+      "title": "Platform installation and distribution",
+      "implementation": "available",
+      "evidence": [
+        ".github/workflows/release.yml",
+        ".github/scripts/offline-conformance.sh",
+        "scripts/bundle-cli.mjs"
+      ],
+      "releaseVerification": "platform receipts required"
     },
     {
       "id": "V18",
-      "title": "Release trust",
-      "priority": "must",
-      "target_subset": "Dependency security, signing/notarization, compatibility docs, offline upgrade/recovery; automatic updater not required.",
-      "baseline_observation": {
-        "kind": "source_document_review_only",
-        "summary": "Preview source and historical CI are not current security/release qualification.",
-        "source_refs": ["E-SOURCE", "SECURITY.md"]
-      },
-      "planned_owner_role": "release/security",
-      "assigned_owner": null,
-      "owner_status": "full_v1_requirement_owner_pending; see bounded m0_owners assignments",
-      "acceptance_layers": ["exact-head audit", "reachability", "signing and recovery evidence"],
-      "planned_milestones": ["M0", "M8", "M9"],
-      "adapters": {
-        "raw-interaction-webhook": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.js": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        },
-        "discord.py": {
-          "target": "required_within_adapter_profile",
-          "qualification": "pending",
-          "evidence_ids": []
-        }
-      },
-      "v1_acceptance": "not_established",
-      "m0_slice_owners": {
-        "baseline-and-gateway": "M0-02 dependency/security baseline audit"
-      }
+      "title": "Release integrity and signing",
+      "implementation": "available",
+      "evidence": [
+        ".github/workflows/release.yml",
+        ".github/scripts/verify-windows-release.ps1",
+        ".github/scripts/verify-macos-release.sh"
+      ],
+      "releaseVerification": "signing, audit and provenance receipts required"
     }
   ],
-  "m0_owners": {
-    "baseline-and-gateway": [
-      "M0-01 capability baseline and shared contracts",
-      "M0-02 baseline dependency/security audit",
-      "M0-03 Gateway F08"
+  "platforms": [
+    {
+      "id": "windows-x64",
+      "minimumTarget": "Windows 11",
+      "installer": "NSIS",
+      "qualification": "release receipt required"
+    },
+    {
+      "id": "linux-x64",
+      "minimumTarget": "Ubuntu 24.04",
+      "installer": "AppImage",
+      "qualification": "release receipt required"
+    },
+    {
+      "id": "macos-arm64",
+      "minimumTarget": "macOS 14",
+      "installer": "DMG",
+      "qualification": "release receipt required"
+    },
+    {
+      "id": "macos-x64",
+      "minimumTarget": "macOS 14",
+      "installer": "DMG",
+      "qualification": "release receipt required"
+    }
+  ],
+  "releaseEvidence": {
+    "source": "annotated tag at current main with trusted CI/security checks",
+    "required": [
+      "installer operation receipts for four targets",
+      "Windows Authenticode",
+      "macOS codesign, notarization, Gatekeeper and stapling",
+      "offline conformance receipt",
+      "runtime lifecycle, latency and two-hour soak receipt",
+      "standalone CLI archive",
+      "SBOM",
+      "SHA256SUMS",
+      "provenance"
     ],
-    "interaction-lifecycle": ["M0-03 interaction lifecycle F05"],
-    "scenario-validation": [
-      "M0-03 scenario result trust F04",
-      "M0-04 strict scenario validation F09"
-    ]
+    "minimumOsEvidence": "Hosted CI OS versions and minimum supported targets are reported separately."
   },
-  "ownership_policy": "M0 assignments cover the listed slices only. Future v1 roles below remain proposals, not accepted full-requirement assignments."
+  "exclusions": [
+    "full Discord parity",
+    "Components V2 and newer modal controls",
+    "voice and Discord CDN simulation",
+    "unlisted SDK versions",
+    "multiple Bots and sharding",
+    "arbitrary process memory or timer checkpoints",
+    "automatic dependency installation",
+    "OS sandbox for imported code"
+  ]
 }

@@ -16,16 +16,33 @@ const MARK = (n) => `zz-private-marker-${n}`;
 async function harness(callbacks) {
   const directory = await mkdtemp(join(tmpdir(), 'interaction-message-pipeline-'));
   await cp(source, directory, { recursive: true });
+  const configPath = join(directory, 'discord-simulator.config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.profile.commandRegistry = { profile: 'command-registry-v1', guildIds: [] };
+  config.bot.entryPoint = 'src/legacy-session-entry.mjs';
+  config.bot.startCommand = 'node src/legacy-session-entry.mjs';
+  await writeFile(configPath, JSON.stringify(config));
+  // These callback-shape oracles exercise the legacy signed transport, not registry admission.
+  await writeFile(
+    join(directory, 'src/legacy-session-entry.mjs'),
+    `import {createWebhookServer,loadServerOptionsFromEnvironment} from './server.mjs';
+const options=loadServerOptionsFromEnvironment();
+const server=createWebhookServer(options);
+server.listen(options.port,options.host);
+const shutdown=()=>{server.close(()=>{process.exitCode=0;});setTimeout(()=>server.closeAllConnections(),1000).unref();};
+process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
+`,
+  );
   if (callbacks !== undefined) {
     const server = join(directory, 'src/server.mjs');
     const contents = await readFile(server, 'utf8');
-    const insertion = '  const name = interaction.data?.name;';
+    const insertion = '  const reply = interactionReply(interaction);';
     assert.equal(contents.split(insertion).length, 2);
     await writeFile(
       server,
       contents.replace(
         insertion,
-        `${insertion}\n  const callbacks = ${JSON.stringify(callbacks)};\n  if (Object.hasOwn(callbacks, name)) return send(200, callbacks[name]);`,
+        `  const name = interaction.data?.name;\n  const callbacks = ${JSON.stringify(callbacks)};\n  if (Object.hasOwn(callbacks, name)) return send(200, callbacks[name]);\n${insertion}`,
       ),
     );
   }

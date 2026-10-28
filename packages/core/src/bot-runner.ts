@@ -36,6 +36,17 @@ export interface BotProcessOutput {
   readonly atMs: number;
 }
 
+/** Parsed supervisor records; free-form messages are redacted before delivery. */
+export type BotProcessControl =
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'handler'; readonly id: string; readonly phase: 'start' | 'end' }
+  | { readonly kind: 'diagnostic'; readonly code: 'bot-error'; readonly message: string }
+  | { readonly kind: 'adapter-error'; readonly code: 'unsupported'; readonly message: string }
+  | {
+      readonly kind: 'protocol-error';
+      readonly message: 'Invalid or incomplete Bot control record.';
+    };
+
 export interface BotProcessSnapshot {
   readonly status: BotProcessStatus;
   readonly pid?: number;
@@ -52,12 +63,65 @@ export interface BotRunnerOptions {
   readonly maxOutputBytes?: number;
   readonly maxOutputLineBytes?: number;
   readonly onOutput?: (entry: BotProcessOutput) => void;
+  /** Consumes reserved control lines separately from human output when present. */
+  readonly onControl?: (record: BotProcessControl) => void;
 }
+
+export interface BotOutputEvidence {
+  /** UTF-8 bytes received from the decoded stdout/stderr streams. */
+  readonly receivedBytes: number;
+  readonly recordedEntries: number;
+  readonly retainedEntries: number;
+  readonly retainedBytes: number;
+  readonly evictedEntries: number;
+  /** Bytes of redacted entries removed from the retained history. */
+  readonly evictedBytes: number;
+  readonly truncatedLines: number;
+  /** Decoded bytes drained after an oversized line's first truncated entry. */
+  readonly discardedBytes: number;
+  /** Decoded source bytes omitted by string/line limits before entries enter history. */
+  readonly clippedBytes: number;
+  readonly redactionTruncatedEntries: number;
+  readonly observerFailures: number;
+  /** Valid reserved records accepted by the dedicated control path. */
+  readonly controlRecords: number;
+  /** Reserved records rejected, including records discarded after protocol failure. */
+  readonly controlErrors: number;
+  readonly controlObserverFailures: number;
+  /** True only after both readable streams ended and the child closed normally. */
+  readonly outputDrained: boolean;
+  readonly outputDrainErrors: number;
+  readonly complete: boolean;
+}
+
+const OUTPUT_REDACTION_LIMIT_CHARACTERS = 100_000;
+const CONTROL_PREFIX = 'DISRUNNER_';
+const MAX_CONTROL_LINE_BYTES = 4_096;
+const MAX_CONTROL_RECORDS = 100_000;
+const MAX_CONTROL_HANDLERS = 1_000;
+const CONTROL_PROTOCOL_ERROR = 'Invalid or incomplete Bot control record.';
+const OUTPUT_DRAIN_TIMEOUT_MS = 1_000;
+
+interface BotOutputDrain {
+  readonly child: ChildProcessWithoutNullStreams;
+  readonly completed: Promise<void>;
+  readonly resolve: () => void;
+  stdoutEnded: boolean;
+  stderrEnded: boolean;
+  stdoutClosed: boolean;
+  stderrClosed: boolean;
+  childClosed: boolean;
+  failed: boolean;
+  settled: boolean;
+}
+
+class BotOutputDrainError extends Error {}
 
 export class BotRunner {
   readonly #now: () => number;
   readonly #maxOutputEntries: number;
   readonly #onOutput: ((entry: BotProcessOutput) => void) | undefined;
+  readonly #onControl: ((record: BotProcessControl) => void) | undefined;
   readonly #maxOutputBytes: number;
   readonly #maxOutputLineBytes: number;
   readonly #output: BotProcessOutput[] = [];
@@ -67,6 +131,23 @@ export class BotRunner {
       stderr: { text: '', dropping: false },
     };
   #outputBytes = 0;
+  #receivedBytes = 0;
+  #recordedEntries = 0;
+  #evictedEntries = 0;
+  #evictedBytes = 0;
+  #truncatedLines = 0;
+  #discardedBytes = 0;
+  #clippedBytes = 0;
+  #redactionTruncatedEntries = 0;
+  #observerFailures = 0;
+  #controlRecords = 0;
+  #controlErrors = 0;
+  #controlObserverFailures = 0;
+  #controlFailed = false;
+  #controlCallbackEnabled = true;
+  readonly #controlHandlers = new Set<string>();
+  #outputDrain: BotOutputDrain | undefined;
+  #outputDrainErrors = 0;
   #outputCallbackEnabled = true;
   #sensitiveValues: readonly string[] = [];
   #child: ChildProcessWithoutNullStreams | undefined;
@@ -107,6 +188,7 @@ export class BotRunner {
       throw new RangeError('maxOutputLineBytes cannot exceed maxOutputBytes.');
     }
     this.#onOutput = options.onOutput;
+    this.#onControl = options.onControl;
   }
 
   public async start(config: BotProcessConfig): Promise<BotProcessSnapshot> {
@@ -119,7 +201,8 @@ export class BotRunner {
     if (
       this.#child !== undefined ||
       this.#windowsCleanupFailure !== undefined ||
-      (platform() === 'win32' && this.#stopPromise !== undefined) ||
+      this.#stopPromise !== undefined ||
+      (this.#outputDrain !== undefined && !this.#outputDrain.settled) ||
       this.#ownedGroup !== undefined ||
       this.#status === 'starting' ||
       this.#status === 'running'
@@ -163,6 +246,23 @@ export class BotRunner {
     this.#status = 'starting';
     this.#output.length = 0;
     this.#outputBytes = 0;
+    this.#receivedBytes = 0;
+    this.#recordedEntries = 0;
+    this.#evictedEntries = 0;
+    this.#evictedBytes = 0;
+    this.#truncatedLines = 0;
+    this.#discardedBytes = 0;
+    this.#clippedBytes = 0;
+    this.#redactionTruncatedEntries = 0;
+    this.#observerFailures = 0;
+    this.#controlRecords = 0;
+    this.#controlErrors = 0;
+    this.#controlObserverFailures = 0;
+    this.#controlFailed = false;
+    this.#controlCallbackEnabled = true;
+    this.#controlHandlers.clear();
+    this.#outputDrain = undefined;
+    this.#outputDrainErrors = 0;
     this.#outputCallbackEnabled = true;
     this.#pendingOutput.stdout = { text: '', dropping: false };
     this.#pendingOutput.stderr = { text: '', dropping: false };
@@ -171,6 +271,13 @@ export class BotRunner {
     this.#exitCode = undefined;
     this.#signal = undefined;
     this.#sensitiveValues = [
+      ...Object.entries(config.env ?? {})
+        .filter(([key]) =>
+          /(?:^|_)(?:TOKEN|PASSWORD|SECRET|API_KEY|PRIVATE_KEY|ACCESS_KEY|AUTHORIZATION|CREDENTIAL)$/iu.test(
+            key,
+          ),
+        )
+        .flatMap(([, value]) => (typeof value === 'string' && value !== '' ? [value] : [])),
       fakeToken,
       ...(interactionPeerSecret === undefined ? [] : [interactionPeerSecret]),
     ];
@@ -192,6 +299,23 @@ export class BotRunner {
       throw error;
     }
     this.#child = child;
+    let resolveDrain: () => void = () => undefined;
+    const completed = new Promise<void>((resolveCompletion) => {
+      resolveDrain = resolveCompletion;
+    });
+    const outputDrain: BotOutputDrain = {
+      child,
+      completed,
+      resolve: resolveDrain,
+      stdoutEnded: false,
+      stderrEnded: false,
+      stdoutClosed: false,
+      stderrClosed: false,
+      childClosed: false,
+      failed: false,
+      settled: false,
+    };
+    this.#outputDrain = outputDrain;
     if (platform() !== 'win32' && child.pid !== undefined) {
       // detached:true makes the child the leader of a new process group whose PGID is its PID.
       this.#ownedGroup = { pgid: child.pid, leaderStartTime: procStartTime(child.pid) };
@@ -201,16 +325,45 @@ export class BotRunner {
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
-      if (current()) this.#consumeOutput('stdout', chunk);
+      if (current() && !outputDrain.settled) {
+        if (outputDrain.failed) {
+          this.#receivedBytes += Buffer.byteLength(chunk);
+          this.#discardedBytes += Buffer.byteLength(chunk);
+        } else this.#consumeOutput('stdout', chunk);
+      }
     });
     child.stderr.on('data', (chunk: string) => {
-      if (current()) this.#consumeOutput('stderr', chunk);
+      if (current() && !outputDrain.settled) {
+        if (outputDrain.failed) {
+          this.#receivedBytes += Buffer.byteLength(chunk);
+          this.#discardedBytes += Buffer.byteLength(chunk);
+        } else this.#consumeOutput('stderr', chunk);
+      }
     });
     child.stdout.on('end', () => {
-      if (current()) this.#flushOutput('stdout');
+      if (current()) this.#endOutputStream(outputDrain, 'stdout');
     });
     child.stderr.on('end', () => {
-      if (current()) this.#flushOutput('stderr');
+      if (current()) this.#endOutputStream(outputDrain, 'stderr');
+    });
+    for (const stream of ['stdout', 'stderr'] as const) {
+      child[stream].on('error', () => {
+        if (current()) this.#failOutputDrain(outputDrain);
+      });
+      child[stream].on('close', () => {
+        if (!current()) return;
+        if (stream === 'stdout') outputDrain.stdoutClosed = true;
+        else outputDrain.stderrClosed = true;
+        if (!outputDrain[stream === 'stdout' ? 'stdoutEnded' : 'stderrEnded'])
+          this.#failOutputDrain(outputDrain);
+        this.#settleOutputDrain(outputDrain);
+      });
+    }
+    child.once('close', () => {
+      if (!current()) return;
+      outputDrain.childClosed = true;
+      if (!outputDrain.stdoutEnded || !outputDrain.stderrEnded) this.#failOutputDrain(outputDrain);
+      this.#settleOutputDrain(outputDrain);
     });
     const onSpawn = (): void => {
       if (current() && this.#child === child) this.#status = 'running';
@@ -232,8 +385,6 @@ export class BotRunner {
     child.on('error', onError);
     child.once('exit', (code, signal) => {
       if (!current()) return;
-      this.#flushOutput('stdout');
-      this.#flushOutput('stderr');
       this.#exitCode = code;
       this.#signal = signal;
       this.#exitedAtMs = this.#now();
@@ -243,7 +394,14 @@ export class BotRunner {
       // Forget the group as soon as it is confirmed empty; keep it while descendants survive.
       if (this.#stopPromise === undefined) this.#releaseGroupIfEmpty();
     });
-    await waitForSpawn(child);
+    try {
+      await waitForSpawn(child);
+    } catch (error) {
+      // No process was created, but Node still closes its failed spawn's pipe readers
+      // asynchronously. Finish that bounded capture before allowing an immediate retry.
+      if (current() && child.pid === undefined) await this.#waitForOutputDrain();
+      throw error;
+    }
     const spawnedPid = child.pid;
     const group = this.#ownedGroup;
     if (
@@ -265,10 +423,17 @@ export class BotRunner {
     const child = this.#child;
     if (
       this.#windowsCleanupFailure !== undefined &&
-      (child === undefined || this.#windowsCleanupFailure instanceof WindowsTaskkillTimeoutError)
+      (child === undefined ||
+        this.#windowsCleanupFailure instanceof WindowsTaskkillTimeoutError ||
+        this.observeExit() === 'exited')
     )
       throw this.#windowsCleanupFailure;
-    if (child === undefined && this.#ownedGroup === undefined) return this.snapshot();
+    if (
+      child === undefined &&
+      this.#ownedGroup === undefined &&
+      (this.#outputDrain === undefined || this.#outputDrain.settled)
+    )
+      return this.snapshot();
     const operation = this.#stopOwned(child, graceMs);
     this.#stopPromise = operation;
     try {
@@ -276,7 +441,7 @@ export class BotRunner {
       this.#windowsCleanupFailure = undefined;
       return snapshot;
     } catch (error) {
-      if (platform() === 'win32') {
+      if (platform() === 'win32' && !(error instanceof BotOutputDrainError)) {
         this.#windowsCleanupFailure =
           error instanceof Error ? error : new Error('Windows bot cleanup could not be confirmed.');
       }
@@ -303,12 +468,63 @@ export class BotRunner {
     };
   }
 
+  /** Capture completeness for the current run; reading snapshots does not change it. */
+  public evidence(): BotOutputEvidence {
+    const outputDrained =
+      this.#outputDrain === undefined ||
+      (this.#outputDrain.stdoutEnded &&
+        this.#outputDrain.stderrEnded &&
+        this.#outputDrain.childClosed &&
+        !this.#outputDrain.failed);
+    return {
+      receivedBytes: this.#receivedBytes,
+      recordedEntries: this.#recordedEntries,
+      retainedEntries: this.#output.length,
+      retainedBytes: this.#outputBytes,
+      evictedEntries: this.#evictedEntries,
+      evictedBytes: this.#evictedBytes,
+      truncatedLines: this.#truncatedLines,
+      discardedBytes: this.#discardedBytes,
+      clippedBytes: this.#clippedBytes,
+      redactionTruncatedEntries: this.#redactionTruncatedEntries,
+      observerFailures: this.#observerFailures,
+      controlRecords: this.#controlRecords,
+      controlErrors: this.#controlErrors,
+      controlObserverFailures: this.#controlObserverFailures,
+      outputDrained,
+      outputDrainErrors: this.#outputDrainErrors,
+      complete:
+        this.#evictedEntries === 0 &&
+        this.#truncatedLines === 0 &&
+        this.#redactionTruncatedEntries === 0 &&
+        this.#observerFailures === 0 &&
+        this.#controlErrors === 0 &&
+        this.#controlObserverFailures === 0 &&
+        this.#outputDrainErrors === 0 &&
+        (this.#exitedAtMs === undefined || outputDrained) &&
+        !(
+          this.#onControl !== undefined &&
+          this.#outputDrain?.stdoutEnded &&
+          this.#exitedAtMs === undefined
+        ),
+    };
+  }
+
   /** Non-mutating supervision observation; snapshot stays event-driven until Node reaps the child. */
   public observeExit(): 'alive' | 'exited' | 'unknown' {
     const child = this.#child;
     if (child === undefined) return this.#exitedAtMs === undefined ? 'unknown' : 'exited';
     if (child.exitCode !== null || child.signalCode !== null) return 'exited';
-    if (process.platform !== 'linux' || child.pid === undefined) return 'unknown';
+    if (child.pid === undefined) return 'unknown';
+    if (platform() !== 'linux') {
+      try {
+        process.kill(child.pid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return 'exited';
+      }
+      // An existing PID does not establish that it still identifies our child.
+      return 'unknown';
+    }
     return directChildExitObservation(child.pid, this.#ownedGroup?.leaderStartTime);
   }
 
@@ -333,10 +549,11 @@ export class BotRunner {
         child === undefined ||
         this.#child !== child ||
         child.exitCode !== null ||
-        child.signalCode !== null
+        child.signalCode !== null ||
+        this.observeExit() === 'exited'
       )
         throw error;
-      await this.#signalOwned(child, true, forceWaitMs);
+      await this.#signalOwned(child, true, forceWaitMs, error);
       forced = true;
     }
     if (!(await this.#waitForOwnedTermination(child, forced ? forceWaitMs : graceMs))) {
@@ -355,17 +572,99 @@ export class BotRunner {
       this.#ownedGroup = undefined;
       if (this.#child === child) this.#child = undefined;
     }
+    await this.#waitForOutputDrain();
     return this.snapshot();
+  }
+
+  #endOutputStream(output: BotOutputDrain, stream: BotProcessOutput['stream']): void {
+    const key = stream === 'stdout' ? 'stdoutEnded' : 'stderrEnded';
+    if (output[key] || output.settled) return;
+    output[key] = true;
+    if (!output.failed) {
+      this.#flushOutput(stream);
+      if (
+        stream === 'stdout' &&
+        this.#onControl !== undefined &&
+        this.#controlHandlers.size > 0 &&
+        !this.#controlFailed
+      )
+        this.#rejectControl();
+    }
+    this.#settleOutputDrain(output);
+  }
+
+  #settleOutputDrain(output: BotOutputDrain): void {
+    if (
+      !output.settled &&
+      ((output.childClosed && output.stdoutEnded && output.stderrEnded) ||
+        (output.failed && output.stdoutClosed && output.stderrClosed))
+    ) {
+      output.settled = true;
+      output.resolve();
+    }
+  }
+
+  #failOutputDrain(output: BotOutputDrain): void {
+    if (output.settled) return;
+    if (!output.failed) {
+      output.failed = true;
+      this.#outputDrainErrors += 1;
+      for (const stream of ['stdout', 'stderr'] as const) {
+        this.#clippedBytes += Buffer.byteLength(this.#pendingOutput[stream].text);
+        this.#pendingOutput[stream] = { text: '', dropping: false };
+      }
+      if (this.#onControl !== undefined) this.#rejectControl();
+    }
+    output.child.stdout.destroy();
+    output.child.stderr.destroy();
+    this.#settleOutputDrain(output);
+  }
+
+  async #waitForOutputDrain(): Promise<void> {
+    const output = this.#outputDrain;
+    if (output === undefined || output.settled) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        output.completed,
+        new Promise<void>((resolveTimeout) => {
+          timer = setTimeout(() => {
+            this.#failOutputDrain(output);
+            resolveTimeout();
+          }, OUTPUT_DRAIN_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!output.settled)
+      await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+    if (!output.settled)
+      throw new BotOutputDrainError(
+        'Bot output readers could not be closed; cleanup remains pending.',
+      );
   }
 
   async #signalOwned(
     child: ChildProcessWithoutNullStreams | undefined,
     force: boolean,
     commandTimeoutMs: number,
+    previousWindowsFailure?: Error,
   ): Promise<void> {
     if (platform() === 'win32') {
-      if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null)
-        await runTaskkill(child.pid, force, commandTimeoutMs);
+      const failure = previousWindowsFailure ?? this.#windowsCleanupFailure;
+      if (
+        child?.pid === undefined ||
+        child.exitCode !== null ||
+        child.signalCode !== null ||
+        this.observeExit() === 'exited'
+      ) {
+        // Recheck at the signalling boundary: an earlier probe can become stale.
+        // A departed child cannot establish success after a failed tree helper.
+        if (failure !== undefined) throw new Error(failure.message, { cause: failure });
+        return;
+      }
+      await runTaskkill(child.pid, force, commandTimeoutMs);
       return;
     }
     const group = this.#ownedGroup;
@@ -390,8 +689,9 @@ export class BotRunner {
     const deadline = Date.now() + timeoutMs;
     if (child !== undefined && !(await waitForExit(child, timeoutMs))) return false;
     const group = this.#ownedGroup;
-    // Windows: a successful taskkill /T and direct-child exit are required. These observations
-    // are not independent proof of descendant termination; real Windows qualification is pending.
+    // Windows waits for the original ChildProcess exit even when a non-destructive probe
+    // found its PID already absent. Never send taskkill to that departed PID.
+    // Direct-child exit and taskkill /T are not independent descendant-termination evidence.
     if (platform() === 'win32' || group === undefined) return true;
     for (;;) {
       if (ownedGroupState(group) === 'empty') return true;
@@ -407,23 +707,36 @@ export class BotRunner {
   }
 
   #consumeOutput(stream: BotProcessOutput['stream'], raw: string): void {
+    this.#receivedBytes += Buffer.byteLength(raw);
     const pending = this.#pendingOutput[stream];
     let input = raw;
     while (input.length > 0) {
       const newline = input.indexOf('\n');
       const part = newline < 0 ? input : input.slice(0, newline + 1);
       input = newline < 0 ? '' : input.slice(newline + 1);
+      if (pending.dropping) this.#discardedBytes += Buffer.byteLength(part);
       if (!pending.dropping) pending.text += part;
-      if (!pending.dropping && Buffer.byteLength(pending.text) > this.#maxOutputLineBytes) {
-        const redacted = redactString(pending.text, { sensitiveValues: this.#sensitiveValues });
-        this.#recordOutput(
-          stream,
-          `${truncateUtf8(redacted, this.#maxOutputLineBytes)}…[TRUNCATED]\n`,
-        );
+      const control = this.#onControl !== undefined && pending.text.startsWith(CONTROL_PREFIX);
+      const possibleControlPrefix =
+        this.#onControl !== undefined && newline < 0 && CONTROL_PREFIX.startsWith(pending.text);
+      const lineLimit = control ? MAX_CONTROL_LINE_BYTES : this.#maxOutputLineBytes;
+      if (
+        !pending.dropping &&
+        !possibleControlPrefix &&
+        Buffer.byteLength(pending.text) > lineLimit
+      ) {
+        this.#truncatedLines += 1;
+        // A later chunk may complete a secret already present in this prefix.
+        this.#clippedBytes += Buffer.byteLength(pending.text);
+        if (control) this.#rejectControl();
+        else this.#recordOutput(stream, '[TRUNCATED]\n', true);
         pending.text = '';
         pending.dropping = newline < 0;
       } else if (newline >= 0) {
-        if (!pending.dropping) this.#recordOutput(stream, pending.text);
+        if (!pending.dropping) {
+          if (control) this.#consumeControl(stream, pending.text);
+          else this.#recordOutput(stream, pending.text);
+        }
         pending.text = '';
         pending.dropping = false;
       }
@@ -432,19 +745,89 @@ export class BotRunner {
 
   #flushOutput(stream: BotProcessOutput['stream']): void {
     const pending = this.#pendingOutput[stream];
-    if (pending.text !== '') this.#recordOutput(stream, pending.text);
+    if (pending.text !== '') {
+      if (this.#onControl !== undefined && pending.text.startsWith(CONTROL_PREFIX))
+        this.#rejectControl();
+      else this.#recordOutput(stream, pending.text);
+    }
     pending.text = '';
     pending.dropping = false;
   }
 
-  #recordOutput(stream: BotProcessOutput['stream'], raw: string): void {
-    const text = redactString(raw, { sensitiveValues: this.#sensitiveValues });
+  #consumeControl(stream: BotProcessOutput['stream'], raw: string): void {
+    if (this.#controlFailed || stream !== 'stdout' || this.#controlRecords >= MAX_CONTROL_RECORDS) {
+      this.#rejectControl();
+      return;
+    }
+    let record: Exclude<BotProcessControl, { kind: 'protocol-error' }>;
+    try {
+      record = parseControlRecord(raw);
+      if (record.kind === 'handler') {
+        if (record.phase === 'start') {
+          if (
+            this.#controlHandlers.size >= MAX_CONTROL_HANDLERS ||
+            this.#controlHandlers.has(record.id)
+          )
+            throw new Error(CONTROL_PROTOCOL_ERROR);
+          this.#controlHandlers.add(record.id);
+        } else if (!this.#controlHandlers.delete(record.id)) {
+          throw new Error(CONTROL_PROTOCOL_ERROR);
+        }
+      } else if (record.kind === 'diagnostic' || record.kind === 'adapter-error') {
+        record = { ...record, message: this.#redactOutput(record.message) };
+      }
+    } catch {
+      this.#rejectControl();
+      return;
+    }
+    this.#controlRecords += 1;
+    this.#notifyControl(record);
+  }
+
+  #rejectControl(): void {
+    this.#controlErrors += 1;
+    if (this.#controlFailed) return;
+    this.#controlFailed = true;
+    this.#notifyControl({ kind: 'protocol-error', message: CONTROL_PROTOCOL_ERROR });
+  }
+
+  #notifyControl(record: BotProcessControl): void {
+    if (!this.#controlCallbackEnabled || this.#onControl === undefined) return;
+    try {
+      this.#onControl(Object.freeze(record));
+    } catch {
+      this.#controlObserverFailures += 1;
+      this.#controlFailed = true;
+      this.#controlCallbackEnabled = false;
+      this.#recordOutput('stderr', '[DisRunner] Control observer threw and was disabled.\n');
+    }
+  }
+
+  #redactOutput(raw: string): string {
+    if (raw.length > OUTPUT_REDACTION_LIMIT_CHARACTERS) {
+      this.#redactionTruncatedEntries += 1;
+      this.#clippedBytes += Buffer.byteLength(raw.slice(OUTPUT_REDACTION_LIMIT_CHARACTERS));
+    }
+    const redacted = redactString(raw, {
+      sensitiveValues: this.#sensitiveValues,
+      maxStringLength: OUTPUT_REDACTION_LIMIT_CHARACTERS,
+    });
+    if (redacted === '[REDACTION_SENSITIVE_VALUES_LIMIT]') {
+      if (raw.length <= OUTPUT_REDACTION_LIMIT_CHARACTERS) this.#redactionTruncatedEntries += 1;
+      this.#clippedBytes += Buffer.byteLength(raw.slice(0, OUTPUT_REDACTION_LIMIT_CHARACTERS));
+    }
+    return redacted;
+  }
+
+  #recordOutput(stream: BotProcessOutput['stream'], raw: string, sanitized = false): void {
+    const text = sanitized ? raw : this.#redactOutput(raw);
     const entry: BotProcessOutput = { stream, text, atMs: this.#now() };
     this.#appendOutput(entry);
     if (!this.#outputCallbackEnabled || this.#onOutput === undefined) return;
     try {
       this.#onOutput({ ...entry });
     } catch {
+      this.#observerFailures += 1;
       this.#outputCallbackEnabled = false;
       this.#appendOutput({
         stream: 'stderr',
@@ -455,6 +838,7 @@ export class BotRunner {
   }
 
   #appendOutput(entry: BotProcessOutput): void {
+    this.#recordedEntries += 1;
     const entryBytes = Buffer.byteLength(entry.text);
     this.#output.push(entry);
     this.#outputBytes += entryBytes;
@@ -463,9 +847,68 @@ export class BotRunner {
       (this.#output.length > this.#maxOutputEntries || this.#outputBytes > this.#maxOutputBytes)
     ) {
       const removed = this.#output.shift();
-      if (removed !== undefined) this.#outputBytes -= Buffer.byteLength(removed.text);
+      if (removed !== undefined) {
+        const removedBytes = Buffer.byteLength(removed.text);
+        this.#outputBytes -= removedBytes;
+        this.#evictedEntries += 1;
+        this.#evictedBytes += removedBytes;
+      }
     }
   }
+}
+
+function parseControlRecord(raw: string): Exclude<BotProcessControl, { kind: 'protocol-error' }> {
+  if (!raw.endsWith('\n') || Buffer.byteLength(raw) > MAX_CONTROL_LINE_BYTES)
+    throw new Error(CONTROL_PROTOCOL_ERROR);
+  const line = raw.endsWith('\r\n') ? raw.slice(0, -2) : raw.slice(0, -1);
+  if (line === 'DISRUNNER_ADAPTER_READY') return { kind: 'ready' };
+  const separator = line.indexOf(' ');
+  if (separator < 0) throw new Error(CONTROL_PROTOCOL_ERROR);
+  const prefix = line.slice(0, separator);
+  const payload = line.slice(separator + 1);
+  if (!['DISRUNNER_HANDLER', 'DISRUNNER_DIAGNOSTIC', 'DISRUNNER_ADAPTER_ERROR'].includes(prefix))
+    throw new Error(CONTROL_PROTOCOL_ERROR);
+  const value: unknown = JSON.parse(payload);
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    throw new Error(CONTROL_PROTOCOL_ERROR);
+  const object = value as Record<string, unknown>;
+  const keys = Object.keys(object).sort();
+  // These are flat two-string records. Every extra key, including a duplicate key erased by
+  // JSON.parse, introduces at least one additional string token in the original JSON.
+  if (payload.match(/"(?:\\.|[^"\\])*"/gu)?.length !== 4) throw new Error(CONTROL_PROTOCOL_ERROR);
+  if (prefix === 'DISRUNNER_HANDLER') {
+    if (
+      keys.join(',') !== 'id,phase' ||
+      typeof object['id'] !== 'string' ||
+      !isControlHandlerId(object['id']) ||
+      (object['phase'] !== 'start' && object['phase'] !== 'end')
+    )
+      throw new Error(CONTROL_PROTOCOL_ERROR);
+    return { kind: 'handler', id: object['id'], phase: object['phase'] };
+  }
+  if (
+    keys.join(',') !== 'code,message' ||
+    typeof object['message'] !== 'string' ||
+    object['message'].trim() === ''
+  )
+    throw new Error(CONTROL_PROTOCOL_ERROR);
+  if (prefix === 'DISRUNNER_DIAGNOSTIC' && object['code'] === 'bot-error')
+    return { kind: 'diagnostic', code: 'bot-error', message: object['message'] };
+  if (prefix === 'DISRUNNER_ADAPTER_ERROR' && object['code'] === 'unsupported')
+    return { kind: 'adapter-error', code: 'unsupported', message: object['message'] };
+  throw new Error(CONTROL_PROTOCOL_ERROR);
+}
+
+function isControlHandlerId(id: string): boolean {
+  const match =
+    /^(?:(?:js|py)-([1-9][0-9]{0,9})-(0|[1-9][0-9]{0,19})|raw-([1-9][0-9]{0,19}))$/u.exec(id);
+  if (match === null) return false;
+  const counter = match[3] ?? match[2];
+  return (
+    counter !== undefined &&
+    BigInt(counter) <= 0xffff_ffff_ffff_ffffn &&
+    (match[1] === undefined || BigInt(match[1]) <= 0xffff_ffffn)
+  );
 }
 
 export function sanitizeBotEnvironment(
@@ -659,15 +1102,6 @@ function boundedEnvironmentEntries(
     output.push([name, entryValue]);
   }
   return output;
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
-  const buffer = Buffer.from(value);
-  if (buffer.byteLength <= maxBytes) return value;
-  return buffer
-    .subarray(0, maxBytes)
-    .toString('utf8')
-    .replace(/\uFFFD$/, '');
 }
 
 function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {

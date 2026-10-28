@@ -1,3 +1,10 @@
+import { ResourceDomainService } from './resource-domain.js';
+import { FaultPolicy } from './fault-policy.js';
+import {
+  LocalAttachmentStore,
+  parseMultipartBody,
+  type PreparedAttachments,
+} from './local-attachments.js';
 import { ApplicationCommandRegistry } from './application-command-registry.js';
 import {
   canonicalCommandId,
@@ -38,6 +45,7 @@ export type {
 } from './bootstrap-profile.js';
 
 export interface RestEmulatorOptions {
+  readonly faultPolicy?: FaultPolicy;
   readonly commandRegistry?: CommandRegistryProfile;
   readonly ordinaryMessagePermissions?: OrdinaryMessagePermissionProfile;
   readonly state: VirtualState;
@@ -65,6 +73,9 @@ export interface RestEmulatorAddress {
 }
 
 export class LocalRestEmulator {
+  readonly #resources: ResourceDomainService;
+  readonly #faultPolicy: FaultPolicy;
+  readonly #attachments: LocalAttachmentStore;
   readonly #state: VirtualState;
   readonly #commands: ApplicationCommandRegistry | undefined;
   readonly #messages: MessageDomainService;
@@ -79,9 +90,18 @@ export class LocalRestEmulator {
   #address: RestEmulatorAddress | undefined;
 
   public constructor(options: RestEmulatorOptions) {
+    this.#faultPolicy = options.faultPolicy ?? new FaultPolicy();
+    this.#attachments = new LocalAttachmentStore({
+      baseUrl: () => this.#address?.baseUrl ?? 'http://127.0.0.1:1',
+    });
     const bootstrap = options.bootstrap;
     this.#bootstrap = bootstrap === undefined ? undefined : parseRestBootstrapProfile(bootstrap);
     this.#state = options.state;
+    this.#resources = new ResourceDomainService({
+      state: options.state,
+      gateway: options.gateway,
+      enforcePermissions: options.commandRegistry?.profile === 'command-registry-v2',
+    });
     if (options.commandRegistry !== undefined && this.#bootstrap === undefined)
       throw commandError('payload');
     this.#commands =
@@ -94,6 +114,7 @@ export class LocalRestEmulator {
           );
     this.#messages = new MessageDomainService({
       state: options.state,
+      sdkCompatibility: options.commandRegistry?.profile === 'command-registry-v2',
       ...(options.ordinaryMessagePermissions === undefined
         ? {}
         : { ordinaryMessagePermissions: options.ordinaryMessagePermissions }),
@@ -108,6 +129,10 @@ export class LocalRestEmulator {
     this.#gatewayUrl = assertOfflineGatewayUrl(options.gatewayUrl ?? 'ws://127.0.0.1/gateway').href;
     this.#maxBodyBytes = boundedSizeLimit(options.maxBodyBytes ?? 1_048_576, 'maxBodyBytes');
     this.#trace = options.trace;
+  }
+
+  public localAttachments(): LocalAttachmentStore {
+    return this.#attachments;
   }
 
   public messageEvidence(): ReturnType<MessageDomainService['evidence']> {
@@ -164,6 +189,8 @@ export class LocalRestEmulator {
 
   public async stop(): Promise<void> {
     const server = this.#server;
+    this.#faultPolicy.clear();
+    this.#attachments.clear();
     if (server === undefined) return;
     await new Promise<void>((resolvePromise, reject) => {
       server.close((error) => (error === undefined ? resolvePromise() : reject(error)));
@@ -175,9 +202,26 @@ export class LocalRestEmulator {
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     let span: SpanHandle | undefined;
+    let upload: PreparedAttachments | undefined;
+    let spanFinished = false;
+    const finishSpan = (
+      status: 'ok' | 'warning' | 'error',
+      metadata: Readonly<Record<string, unknown>>,
+    ): void => {
+      if (span === undefined || spanFinished) return;
+      spanFinished = true;
+      this.#trace?.end(span, status, metadata);
+    };
     try {
       this.#validateLocalRequest(request);
       const method = request.method?.toUpperCase() ?? 'GET';
+      const requestedPath = (request.url ?? '/').split('?')[0]!;
+      if (
+        this.#commands?.profile === 'command-registry-v2' &&
+        /^\/api\/v[0-9]+(?:\/|$)/u.test(requestedPath) &&
+        !/^\/api\/v10(?:\/|$)/u.test(requestedPath)
+      )
+        throw new DiscordApiError(501, 0, 'Unsupported API version. Use v10.');
       if (isCommandRegistryTarget(request.url ?? '/')) {
         span = this.#trace?.start('rest', 'application-command-registry', {
           path: '/applications/:applicationId/commands',
@@ -186,13 +230,16 @@ export class LocalRestEmulator {
           throw new DiscordApiError(401, 0, '401: Unauthorized');
         await this.#commandRoute(method, request, response);
         if (span !== undefined)
-          this.#trace?.end(span, response.statusCode === 429 ? 'warning' : 'ok', {
-            status: response.statusCode,
-          });
+          finishSpan(
+            response.statusCode === 429 ? 'warning' : response.statusCode >= 400 ? 'error' : 'ok',
+            {
+              status: response.statusCode,
+            },
+          );
         return;
       }
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-      const routePath = stripApiVersion(url.pathname);
+      const routePath = stripApiVersion(url.pathname.replace(/%40original$/iu, '@original'));
       const routeTemplate = traceRouteTemplate(routePath);
       span = this.#trace?.start('rest', `${method} ${routeTemplate}`, {
         method,
@@ -211,16 +258,66 @@ export class LocalRestEmulator {
       // routes share the already-authenticated simulator identity; token-authenticated
       // interaction/webhook routes use a fixed identity plus their route major parameters.
       const identity = tokenAuthenticated ? 'interaction-webhook' : 'authenticated-bot';
-      const rateLimit = this.#rateLimits.acquire({ method, path: rateLimitPath, identity });
+      const rateLimit = this.#rateLimits.acquire({
+        method,
+        path: rateLimitPath,
+        identity,
+        ...(tokenAuthenticated && this.#commands?.profile === 'command-registry-v2'
+          ? { exemptGlobal: true }
+          : {}),
+      });
       if (!rateLimit.allowed) {
         sendJson(response, 429, rateLimit.body, rateLimit.headers);
-        if (span !== undefined) this.#trace?.end(span, 'warning', { status: 429 });
+        if (span !== undefined) finishSpan('warning', { status: 429 });
         return;
       }
-      const body = await readJsonBody(request, this.#maxBodyBytes);
+      if (await this.#applyFault(method, routePath, response)) return;
+      const attachmentRoute = /^\/attachments\/([1-9][0-9]{0,19})$/.exec(routePath);
+      if (attachmentRoute && method === 'GET') {
+        const retained = this.#attachments.get(attachmentRoute[1]!);
+        if (
+          !retained ||
+          (!this.#state
+            .list('message')
+            .some(
+              (m) =>
+                Array.isArray(m['attachments']) &&
+                records(m['attachments']).some((a) => a['id'] === attachmentRoute[1]) &&
+                (m['visibility'] === 'channel' ||
+                  (isRecord(m['author']) && m['author']['id'] === this.#bootstrap?.user.id)),
+            ) &&
+            !this.#state.get('attachment', attachmentRoute[1]!))
+        )
+          throw new DiscordApiError(404, 10008, 'Unknown attachment.');
+        response.writeHead(200, {
+          'Content-Type': retained.metadata.content_type,
+          'Content-Length': retained.data.length,
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        response.end(retained.data);
+        return;
+      }
+      let body: unknown;
+      if (request.headers['content-type']?.startsWith('multipart/form-data')) {
+        if (this.#commands?.profile !== 'command-registry-v2') throw invalidMessagePayload();
+        const parsed = parseMultipartBody(
+          request.headers['content-type'],
+          await readRawBody(request, 8 * 1_048_576),
+        );
+        upload = this.#attachments.prepare(parsed.files);
+        body = this.#resolveAttachments(parsed.payload, upload, routePath);
+      } else {
+        body = await readJsonBody(request, this.#maxBodyBytes);
+        if (isRecord(body)) {
+          upload = this.#attachments.prepare([]);
+          body = this.#resolveAttachments(body, upload, routePath);
+        }
+      }
       this.#route(method, routePath, url, body, response, rateLimit);
+      upload?.commit();
       if (span !== undefined)
-        this.#trace?.end(span, 'ok', {
+        finishSpan('ok', {
           status: response.statusCode,
           ...(response.hasHeader('X-DisRunner-Event-Id')
             ? {
@@ -231,6 +328,7 @@ export class LocalRestEmulator {
             : {}),
         });
     } catch (error) {
+      upload?.rollback();
       if (isCommandRegistryTarget(request.url ?? '/')) {
         if (!response.headersSent) response.setHeader('Connection', 'close');
         request.resume();
@@ -238,8 +336,107 @@ export class LocalRestEmulator {
       const apiError = normalizeError(error);
       sendJson(response, apiError.status, apiError.toJSON());
       if (span !== undefined)
-        this.#trace?.end(span, 'error', { status: apiError.status, error: apiError.message });
+        finishSpan('error', { status: apiError.status, error: apiError.message });
+    } finally {
+      finishSpan(
+        response.destroyed
+          ? 'error'
+          : response.statusCode >= 500
+            ? 'error'
+            : response.statusCode >= 400
+              ? 'warning'
+              : 'ok',
+        { status: response.statusCode },
+      );
     }
+  }
+
+  async #applyFault(method: string, route: string, response: ServerResponse): Promise<boolean> {
+    const effect = await this.#faultPolicy.applyHttp({ method, route });
+    if (!effect || effect.kind === 'delay') return false;
+    if (effect.kind === 'timeout') {
+      response.destroy();
+      return true;
+    }
+    if (effect.kind !== 'http-status') return false;
+    sendJson(
+      response,
+      effect.status,
+      {
+        message: 'Injected local HTTP fault.',
+        retry_after: effect.retryAfterMs / 1000,
+        global: false,
+      },
+      effect.status === 429
+        ? {
+            'Retry-After': String(effect.retryAfterMs / 1000),
+            'X-RateLimit-Reset-After': String(effect.retryAfterMs / 1000),
+            'X-RateLimit-Scope': 'shared',
+          }
+        : {},
+    );
+    return true;
+  }
+  #resolveAttachments(
+    payload: Record<string, unknown>,
+    upload: PreparedAttachments,
+    route: string,
+  ): Record<string, unknown> {
+    const callback = route.startsWith('/interactions/');
+    const target = callback ? payload['data'] : payload;
+    if (!isRecord(target)) {
+      if (upload.attachments.length) throw invalidMessagePayload();
+      return payload;
+    }
+    const declared = target['attachments'];
+    if (declared === undefined && upload.attachments.length === 0) return payload;
+    if (declared !== undefined && !Array.isArray(declared)) throw invalidMessagePayload();
+    let owner: Readonly<Record<string, unknown>> | undefined;
+    const channelItem = /^\/channels\/(\d+)\/messages\/(\d+)$/.exec(route);
+    if (channelItem) {
+      const message = this.#state.get('message', channelItem[2]!);
+      if (message?.['channel_id'] === channelItem[1]) owner = message;
+    }
+    const webhookItem = /^\/webhooks\/\d+\/([^/]+)\/messages\/(@original|\d+)$/.exec(route);
+    if (webhookItem) {
+      const interaction = this.#interactions.getByToken(decodeRouteToken(webhookItem[1]!));
+      if (interaction)
+        owner =
+          webhookItem[2] === '@original'
+            ? this.#interactions.getOriginalMessage(interaction.id)
+            : this.#interactions.getFollowupMessage(interaction.id, webhookItem[2]!);
+    }
+    const descriptors = declared ?? upload.attachments;
+    const attachments = (descriptors as unknown[]).map((value) => {
+      if (!isRecord(value) || (typeof value['id'] !== 'string' && typeof value['id'] !== 'number'))
+        throw invalidMessagePayload();
+      if (typeof value['id'] === 'number' && !Number.isSafeInteger(value['id']))
+        throw invalidMessagePayload();
+      const id = String(value['id']);
+      if (!/^(?:0|[1-9][0-9]{0,19})$/u.test(id)) throw invalidMessagePayload();
+      const prepared = upload.byUploadId[id] ?? upload.attachments.find((a) => a.id === id);
+      if (prepared)
+        return {
+          ...prepared,
+          ...(typeof value['description'] === 'string'
+            ? { description: value['description'] }
+            : {}),
+        };
+      const old = this.#attachments.get(id);
+      if (!old || !owner || !records(owner['attachments']).some((file) => file['id'] === id))
+        throw invalidMessagePayload();
+      return {
+        ...old.metadata,
+        ...(typeof value['description'] === 'string' ? { description: value['description'] } : {}),
+      };
+    });
+    if (
+      attachments.length > 10 ||
+      new Set(attachments.map((a) => a.id)).size !== attachments.length
+    )
+      throw invalidMessagePayload();
+    const replacement = { ...target, attachments };
+    return callback ? { ...payload, data: replacement } : replacement;
   }
 
   async #commandRoute(
@@ -258,6 +455,7 @@ export class LocalRestEmulator {
     )
       throw new DiscordApiError(501, 0, 'Unsupported application command route.');
     this.#commands.verifyScope(route.app, route.guild);
+    if (await this.#applyFault(method, route.collection, response)) return;
     if (route.id === undefined) this.#commands.list(route.app, route.guild);
     else this.#commands.get(route.app, route.guild, route.id);
     const rate = this.#rateLimits.acquire({
@@ -281,8 +479,9 @@ export class LocalRestEmulator {
         throw commandError('payload');
       if ((request.url!.split('?')[1] ?? '') !== 'with_localizations=' + query[0]![1])
         throw commandError('payload');
-      if (query[0]![1] === 'true') throw commandError('feature');
-      if (query[0]![1] !== 'false') throw commandError('payload');
+      if (query[0]![1] === 'true' && this.#commands.profile !== 'command-registry-v2')
+        throw commandError('feature');
+      if (!['true', 'false'].includes(query[0]![1])) throw commandError('payload');
     }
     const body =
       method === 'GET' || method === 'DELETE'
@@ -361,9 +560,86 @@ export class LocalRestEmulator {
       return;
     }
 
+    if (this.#commands?.profile === 'command-registry-v2') {
+      const roles = /^\/guilds\/(\d+)\/roles(?:\/(\d+))?$/.exec(path);
+      const members = /^\/guilds\/(\d+)\/members(?:\/(\d+|@me))?$/.exec(path);
+      if (roles || members) {
+        const match = roles ?? members!;
+        const kind = roles ? 'role' : 'member';
+        const guildId = match[1]!;
+        const id = match[2] === '@me' ? this.#bootstrap!.user.id : match[2];
+        if (method === 'GET') {
+          sendJson(
+            response,
+            200,
+            id ? this.#resources.get(kind, id, guildId) : this.#resources.list(kind, guildId),
+            rateLimit.headers,
+          );
+          return;
+        }
+        if (method === 'POST' && kind === 'role' && !id) {
+          const saved = this.#resources.execute({
+            kind,
+            operation: 'create',
+            guildId,
+            data: requireObjectBody(body),
+          })!;
+          sendJson(response, 200, this.#resources.get(kind, saved.id, guildId), rateLimit.headers);
+          return;
+        }
+        if (method === 'PATCH' && id) {
+          this.#resources.execute({
+            kind,
+            operation: 'update',
+            guildId,
+            resourceId: id,
+            data: requireObjectBody(body),
+          });
+          sendJson(response, 200, this.#resources.get(kind, id, guildId), rateLimit.headers);
+          return;
+        }
+        if (method === 'DELETE' && kind === 'role' && id) {
+          this.#resources.execute({ kind, operation: 'delete', guildId, resourceId: id });
+          sendEmpty(response, 204, rateLimit.headers);
+          return;
+        }
+        throw new DiscordApiError(501, 0, 'Unsupported fixture resource operation.');
+      }
+    }
+
     const channelMatch = /^\/channels\/(\d+)$/.exec(path);
     if (channelMatch !== null) {
       const channelId = channelMatch[1] as string;
+      if (this.#commands?.profile === 'command-registry-v2') {
+        const channel = this.#state.require('channel', channelId);
+        if (method === 'GET') {
+          sendJson(response, 200, this.#resources.get('channel', channelId), rateLimit.headers);
+          return;
+        }
+        if (typeof channel['guild_id'] !== 'string')
+          throw new DiscordApiError(501, 0, 'Direct message channel mutations are unsupported.');
+        if (method === 'PATCH') {
+          this.#resources.execute({
+            kind: 'channel',
+            operation: 'update',
+            guildId: channel['guild_id'],
+            resourceId: channelId,
+            data: requireObjectBody(body),
+          });
+          sendJson(response, 200, this.#resources.get('channel', channelId), rateLimit.headers);
+          return;
+        }
+        if (method === 'DELETE') {
+          this.#resources.execute({
+            kind: 'channel',
+            operation: 'delete',
+            guildId: channel['guild_id'],
+            resourceId: channelId,
+          });
+          sendEmpty(response, 204, rateLimit.headers);
+          return;
+        }
+      }
       if (method === 'GET') {
         sendJson(
           response,
@@ -490,6 +766,10 @@ export class LocalRestEmulator {
 
     const guildMatch = /^\/guilds\/(\d+)$/.exec(path);
     if (guildMatch !== null && method === 'GET') {
+      if (this.#commands?.profile === 'command-registry-v2') {
+        sendJson(response, 200, this.#resources.get('guild', guildMatch[1]!), rateLimit.headers);
+        return;
+      }
       sendJson(
         response,
         200,
@@ -502,6 +782,22 @@ export class LocalRestEmulator {
     if (guildChannelsMatch !== null) {
       const guildId = guildChannelsMatch[1] as string;
       this.#state.require('guild', guildId);
+      if (this.#commands?.profile === 'command-registry-v2') {
+        if (method === 'GET') {
+          sendJson(response, 200, this.#resources.list('channel', guildId), rateLimit.headers);
+          return;
+        }
+        if (method === 'POST') {
+          const saved = this.#resources.execute({
+            kind: 'channel',
+            operation: 'create',
+            guildId,
+            data: requireObjectBody(body),
+          })!;
+          sendJson(response, 201, this.#resources.get('channel', saved.id), rateLimit.headers);
+          return;
+        }
+      }
       if (method === 'GET') {
         sendJson(
           response,
@@ -548,7 +844,16 @@ export class LocalRestEmulator {
       const interaction = this.#interactions.getByToken(token);
       if (interaction === undefined) throw new DiscordApiError(404, 10015, 'Unknown webhook.');
       if (isAuthoritative(interaction)) {
-        requireNoMessageQuery(url);
+        if (interaction.messageProfile !== 'interactions-v1') requireNoMessageQuery(url);
+        else if (
+          [...url.searchParams].some(
+            ([key, value]) =>
+              !['wait', 'with_components'].includes(key) ||
+              !['true', 'false', '1', '0'].includes(value),
+          ) ||
+          new Set([...url.searchParams.keys()]).size !== [...url.searchParams].length
+        )
+          throw invalidMessagePayload();
         const result = this.#interactions.executeMessage({
           operation: 'create-followup',
           interactionId: interaction.id,
@@ -601,7 +906,7 @@ export class LocalRestEmulator {
     response: ServerResponse,
     rateLimit: RateLimitResult,
   ): void {
-    const withResponse = parseWithResponse(url);
+    const withResponse = parseWithResponse(url, interaction.messageProfile === 'interactions-v1');
     const payload = requireMessageBody(requireJsonBody(body));
     if (Object.keys(payload).some((key) => key !== 'type' && key !== 'data'))
       throw invalidMessagePayload();
@@ -629,7 +934,14 @@ export class LocalRestEmulator {
       {
         interaction: {
           id: interaction.id,
-          type: 2,
+          type:
+            interaction.type === 'component'
+              ? 3
+              : interaction.type === 'autocomplete'
+                ? 4
+                : interaction.type === 'modal-submit'
+                  ? 5
+                  : 2,
           ...(message === null
             ? {}
             : {
@@ -792,12 +1104,18 @@ function isTokenAuthenticatedRoute(method: string, path: string): boolean {
 }
 
 function isAuthoritative(interaction: SimulatedInteraction): boolean {
-  return interaction.messageProfile === 'chat-input-messages-v1';
+  return (
+    interaction.messageProfile === 'chat-input-messages-v1' ||
+    interaction.messageProfile === 'interactions-v1'
+  );
 }
 
 const AUTHORITATIVE_CALLBACK_TYPES: Readonly<Record<number, InteractionResponseType>> = {
   4: 'message',
   5: 'defer',
+  6: 'defer-update',
+  7: 'update',
+  8: 'autocomplete',
   9: 'modal',
 };
 
@@ -823,13 +1141,13 @@ function requireMessageBody(value: unknown): Readonly<Record<string, unknown>> {
 }
 
 /** Only an absent query or exactly `with_response=true|false` is accepted. */
-function parseWithResponse(url: URL): boolean {
+function parseWithResponse(url: URL, sdk = false): boolean {
   const entries = [...url.searchParams.entries()];
   if (url.search === '' || url.search === '?') return false;
   if (entries.length !== 1 || entries[0]?.[0] !== 'with_response') throw invalidMessagePayload();
   const value = entries[0][1];
-  if (value === 'true') return true;
-  if (value === 'false') return false;
+  if (value === 'true' || (sdk && value === '1')) return true;
+  if (value === 'false' || (sdk && value === '0')) return false;
   throw invalidMessagePayload();
 }
 
@@ -945,7 +1263,8 @@ function sendJson(
   if (response.headersSent) return;
   const payload = JSON.stringify(body);
   response.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Type': 'application/json',
+    ...(status === 429 ? { Via: '1.1 disrunner' } : {}),
     'Content-Length': Buffer.byteLength(payload),
     'Cache-Control': 'no-store',
     ...headers,
@@ -1125,4 +1444,27 @@ async function requireNoCommandBody(
     request.once('error', onError);
     request.once('aborted', onAborted);
   });
+}
+
+async function readRawBody(request: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const buffers: Buffer[] = [];
+  let size = 0;
+  for await (const rawChunk of request) {
+    const chunk: unknown = rawChunk;
+    if (!Buffer.isBuffer(chunk) && typeof chunk !== 'string')
+      throw new DiscordApiError(400, 50035, 'Invalid request body bytes.');
+    const value: Buffer = Buffer.from(chunk);
+    size += value.length;
+    if (size > maxBytes) throw new DiscordApiError(413, 40005, 'Request body is too large.');
+    buffers.push(value);
+  }
+  return Buffer.concat(buffers, size);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? (value as unknown[]).filter(isRecord) : [];
 }

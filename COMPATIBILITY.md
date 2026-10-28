@@ -1,77 +1,70 @@
 # Compatibility
 
-DisRunner v0.1 is a Preview. This matrix separates behavior tested directly in the core/CLI from the narrower behavior connected through Electron. It does not claim Discord or SDK parity.
-
-Legend: **Core-tested** = covered through the in-process core or CLI; **Desktop preview** = usable in the stated Electron path but incomplete; **Visual preview** = illustrative UI, not an authoritative runtime surface; **Planned** = rejected or unavailable in v0.1; **Out** = intentionally out of scope.
+DisRunner provides a bounded local Discord API v10 profile for development and regression tests. Desktop and CLI share the same runtime, project configuration, action driver, state, and real Bot scenario runner. It does not reproduce every Discord feature or certify arbitrary SDK versions.
 
 ## Toolchain and platform targets
 
-The source toolchain is Node.js `>=22.23.2 <23` with pnpm `11.19.0`.
+The tested source toolchain is Node.js `22.23.2` and pnpm `11.19.0`. Source manifests accept Node.js `>=22.23.2 <23`. Python adapter tests use Python `3.12.14`.
 
-| Platform            | Source/package target | v0.1 declaration                                                   |
-| ------------------- | --------------------- | ------------------------------------------------------------------ |
-| Windows 11 x64      | NSIS                  | Preview target; promote only from a green platform release run     |
-| macOS 14+ arm64/x64 | DMG                   | Preview target; signing/notarization is release-configuration data |
-| Ubuntu 24.04+ x64   | AppImage              | Preview target; promote only from a green platform release run     |
-| Other environments  | None                  | No compatibility declaration                                       |
+| Platform         | Package target | Qualification                                                        |
+| ---------------- | -------------- | -------------------------------------------------------------------- |
+| Windows 11 x64   | NSIS installer | Consult the release's actual installation and signing results        |
+| Ubuntu 24.04 x64 | AppImage       | Consult the release's actual launch and dependency requirements      |
+| macOS 14+ arm64  | DMG            | Consult the release's actual OS, signature, and notarization results |
+| macOS 14+ x64    | DMG            | Consult the release's actual OS, signature, and notarization results |
 
-A workflow or package target is not by itself proof that a host is supported. Check the release notes for the platforms actually exercised by that release.
+Build targets are separate from installed-platform qualification. A successful run on one OS or architecture does not qualify another. Published artifacts and their stated platform results are listed on [Releases](https://github.com/YanagiKH/DisRunner/releases).
 
 ## Bot integration modes
 
-| Framework/mode                | v0.1 status     | Current contract                                                                              |
-| ----------------------------- | --------------- | --------------------------------------------------------------------------------------------- |
-| Raw interaction webhook       | Desktop preview | Bundled Node example, signed requests, per-run HMAC-authenticated responses, `/ping` callback |
-| Generic executable            | Planned adapter | A bounded process-runner primitive exists, but there is no generic health/stdio protocol      |
-| Generic Gateway bot           | Planned adapter | Core Gateway transport is not wired as a supported imported-bot desktop adapter               |
-| `discord.js`                  | Planned         | Project validation fails closed; no compatible SDK version is declared                        |
-| `discord.py`                  | Planned         | Project validation fails closed; no compatible SDK version is declared                        |
-| Simulator SDK                 | Planned         | No public TypeScript or Python SDK package                                                    |
-| User-account/self-bot clients | Out             | Prohibited project scope                                                                      |
+| Adapter                       | Version                 | Contract                                                                            |
+| ----------------------------- | ----------------------- | ----------------------------------------------------------------------------------- |
+| Raw interaction webhook       | API v10 callback subset | Real child process, signed requests, authenticated response bytes, actual callbacks |
+| `discord.js`                  | 14.27.0                 | Node.js 22; ESM/CommonJS bootstrap, local REST/Gateway, actual SDK event dispatch   |
+| `discord.py`                  | 2.6.4                   | Python 3.12; local REST/Gateway, normal Client/Bot and command-tree/View dispatch   |
+| Other SDK versions/frameworks | Unsupported             | Explicit adapter/version diagnostics; no Discord fallback                           |
+| Generic Gateway/stdio process | Unsupported             | A process executable alone does not define an adapter                               |
+| User-account/self-bot clients | Out of scope            | Bot applications only                                                               |
 
-The `bot.runtime` label in a raw-webhook project describes how to launch that webhook process. It does not imply framework compatibility.
+Prepare dependencies before an offline run. The SDK profiles require their exact versions and use synthetic credentials. See [SDK adapters](docs/sdk-adapters.md).
 
 ## Capability matrix
 
-| Surface                                 | v0.1 status     | Current boundary                                                                                  |
-| --------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------- |
-| Deterministic state/clock/IDs/snapshots | Core-tested     | In-process version 1 scenarios and tests                                                          |
-| Scenario run and assertions             | Core-tested     | CLI/core schema; unsupported actions fail validation                                              |
-| Recording and deterministic replay      | Core-tested     | Versioned CLI recording envelope and verification output                                          |
-| JSON/JUnit/HTML/SARIF reports           | Core-tested     | Generated from CLI scenario results; findings do not fail a run unless asserted                   |
-| Interaction lifecycle                   | Core-tested     | Immediate/deferred/follow-up state and 3,000/900,000 ms virtual-time contracts                    |
-| Electron raw-webhook interaction        | Desktop preview | Real local `/ping`; response status/body authenticated before callback validation                 |
-| Permission calculation                  | Core-tested     | `BigInt` roles, overwrites, administrator and implicit channel removals                           |
-| Intent filtering                        | Core-tested     | In-process requested/allowed intent behavior; desktop config intents are not wired                |
-| Rate-limit engine                       | Core-tested     | Configurable programmatic buckets; not a desktop project-profile feature                          |
-| REST emulator                           | Core-tested     | Partial local routes; explicit core/shared-runtime command-registry-v1 opt-in                     |
-| Gateway lifecycle                       | Core-tested     | Partial lifecycle plus selected committed message dispatches; no imported-bot adapter             |
-| Protocol/object limits                  | Core-tested     | Selected message/embed/attachment/component/custom-ID checks only                                 |
-| Risk findings                           | Core-tested     | Small implemented rule set listed in `docs/risk-engine.md`                                        |
-| Desktop runtime status/output           | Desktop preview | Project validation, PID/status, bounded stdout/stderr, start/stop and cleanup                     |
-| Guild/command/scenario editor surfaces  | Visual preview  | Seeded display state; edits/runs are not persisted or connected to the CLI engine                 |
-| Inspector and Risk Center               | Visual preview  | Live invocation diagnostics and selected runtime risks; remaining panels illustrative             |
-| Live conversation messages              | Desktop preview | Retained ordinary type 0 and public interaction type 20/0 messages; bounded diagnostic projection |
-| Generic fault injection                 | Planned         | No version 1 `faults` schema or packet/network fault policy                                       |
-| Imported-process performance profiling  | Planned         | No CPU/memory/event-loop/queue instrumentation                                                    |
-| Components V2 catalog                   | Planned         | Selected validators do not constitute complete support                                            |
-| Voice state/transport/audio/encryption  | Out             | Not implemented                                                                                   |
-| CDN/regional/anti-abuse behavior        | Out             | Not reproduced                                                                                    |
+| Capability                       | Supported path                             | Boundary                                                                                                                     |
+| -------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| State, virtual clock, seeded IDs | Core and version 1 scenarios               | Controls modeled code; not arbitrary Bot timers/randomness                                                                   |
+| Real Bot lifecycle               | Shared Desktop/CLI runtime                 | Start, ready, invoke/observe, cancel, stop, restart; [platform cleanup limits](docs/runtime-lifecycle.md)                    |
+| Fixtures and workspaces          | Guild Editor and workspace files           | Guild/channel/DM/role/user/member/message resources, validation, atomic save, backup/recovery                                |
+| Commands                         | Local registry and Command Explorer        | Global/guild registration; typed options, subcommands/groups, choices, autocomplete, user/message targets                    |
+| Command registry v1              | Explicit compatibility profile             | Slash options remain restricted to empty arrays                                                                              |
+| Command registry v2              | SDK default; raw opt-in                    | Supported API v10 command fields; no global publication delay or user-installed application profile                          |
+| Interaction responses            | Runtime, REST, and real SDKs               | Initial reply/defer, original/followup fetch/edit/delete, token ownership, partial edit, ephemeral visibility                |
+| Components and modals            | Legacy message profile                     | Buttons, string/entity selects, text-input modals; no Components V2                                                          |
+| Messages                         | State, SDK events, REST, live Desktop feed | Text, embeds, local bounded attachments, edit/delete; no CDN fetching                                                        |
+| Permissions and intents          | Declared route/event profiles              | Guild role/member overwrites, ordinary guild-text own-message authorization, requested/allowed intents and content filtering |
+| Gateway                          | Single-shard JSON transport                | Cache bootstrap, heartbeat, close, reconnect/resume, bounded replay history                                                  |
+| Version 1 scenarios              | Core/CLI                                   | Explicit model actions and virtual time; these do not execute a user Bot                                                     |
+| Version 2 scenarios              | Shared Desktop/CLI runner                  | Actual Bot actions, bounded awaits, state/response/error assertions, cancellation, severity policy                           |
+| Reports                          | JSON, JUnit, HTML, SARIF                   | Shared version 2 verdict, run metadata, fault receipts, redaction, completeness checks                                       |
+| Recording/replay                 | Versioned model recording                  | Model replay; repeat a version 2 scenario for a fresh Bot rerun                                                              |
+| Fault injection                  | Session-scoped transport plans             | Delay, timeout, HTTP 429/5xx, Gateway disconnect/duplicate; bounded occurrences and teardown                                 |
+| Inspector and risks              | Current runtime evidence                   | Live trace/output/state and supported findings; no sample evidence in an active project run                                  |
+| Performance                      | Core measurements and host duration        | No arbitrary-process CPU/flamegraph profiler or Internet latency prediction                                                  |
+
+The [protocol guide](docs/protocol-compatibility.md), [REST catalog](docs/rest-emulator.md), and [limitations](docs/limitations.md) describe the operation-level boundaries. An event or method present in an SDK is not automatically implemented by the local service.
+
+## Permissions and viewing context
+
+Raw projects preserve `legacy-unenforced` ordinary-message behavior unless `guild-text-own-messages-v1` is selected with an explicit bot fixture. SDK projects default to the enforcing profile and a synthetic local Bot membership. Existing fixture permissions remain authoritative. This profile is independent of strict/lenient payload mode and does not imply complete Discord authorization or moderation parity.
+
+Public snapshots omit ephemeral messages. Actor-specific views include only that actor's ephemeral responses. Role/member context and channel selection come from the loaded state; a response retains the actor and channel that initiated it. This local visibility model does not replace an OS security boundary.
 
 ## Compatibility policy
 
-1. A release declares only behavior backed by tests at the layer named above.
-2. Version 1 parsers validate documented fields but do not promise lossless preservation of unknown fields.
-3. CLI recording files carry a format version. Other scenario, fixture, snapshot, trace, and report formats are Preview unless their own schema states otherwise.
-4. Strict/lenient behavior is surface-specific; see [Protocol compatibility](docs/protocol-compatibility.md). Lenient validation warnings are not yet surfaced consistently across all runtime paths.
-5. Framework support is promoted only after an adapter and pinned-version contract suite land.
+1. Adapter support is pinned to the documented SDK/runtime profile and exercised through real processes.
+2. Configuration and scenario formats reject unknown closed fields. Resource payload extension fields have their own validation rules.
+3. Project configs, workspaces, scenarios, recordings, and version 2 reports carry explicit format versions. Unknown newer workspace versions are not overwritten.
+4. Virtual model replay, trace playback, and real Bot rerun are different operations. Bot reruns do not restore arbitrary process memory.
+5. Feature declarations and platform qualification follow the corresponding release and tests; signing and notarization must be verified on the actual artifacts.
 
-Report protocol drift with a minimal redacted fixture. Never attach a production token or private production data.
-
-## Opt-in ordinary message authorization
-
-The `guild-text-own-messages-v1` profile enforces live guild/member/role/overwrite permissions for ordinary guild-text message reads and own-message mutations. It is available through the core API and the shared-runtime project configuration used by CLI `bot-test` and Desktop, with a required explicit bot fixture and no inferred permission grants. The default remains **legacy-unenforced**; existing projects are not migrated or enabled automatically. Desktop state views are diagnostic, not viewer-permission-filtered; this adds no renderer permission controls or full GUI permission certification. The bounded packaged Linux allow/deny matrix is qualified separately in [G1 evidence](docs/g1-acceptance.md). DMs retain legacy behavior. Own-only mutation, conservative timeout restrictions, ordinary-only history excluding interaction-origin messages, and uncertified richer composition permissions are deliberate boundaries, not Discord parity. See [Ordinary message permissions](docs/ordinary-message-permissions.md) for the API, required fixtures and exact scope.
-
-## Opt-in application command registration
-
-The REST `command-registry-v1` profile supports global/guild registration for command types 1/2/3, with slash options restricted to empty arrays. Core construction requires explicit bootstrap identity; the shared runtime uses its own per-run bootstrap identity and accepts optional `profile.commandRegistry` in Desktop and CLI `bot-test` projects. Omission disables registration; an empty guild allowlist enables global-only registration, while guild registration requires explicit IDs backed by loaded fixtures. Mode and ordinary message permissions do not imply installation. Registration shares the run's state and credentials; successful restart creates fresh command state and credentials. Command records remain outside renderer projections. This adds no SDK or Command Explorer integration, registered-command invocation lookup, or Gateway command events. See [Application command registry](docs/application-command-registry.md) for exact payload, state, version, history, and safety boundaries.
+Report protocol drift with a minimal redacted fixture and the DisRunner/SDK versions. Never attach production credentials or private production conversations.

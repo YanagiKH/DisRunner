@@ -35,6 +35,10 @@ jobs:
       contents: read
     outputs:
       release_sha: ${{ steps.resolve.outputs.release_sha }}
+      channel: ${{ steps.channel.outputs.channel }}
+      prerelease: ${{ steps.channel.outputs.prerelease }}
+      version: ${{ steps.channel.outputs.version }}
+      qualification_run_id: ${{ steps.qualification.outputs.run_id }}
     steps:
       - name: Check out release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -43,13 +47,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Resolve release channel
+        id: channel
+        run: node .github/scripts/release-policy.mjs
+
       - name: Resolve one annotated tag at current main
         id: resolve
         shell: bash
         run: |
           set -euo pipefail
 
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" || {
             echo "Release runs must be triggered from refs/tags/$RELEASE_TAG. For a manual run, use: gh workflow run release.yml --ref '$RELEASE_TAG' -f tag='$RELEASE_TAG'" >&2
             exit 1
@@ -131,6 +138,36 @@ jobs:
           echo "Timed out waiting for trusted required checks." >&2
           exit 1
 
+      - name: Resolve the successful main runtime qualification run
+        id: qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.resolve.outputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${RELEASE_SHA}&branch=main&event=push&status=success&per_page=100" \
+            --jq '.workflow_runs[]' | \
+            jq -ser --arg sha "$RELEASE_SHA" --arg repository "$GITHUB_REPOSITORY" '
+              [.[] | select(
+                .repository.full_name == $repository and .head_repository.full_name == $repository and
+                .event == "push" and .head_branch == "main" and .head_sha == $sha and
+                .status == "completed" and .conclusion == "success" and
+                .path == ".github/workflows/ci.yml"
+              )] | sort_by(.run_number, .run_attempt) | last | .id
+            ')"
+          [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+          jobs_file="$RUNNER_TEMP/disrunner-qualified-ci-jobs.json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" > "$jobs_file"
+          for check in 'All green' 'Runtime qualification'; do
+            jq -e --arg name "$check" \
+              '[.[] | .jobs[] | select(.name == $name)] | length == 1 and .[0].conclusion == "success"' \
+              "$jobs_file" >/dev/null
+          done
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
   validate-release:
     name: Release gate (${{ matrix.platform }})
     needs: preflight
@@ -172,13 +209,34 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           node .github/scripts/check-versions.mjs
+      - uses: ./.github/actions/setup-python
+      - name: Prepare pinned Python SDK dependencies
+        run: python -m pip install --requirement packages/adapter-discordpy/requirements.txt
       - run: pnpm install --frozen-lockfile
+      - name: Prepare the pinned Electron distribution
+        if: runner.os == 'Linux'
+        run: node apps/desktop/node_modules/electron/install.js
       - name: Install Linux browser dependencies
         if: runner.os == 'Linux'
         run: pnpm --filter @disrunner/desktop exec playwright install-deps chromium
       - name: Install Chromium for release E2E
         run: pnpm --filter @disrunner/desktop exec playwright install chromium
       - run: pnpm run verify:release
+      - name: Real SDK transport conformance
+        run: node --test --test-concurrency=1 tests/conformance/*.test.mjs
+      - name: Isolated offline raw webhook and SDK conformance
+        if: runner.os == 'Linux'
+        env:
+          OFFLINE_EVIDENCE_DIR: ${{ runner.temp }}/offline-conformance
+        run: bash .github/scripts/offline-conformance.sh
+      - name: Upload isolated offline evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: offline-conformance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/offline-conformance
+          if-no-files-found: warn
+          retention-days: 30
       - name: Audit high-severity dependency findings
         run: pnpm audit --audit-level=high
 
@@ -210,6 +268,165 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     environment: ${{ matrix.environment }}
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: ./.github/actions/setup-python
+      - name: Prepare pinned Python SDK dependencies
+        run: python -m pip install --requirement packages/adapter-discordpy/requirements.txt
+      - run: pnpm install --frozen-lockfile
+
+      - name: Prepare Linux desktop runtime libraries
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/desktop exec playwright install-deps chromium
+
+      - name: Prepare the pinned Electron distribution
+        if: runner.os == 'Linux'
+        run: node apps/desktop/node_modules/electron/install.js
+
+      - name: Require stable Windows signing configuration
+        if: runner.os == 'Windows'
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: node .github/scripts/release-policy.mjs --check-signing
+
+      - name: Require stable Apple signing and notarization configuration
+        if: runner.os == 'macOS'
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node .github/scripts/release-policy.mjs --check-signing
+
+      - name: Build Windows package
+        if: runner.os == 'Windows'
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never --config.forceCodeSigning=${{ needs.preflight.outputs.prerelease == 'false' }}
+
+      - name: Build macOS package
+        if: runner.os == 'macOS'
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never --config.forceCodeSigning=${{ needs.preflight.outputs.prerelease == 'false' }} --config.mac.notarize=${{ needs.preflight.outputs.prerelease == 'false' }} --config.dmg.sign=${{ needs.preflight.outputs.prerelease == 'false' }}
+
+      - name: Verify stable Windows executable and installer signatures
+        if: runner.os == 'Windows' && needs.preflight.outputs.prerelease == 'false'
+        shell: pwsh
+        run: ./.github/scripts/verify-windows-release.ps1
+
+      - name: Sign, notarize and verify stable macOS distribution
+        if: runner.os == 'macOS' && needs.preflight.outputs.prerelease == 'false'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: bash .github/scripts/verify-macos-release.sh
+
+      - name: Build Linux package
+        if: runner.os == 'Linux'
+        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never
+
+      - name: Smoke packaged Electron
+        if: runner.os != 'Linux'
+        run: pnpm --filter @disrunner/desktop run test:package-smoke
+      - name: Prepare the pinned Linux sandbox helper for acceptance
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/installer-evidence"
+          node .github/scripts/prepare-linux-sandbox.mjs apps/desktop/release/linux-unpacked > "$RUNNER_TEMP/installer-evidence/unpacked-suid.json"
+      - name: Smoke packaged Electron on Linux
+        if: runner.os == 'Linux'
+        env:
+          DISRUNNER_LINUX_SANDBOX_EVIDENCE: ${{ runner.temp }}/installer-evidence/unpacked-linux-sandbox
+        run: xvfb-run -a pnpm --filter @disrunner/desktop run test:package-smoke
+
+      - name: Packaged SDK UI acceptance
+        if: runner.os != 'Linux'
+        env:
+          DISRUNNER_SDK_UI_EVIDENCE: ${{ runner.temp }}/sdk-ui-evidence
+        run: node apps/desktop/tests/e2e/sdk-ui-smoke.mjs
+      - name: Packaged SDK UI acceptance on Linux
+        if: runner.os == 'Linux'
+        env:
+          DISRUNNER_SDK_UI_EVIDENCE: ${{ runner.temp }}/sdk-ui-evidence
+        run: xvfb-run -a node apps/desktop/tests/e2e/sdk-ui-smoke.mjs
+      - name: Install, exercise, reinstall and uninstall NSIS distribution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
+        run: ./.github/scripts/installer-roundtrip.ps1
+      - name: Mount and exercise macOS distribution
+        if: runner.os == 'macOS'
+        env:
+          DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
+        run: bash .github/scripts/installer-roundtrip.sh
+      - name: Extract and exercise Linux distribution
+        if: runner.os == 'Linux'
+        env:
+          DISRUNNER_TEST_INSTALL_SUID_SANDBOX: '1'
+          DISRUNNER_INSTALLER_EVIDENCE: ${{ runner.temp }}/installer-evidence
+        run: xvfb-run -a bash .github/scripts/installer-roundtrip.sh
+      - name: Upload distribution operation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-operation-${{ matrix.platform }}-${{ env.RELEASE_TAG }}
+          path: |
+            ${{ runner.temp }}/sdk-ui-evidence
+            ${{ runner.temp }}/installer-evidence
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Scan built and packaged application payloads for credentials
+        run: node .github/scripts/scan-secrets.mjs apps/desktop/dist apps/desktop/dist-electron apps/desktop/release
+
+      - name: Upload immutable package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: disrunner-${{ matrix.platform }}-${{ env.RELEASE_TAG }}
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.exe.blockmap
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.dmg.blockmap
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.AppImage.blockmap
+            apps/desktop/release/disrunner-*-signing-*.json
+            apps/desktop/release/disrunner-*-installation-*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  offline-cli:
+    name: Build and exercise extracted offline CLI
+    needs: [preflight, validate-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -225,55 +442,22 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-
-      - name: Build Windows package
-        if: runner.os == 'Windows'
-        env:
-          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never
-
-      - name: Build macOS package
-        if: runner.os == 'macOS'
-        env:
-          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never
-
-      - name: Build Linux package
-        if: runner.os == 'Linux'
-        run: pnpm --filter @disrunner/desktop run package --${{ matrix.arch }} --publish never
-
-      - name: Smoke packaged Electron
-        if: runner.os != 'Linux'
-        run: pnpm --filter @disrunner/desktop run test:package-smoke
-      - name: Smoke packaged Electron on Linux
-        if: runner.os == 'Linux'
-        run: xvfb-run -a pnpm --filter @disrunner/desktop run test:package-smoke
-
-      - name: Scan built and packaged application payloads for credentials
-        run: node .github/scripts/scan-secrets.mjs apps/desktop/dist apps/desktop/dist-electron apps/desktop/release
-
-      - name: Upload immutable package artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - name: Build standalone CLI with local example
+        run: node scripts/bundle-cli.mjs
+      - name: Test extracted archive outside the checkout
+        run: node .github/scripts/cli-artifact-smoke.mjs release/disrunner-cli-${{ needs.preflight.outputs.version }}.tar.gz
+      - name: Scan extracted CLI files
+        run: node .github/scripts/scan-secrets.mjs release/disrunner-cli-${{ needs.preflight.outputs.version }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: disrunner-${{ matrix.platform }}-${{ env.RELEASE_TAG }}
-          path: |
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.exe.blockmap
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.dmg.blockmap
-            apps/desktop/release/*.AppImage
-            apps/desktop/release/*.AppImage.blockmap
+          name: disrunner-cli-${{ env.RELEASE_TAG }}
+          path: release/disrunner-cli-*.tar.gz
           if-no-files-found: error
           retention-days: 30
 
   publish-canonical:
     name: Publish canonical DisRunner release
-    needs: [preflight, package]
+    needs: [preflight, package, offline-cli]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: release
@@ -302,6 +486,27 @@ jobs:
           pattern: disrunner-*-${{ env.RELEASE_TAG }}
           path: artifacts
           merge-multiple: true
+      - name: Download the exact main qualification receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: runtime-qualification-${{ needs.preflight.outputs.release_sha }}
+          run-id: ${{ needs.preflight.outputs.qualification_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/main-runtime-qualification
+      - name: Rebuild and verify the qualified runtime bytes
+        env:
+          RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm run build:runtime
+          receipt="$RUNNER_TEMP/main-runtime-qualification/runtime-qualification.json"
+          test "$(find "$RUNNER_TEMP/main-runtime-qualification" -type f | wc -l)" -eq 1
+          node .github/scripts/verify-runtime-qualification.mjs "$receipt" \
+            --mode full --sha "$RELEASE_SHA" --version "$RELEASE_VERSION"
+          cp --no-clobber "$receipt" "artifacts/disrunner-${RELEASE_TAG}-runtime-qualification.json"
 
       - name: Reconfirm tag identity
         shell: bash
@@ -396,6 +601,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+          RELEASE_PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
         shell: bash
         run: |
           set -euo pipefail
@@ -455,10 +661,10 @@ jobs:
 
           validate_release_metadata() {
             local expected_draft="$1"
-            jq -e --arg tag "$RELEASE_TAG" --argjson draft "$expected_draft" '
+            jq -e --arg tag "$RELEASE_TAG" --argjson draft "$expected_draft" --argjson prerelease "$RELEASE_PRERELEASE" '
               .tag_name == $tag and
               .draft == $draft and
-              .prerelease == false and
+              .prerelease == $prerelease and
               (.id | type == "number") and
               (.assets | type == "array") and
               (.assets | all(
@@ -496,10 +702,20 @@ jobs:
               "DisRunner-${release_version}-win-x64.exe" \
               "DisRunner-${release_version}-mac-arm64.dmg" \
               "DisRunner-${release_version}-mac-x64.dmg" \
-              "DisRunner-${release_version}-linux-x64.AppImage" \
+              "DisRunner-${release_version}-linux-x86_64.AppImage" \
+              "disrunner-cli-${release_version}.tar.gz" \
+              "disrunner-${RELEASE_TAG}-runtime-qualification.json" \
               "disrunner-${RELEASE_TAG}-sbom.cdx.json"; do
               grep -Fxq "$required_name" "$subject_names" || return 1
             done
+            for platform in linux-x64 windows-x64 macos-arm64 macos-x64; do
+              grep -Fxq "disrunner-${RELEASE_TAG}-installation-${platform}.json" "$subject_names" || return 1
+            done
+            if [ "$RELEASE_PRERELEASE" = false ]; then
+              for platform in windows-x64 macos-arm64 macos-x64; do
+                grep -Fxq "disrunner-${RELEASE_TAG}-signing-${platform}.json" "$subject_names" || return 1
+              done
+            fi
             while IFS= read -r name; do
               case "$name" in
                 "DisRunner-${release_version}-win-x64.exe" | \
@@ -508,8 +724,17 @@ jobs:
                   "DisRunner-${release_version}-mac-arm64.dmg.blockmap" | \
                   "DisRunner-${release_version}-mac-x64.dmg" | \
                   "DisRunner-${release_version}-mac-x64.dmg.blockmap" | \
-                  "DisRunner-${release_version}-linux-x64.AppImage" | \
-                  "DisRunner-${release_version}-linux-x64.AppImage.blockmap" | \
+                  "DisRunner-${release_version}-linux-x86_64.AppImage" | \
+                  "DisRunner-${release_version}-linux-x86_64.AppImage.blockmap" | \
+                  "disrunner-cli-${release_version}.tar.gz" | \
+                  "disrunner-${RELEASE_TAG}-runtime-qualification.json" | \
+                  "disrunner-${RELEASE_TAG}-installation-linux-x64.json" | \
+                  "disrunner-${RELEASE_TAG}-installation-windows-x64.json" | \
+                  "disrunner-${RELEASE_TAG}-installation-macos-arm64.json" | \
+                  "disrunner-${RELEASE_TAG}-installation-macos-x64.json" | \
+                  "disrunner-${RELEASE_TAG}-signing-windows-x64.json" | \
+                  "disrunner-${RELEASE_TAG}-signing-macos-arm64.json" | \
+                  "disrunner-${RELEASE_TAG}-signing-macos-x64.json" | \
                   "disrunner-${RELEASE_TAG}-sbom.cdx.json") ;;
                 *) return 1 ;;
               esac
@@ -531,6 +756,9 @@ jobs:
                     --source-ref "refs/tags/$RELEASE_TAG" >/dev/null
               ) || return 1
             done < "$subject_names"
+            node .github/scripts/verify-runtime-qualification.mjs \
+              "$asset_dir/disrunner-${RELEASE_TAG}-runtime-qualification.json" \
+              --mode full --sha "$RELEASE_SHA" --version "$release_version" || return 1
           }
 
           verify_remote_release_integrity() {
@@ -622,13 +850,16 @@ jobs:
           }
 
           create_owned_draft() {
+            prerelease_flag=()
+            if [ "$RELEASE_PRERELEASE" = true ]; then prerelease_flag=(--prerelease); fi
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --draft \
               --generate-notes \
               --notes "$transaction_marker" \
-              --title "DisRunner $RELEASE_TAG"
+              --title "DisRunner $RELEASE_TAG" \
+              "${prerelease_flag[@]}"
             test "$(fetch_release)" = 200
             validate_release_metadata true
             is_owned_draft
@@ -751,10 +982,12 @@ jobs:
           test "$(jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' "$release_json")" = "$verified_assets"
 
           release_id="$(jq -er '.id' "$release_json")"
+          make_latest=true
+          if [ "$RELEASE_PRERELEASE" = true ]; then make_latest=false; fi
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
             -F draft=false \
-            -f make_latest=true > "$RUNNER_TEMP/canonical-published.json"
-          jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false' \
+            -f make_latest="$make_latest" > "$RUNNER_TEMP/canonical-published.json"
+          jq -e --arg tag "$RELEASE_TAG" --argjson prerelease "$RELEASE_PRERELEASE" '.tag_name == $tag and .draft == false and .prerelease == $prerelease' \
             "$RUNNER_TEMP/canonical-published.json" >/dev/null
           active_draft_id=""
 

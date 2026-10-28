@@ -25,12 +25,12 @@ export interface InteractionMessageAuthorityOptions {
   readonly author: BootstrapUser;
   readonly context: MessageDomainContext;
 }
-export type InteractionMessageProfile = 'model' | 'chat-input-messages-v1';
+export type InteractionMessageProfile = 'model' | 'chat-input-messages-v1' | 'interactions-v1';
 export interface InteractionMessageSelection {
   readonly messageProfile?: InteractionMessageProfile;
 }
 export interface AuthoritativeInteractionFields {
-  readonly messageProfile?: 'chat-input-messages-v1';
+  readonly messageProfile?: 'chat-input-messages-v1' | 'interactions-v1';
   readonly originalMessageId?: string;
 }
 export type InteractionMessageCommand =
@@ -66,6 +66,8 @@ export interface InteractionMessageResult {
 }
 
 interface MessageWrite {
+  readonly componentSource?: boolean;
+  readonly interactionMetadata?: Readonly<Record<string, unknown>>;
   readonly operation: 'create' | 'update' | 'delete' | 'none';
   readonly interactionId: string;
   readonly applicationId: string;
@@ -160,6 +162,9 @@ export class InteractionMessageDomain {
           webhook_id: input.applicationId,
           message_origin: 'interaction',
           interaction_id: input.interactionId,
+          ...(input.interactionMetadata === undefined
+            ? {}
+            : { interaction_metadata: input.interactionMetadata }),
           interaction_message_kind: input.kind,
           visibility: ephemeral ? 'ephemeral' : 'channel',
           ...(ephemeral ? { recipient_id: input.context.actorId } : {}),
@@ -209,7 +214,12 @@ export class InteractionMessageDomain {
           origin: 'interaction',
           clockDomain: this.#context.clockDomain,
           timestamp: now,
-          payload: { type, message, visibility: 'channel' },
+          payload: {
+            type,
+            message,
+            visibility: 'channel',
+            ...(input.componentSource ? { componentSource: true } : {}),
+          },
         };
         projection = mapMessageEvent(event);
         if (projection === undefined)
@@ -246,6 +256,10 @@ export class InteractionMessageDomain {
 export function interactionMessagePayload(
   message: ResourceRecord,
 ): Readonly<Record<string, unknown>> {
+  if (message === null || typeof message !== 'object' || interactionUtilTypes.isProxy(message))
+    invalidInteractionMessagePayload();
+  const prototype: unknown = Object.getPrototypeOf(message);
+  if (prototype !== Object.prototype && prototype !== null) invalidInteractionMessagePayload();
   const result: Record<string, unknown> = {};
   for (const key of [
     'content',
@@ -256,9 +270,12 @@ export function interactionMessagePayload(
     'flags',
     'allowed_mentions',
   ]) {
-    if (Object.hasOwn(message, key)) result[key] = structuredClone(message[key]);
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    if (descriptor === undefined) continue;
+    if (!('value' in descriptor) || !descriptor.enumerable) invalidInteractionMessagePayload();
+    result[key] = descriptor.value;
   }
-  return result;
+  return interactionPayloadObject(cloneInteractionPayload(result, 16_777_216));
 }
 
 function invalidInteractionMessagePayload(code = 50035): never {
@@ -537,7 +554,8 @@ function interactionPayloadEmbeds(value: unknown): Record<string, unknown>[] {
   });
 }
 
-function interactionPayloadComponents(value: unknown): Record<string, unknown>[] {
+function interactionPayloadComponents(value: unknown, extended = false): Record<string, unknown>[] {
+  if (extended) return interactionExtendedComponents(value);
   const customIds = new Set<string>();
   return interactionPayloadArray(value, 5).map((entry) => {
     const row = interactionPayloadObject(entry);
@@ -577,6 +595,264 @@ function interactionPayloadComponents(value: unknown): Record<string, unknown>[]
   });
 }
 
+function interactionComponentEmoji(value: unknown): Record<string, unknown> {
+  const emoji = interactionPayloadObject(value);
+  interactionPayloadKeys(emoji, ['id', 'name', 'animated']);
+  const output: Record<string, unknown> = {};
+  if (interactionPayloadHas(emoji, 'id')) {
+    output.id = emoji.id === null ? null : interactionSnowflake(emoji.id);
+  }
+  if (interactionPayloadHas(emoji, 'name')) {
+    output.name = emoji.name === null ? null : interactionPayloadString(emoji.name, 1, 32);
+  }
+  if (!output.id && !output.name) invalidInteractionMessagePayload();
+  if (interactionPayloadHas(emoji, 'animated')) {
+    output.animated = interactionPayloadBoolean(emoji.animated);
+    if (output.animated && !output.id) invalidInteractionMessagePayload();
+  }
+  return output;
+}
+
+function interactionSnowflake(value: unknown): string {
+  const id = interactionPayloadString(value, 1, 20);
+  if (!/^[1-9][0-9]{0,19}$/.test(id) || BigInt(id) > 18_446_744_073_709_551_615n)
+    invalidInteractionMessagePayload();
+  return id;
+}
+
+function interactionExtendedComponents(value: unknown): Record<string, unknown>[] {
+  const customIds = new Set<string>();
+  const componentIds = new Set<number>();
+  const addId = (input: Record<string, unknown>, output: Record<string, unknown>): void => {
+    if (!interactionPayloadHas(input, 'id')) return;
+    const id = interactionPayloadInteger(input.id, 0, 4_294_967_295);
+    // Zero asks Discord to assign an ID; positive IDs identify one component.
+    if (id !== 0 && componentIds.has(id)) invalidInteractionMessagePayload();
+    if (id !== 0) componentIds.add(id);
+    output.id = id;
+  };
+  const addCustomId = (input: Record<string, unknown>, output: Record<string, unknown>): void => {
+    const id = interactionPayloadString(input.custom_id, 1, 100);
+    if (customIds.has(id)) invalidInteractionMessagePayload();
+    customIds.add(id);
+    output.custom_id = id;
+  };
+  return interactionPayloadArray(value, 5).map((entry) => {
+    const row = interactionPayloadObject(entry);
+    interactionPayloadKeys(row, ['type', 'components', 'id'], ['type', 'components']);
+    if (row.type !== 1) invalidInteractionMessagePayload();
+    const children = interactionPayloadArray(row.components, 5, 1);
+    const components = children.map((entry) => {
+      const component = interactionPayloadObject(entry);
+      const output: Record<string, unknown> = { type: component.type };
+      addId(component, output);
+      if (component.type === 2) {
+        interactionPayloadKeys(
+          component,
+          ['type', 'id', 'style', 'label', 'emoji', 'disabled', 'custom_id', 'url'],
+          ['type', 'style'],
+        );
+        const style = interactionPayloadInteger(component.style, 1, 5);
+        output.style = style;
+        if (interactionPayloadHas(component, 'label'))
+          output.label = interactionPayloadString(component.label, 1, 80);
+        if (interactionPayloadHas(component, 'emoji'))
+          output.emoji = interactionComponentEmoji(component.emoji);
+        if (!interactionPayloadHas(output, 'label') && !interactionPayloadHas(output, 'emoji'))
+          invalidInteractionMessagePayload();
+        if (style === 5) {
+          if (
+            interactionPayloadHas(component, 'custom_id') ||
+            !interactionPayloadHas(component, 'url')
+          )
+            invalidInteractionMessagePayload();
+          output.url = interactionPayloadUrl(component.url, 512);
+        } else {
+          if (interactionPayloadHas(component, 'url')) invalidInteractionMessagePayload();
+          addCustomId(component, output);
+        }
+      } else {
+        if (children.length !== 1 || ![3, 5, 6, 7, 8].includes(component.type as number))
+          invalidInteractionMessagePayload();
+        interactionPayloadKeys(
+          component,
+          [
+            'type',
+            'id',
+            'custom_id',
+            'placeholder',
+            'min_values',
+            'max_values',
+            'disabled',
+            'required',
+            'options',
+            'channel_types',
+            'default_values',
+          ],
+          ['type', 'custom_id'],
+        );
+        addCustomId(component, output);
+        if (interactionPayloadHas(component, 'placeholder'))
+          output.placeholder = interactionPayloadString(component.placeholder, 0, 150);
+        const minimum = interactionPayloadHas(component, 'min_values')
+          ? interactionPayloadInteger(component.min_values, 0, 25)
+          : 1;
+        const maximum = interactionPayloadHas(component, 'max_values')
+          ? interactionPayloadInteger(component.max_values, 1, 25)
+          : 1;
+        if (minimum > maximum) invalidInteractionMessagePayload();
+        if (interactionPayloadHas(component, 'min_values')) output.min_values = minimum;
+        if (interactionPayloadHas(component, 'max_values')) output.max_values = maximum;
+        if (interactionPayloadHas(component, 'required'))
+          output.required = interactionPayloadBoolean(component.required);
+        if (component.type === 3) {
+          if (
+            interactionPayloadHas(component, 'default_values') ||
+            interactionPayloadHas(component, 'channel_types')
+          )
+            invalidInteractionMessagePayload();
+          const values = new Set<string>();
+          let defaults = 0;
+          const options = interactionPayloadArray(component.options, 25, 1).map((entry) => {
+            const option = interactionPayloadObject(entry);
+            interactionPayloadKeys(
+              option,
+              ['label', 'value', 'description', 'emoji', 'default'],
+              ['label', 'value'],
+            );
+            const value = interactionPayloadString(option.value, 1, 100);
+            if (values.has(value)) invalidInteractionMessagePayload();
+            values.add(value);
+            const normalized: Record<string, unknown> = {
+              label: interactionPayloadString(option.label, 1, 100),
+              value,
+            };
+            if (interactionPayloadHas(option, 'description'))
+              normalized.description = interactionPayloadString(option.description, 0, 100);
+            if (interactionPayloadHas(option, 'emoji'))
+              normalized.emoji = interactionComponentEmoji(option.emoji);
+            if (interactionPayloadHas(option, 'default')) {
+              normalized.default = interactionPayloadBoolean(option.default);
+              if (normalized.default) defaults += 1;
+            }
+            return normalized;
+          });
+          if (
+            maximum > options.length ||
+            defaults > maximum ||
+            (defaults > 0 && defaults < minimum)
+          )
+            invalidInteractionMessagePayload();
+          output.options = options;
+        } else {
+          if (interactionPayloadHas(component, 'options')) invalidInteractionMessagePayload();
+          if (interactionPayloadHas(component, 'channel_types')) {
+            if (component.type !== 8) invalidInteractionMessagePayload();
+            const channelTypes = interactionPayloadArray(component.channel_types, 11).map((type) =>
+              interactionPayloadInteger(type, 0, 16),
+            );
+            if (
+              new Set(channelTypes).size !== channelTypes.length ||
+              channelTypes.some((type) => ![0, 2, 4, 5, 10, 11, 12, 13, 14, 15, 16].includes(type))
+            )
+              invalidInteractionMessagePayload();
+            output.channel_types = channelTypes;
+          }
+          if (interactionPayloadHas(component, 'default_values')) {
+            const defaults = interactionPayloadArray(component.default_values, maximum).map(
+              (entry) => {
+                const value = interactionPayloadObject(entry);
+                interactionPayloadKeys(value, ['id', 'type'], ['id', 'type']);
+                const type = interactionPayloadString(value.type, 1, 7);
+                const permitted =
+                  component.type === 5
+                    ? ['user']
+                    : component.type === 6
+                      ? ['role']
+                      : component.type === 7
+                        ? ['user', 'role']
+                        : ['channel'];
+                if (!permitted.includes(type)) invalidInteractionMessagePayload();
+                return { id: interactionSnowflake(value.id), type };
+              },
+            );
+            if (
+              (defaults.length > 0 && defaults.length < minimum) ||
+              new Set(defaults.map((value) => value.type + ':' + value.id)).size !== defaults.length
+            )
+              invalidInteractionMessagePayload();
+            output.default_values = defaults;
+          }
+        }
+      }
+      if (interactionPayloadHas(component, 'disabled'))
+        output.disabled = interactionPayloadBoolean(component.disabled);
+      return output;
+    });
+    const output: Record<string, unknown> = { type: 1, components };
+    addId(row, output);
+    return output;
+  });
+}
+
+function interactionPayloadAttachments(
+  value: unknown,
+  extended: boolean,
+): Record<string, unknown>[] {
+  if (!extended) return interactionPayloadArray(value, 0) as Record<string, unknown>[];
+  const ids = new Set<string>();
+  let totalBytes = 0;
+  return interactionPayloadArray(value, 10).map((entry) => {
+    const attachment = interactionPayloadObject(entry);
+    interactionPayloadKeys(
+      attachment,
+      ['id', 'filename', 'size', 'content_type', 'url', 'proxy_url', 'sha256', 'description'],
+      ['id', 'filename', 'size', 'content_type', 'url', 'proxy_url', 'sha256'],
+    );
+    const id = interactionSnowflake(attachment.id);
+    if (ids.has(id)) invalidInteractionMessagePayload();
+    ids.add(id);
+    const filename = interactionPayloadString(attachment.filename, 1, 255);
+    if (filename === '.' || filename === '..' || /[\\/\p{Cc}]/u.test(filename))
+      invalidInteractionMessagePayload();
+    const size = interactionPayloadInteger(attachment.size, 0, 2_097_152);
+    totalBytes += size;
+    if (totalBytes > 8_388_608) invalidInteractionMessagePayload();
+    const contentType = interactionPayloadString(attachment.content_type, 1, 255);
+    if (!/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+(?:;[\x20-\x7E]*)?$/.test(contentType))
+      invalidInteractionMessagePayload();
+    const sha256 = interactionPayloadString(attachment.sha256, 64, 64);
+    if (!/^[0-9a-f]{64}$/.test(sha256)) invalidInteractionMessagePayload();
+    const localUrl = (value: unknown): string => {
+      const text = interactionPayloadUrl(value);
+      const url = new URL(text);
+      if (
+        url.protocol !== 'http:' ||
+        url.hostname !== '127.0.0.1' ||
+        url.hash !== '' ||
+        url.search !== ''
+      )
+        invalidInteractionMessagePayload();
+      return text;
+    };
+    const url = localUrl(attachment.url);
+    const proxyUrl = localUrl(attachment.proxy_url);
+    if (new URL(url).origin !== new URL(proxyUrl).origin) invalidInteractionMessagePayload();
+    return {
+      id,
+      filename,
+      size,
+      content_type: contentType,
+      url,
+      proxy_url: proxyUrl,
+      sha256,
+      ...(interactionPayloadHas(attachment, 'description')
+        ? { description: interactionPayloadString(attachment.description, 0, 1024) }
+        : {}),
+    };
+  });
+}
+
 function interactionPayloadAllowedMentions(value: unknown): Record<string, unknown> {
   const mentions = interactionPayloadObject(value);
   interactionPayloadKeys(mentions, ['parse'], ['parse']);
@@ -594,6 +870,7 @@ function interactionPayloadFlags(value: unknown, permitted: number): number {
 function interactionNormalizeCreatePayload(
   value: Record<string, unknown>,
   permittedFlags = 4 | 64 | 4096,
+  extended = false,
 ): Record<string, unknown> {
   interactionPayloadKeys(value, [
     'content',
@@ -610,10 +887,10 @@ function interactionNormalizeCreatePayload(
       : '',
     embeds: interactionPayloadHas(value, 'embeds') ? interactionPayloadEmbeds(value.embeds) : [],
     components: interactionPayloadHas(value, 'components')
-      ? interactionPayloadComponents(value.components)
+      ? interactionPayloadComponents(value.components, extended)
       : [],
     attachments: interactionPayloadHas(value, 'attachments')
-      ? interactionPayloadArray(value.attachments, 0)
+      ? interactionPayloadAttachments(value.attachments, extended)
       : [],
     flags: interactionPayloadHas(value, 'flags')
       ? interactionPayloadFlags(value.flags, permittedFlags)
@@ -628,6 +905,7 @@ function interactionNormalizeCreatePayload(
 function interactionCurrentMutablePayload(
   current: ResourceRecord,
   maxBytes: number,
+  extended: boolean,
 ): Record<string, unknown> {
   // Do not spread a ResourceRecord: provenance, identity and arbitrary fixture
   // data must never become mutable payload fields or be read via accessors.
@@ -653,6 +931,7 @@ function interactionCurrentMutablePayload(
   return interactionNormalizeCreatePayload(
     interactionPayloadObject(cloneInteractionPayload(selected, maxBytes)),
     4 | 64 | 128 | 4096,
+    extended,
   );
 }
 
@@ -666,11 +945,12 @@ export function validateInteractionMessagePayload(
   maxBytes: number,
   current?: ResourceRecord,
   materializing = false,
+  extended = false,
 ): Readonly<Record<string, unknown>> {
   const data = interactionPayloadObject(cloneInteractionPayload(value, maxBytes));
   let output: Record<string, unknown>;
   if (current === undefined) {
-    output = interactionNormalizeCreatePayload(data);
+    output = interactionNormalizeCreatePayload(data, 4 | 64 | 4096, extended);
   } else {
     interactionPayloadKeys(data, [
       'content',
@@ -680,7 +960,7 @@ export function validateInteractionMessagePayload(
       'flags',
       'allowed_mentions',
     ]);
-    output = interactionCurrentMutablePayload(current, maxBytes);
+    output = interactionCurrentMutablePayload(current, maxBytes, extended);
     if (interactionPayloadHas(data, 'content')) {
       output.content = data.content === null ? '' : interactionPayloadString(data.content, 0, 2000);
       // Content replacement clears the old policy unless this PATCH replaces it.
@@ -690,10 +970,10 @@ export function validateInteractionMessagePayload(
       output.embeds = data.embeds === null ? [] : interactionPayloadEmbeds(data.embeds);
     if (interactionPayloadHas(data, 'components'))
       output.components =
-        data.components === null ? [] : interactionPayloadComponents(data.components);
+        data.components === null ? [] : interactionPayloadComponents(data.components, extended);
     if (interactionPayloadHas(data, 'attachments'))
       output.attachments =
-        data.attachments === null ? [] : interactionPayloadArray(data.attachments, 0);
+        data.attachments === null ? [] : interactionPayloadAttachments(data.attachments, extended);
     if (interactionPayloadHas(data, 'flags')) {
       const supplied = data.flags === null ? 0 : interactionPayloadFlags(data.flags, 4 | 64);
       const prior = interactionPayloadFlags(output.flags, 4 | 64 | 128 | 4096);
@@ -711,7 +991,8 @@ export function validateInteractionMessagePayload(
     (current === undefined || materializing) &&
     normalized.content === '' &&
     interactionPayloadArray(normalized.embeds, 10).length === 0 &&
-    interactionPayloadArray(normalized.components, 5).length === 0
+    interactionPayloadArray(normalized.components, 5).length === 0 &&
+    (!extended || interactionPayloadArray(normalized.attachments, 10).length === 0)
   )
     invalidInteractionMessagePayload(50006);
   return normalized;

@@ -18,6 +18,7 @@ export interface RateLimitRequest {
   readonly method: string;
   readonly path: string;
   readonly identity?: string;
+  readonly exemptGlobal?: boolean;
 }
 
 export interface RateLimitResult {
@@ -133,7 +134,7 @@ export class RateLimitEngine {
 
   public acquire(request: RateLimitRequest): RateLimitResult {
     const nowMs = this.#clock.now();
-    if (nowMs < this.#globalResetAtMs) {
+    if (!request.exemptGlobal && nowMs < this.#globalResetAtMs) {
       return this.#deniedGlobal(this.#globalResetAtMs - nowMs);
     }
     const observedKey = this.#observedRequests.get(requestFingerprint(request));

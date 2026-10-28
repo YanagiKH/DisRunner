@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { access, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { captureLinuxSandbox, requireLinuxNonRoot } from './linux-sandbox.mjs';
 
 const HARNESS_TIMEOUT_MS = 60_000;
 const INSPECTOR_READY_TIMEOUT_MS = 15_000;
@@ -12,81 +14,148 @@ const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024;
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const releaseRoot = path.join(desktopRoot, 'release');
 
-/*
- * Packaged Electron on Windows hits the Electron #41325/CDP deadlock when an attached inspector
- * calls native BrowserWindow APIs, and packaged builds reject NODE_OPTIONS preload hooks. This smoke test
- * therefore limits the Windows branch to the real executable, packaged-browser identity,
- * application ASAR presence, stability, and deterministic process-tree cleanup. It does not
- * execute the packaged renderer, preload bridge, or runtime on Windows. Those behaviors are
- * exercised by the full macOS/Linux package branch and the separate desktop E2E,
- * runtime-manager, raw-webhook, and security suites.
- */
+function sandboxEvidencePath(name) {
+  const directory = process.env.DISRUNNER_LINUX_SANDBOX_EVIDENCE;
+  return directory === undefined ? undefined : path.join(directory, name);
+}
 
+// The Windows branch attaches to the renderer over Chromium CDP. It never evaluates native
+// BrowserWindow operations through the main-process inspector.
 async function runWindowsSmoke(signal) {
   const executablePath = await findExecutable();
   const userDataDirectory = await mkdtemp(path.join(tmpdir(), 'disrunner-package-smoke-'));
-
+  const negativeRoot = path.join(desktopRoot, 'tests', 'fixtures', 'package-smoke-project');
   let applicationProcess;
-  let inspector;
+  let browser;
   let processOutput = '';
-
+  let page;
   try {
     const launched = await launchApplication(executablePath, userDataDirectory, signal, (chunk) => {
       processOutput = appendBounded(processOutput, chunk, MAX_PROCESS_OUTPUT_BYTES);
     });
     applicationProcess = launched.process;
-    inspector = new InspectorClient(launched.inspectorUrl, signal);
-    await inspector.connect();
-
-    const identity = await inspector.evaluate(`
-      ({
-        defaultApp: process.defaultApp === true,
-        electron: process.versions.electron,
-        execPath: process.execPath,
-        node: process.versions.node,
-        resourcesPath: process.resourcesPath,
-        type: process.type,
-        uptime: process.uptime(),
-      })
-    `);
-    assert.equal(identity.type, 'browser');
-    assert.equal(identity.defaultApp, false, 'the smoke target must be a packaged app');
-    assert.match(identity.node, /^\d+\.\d+\.\d+/u);
-    assert.match(identity.electron, /^\d+\.\d+\.\d+/u);
-    assert.equal(path.resolve(identity.execPath), path.resolve(executablePath));
-    assert.equal(path.dirname(identity.resourcesPath), path.dirname(executablePath));
-
-    const applicationArchive = await stat(path.join(identity.resourcesPath, 'app.asar'));
-    assert.equal(applicationArchive.isFile(), true);
-    assert.ok(applicationArchive.size > 100_000, 'packaged ASAR must contain the application');
-
-    await delay(500, signal);
-    assert.equal(applicationProcess.exitCode, null, 'packaged app must remain alive after launch');
-    inspector.close();
-    inspector = undefined;
-    await terminateProcessTree(applicationProcess);
-    assert.ok(
-      applicationProcess.exitCode !== null || applicationProcess.signalCode !== null,
-      'packaged app process tree must be cleaned up',
+    const { chromium } = await import('playwright');
+    browser = await chromium.connectOverCDP(launched.devtoolsUrl, { timeout: 15000 });
+    const context = browser.contexts()[0];
+    assert.ok(context, 'packaged renderer must expose a browser context');
+    page = context.pages()[0] ?? (await context.waitForEvent('page', { timeout: 15000 }));
+    await page.waitForURL(/^file:/u);
+    await page.waitForLoadState('domcontentloaded');
+    await captureLinuxSandbox({
+      mainPid: applicationProcess.pid,
+      browser,
+      evidencePath: sandboxEvidencePath('raw-cdp.json'),
+    });
+    assert.deepEqual(
+      await page.evaluate(() => ({
+        bridge: typeof window.disrunnerDesktop,
+        process: typeof globalThis.process,
+        require: typeof globalThis.require,
+      })),
+      { bridge: 'object', process: 'undefined', require: 'undefined' },
     );
+    const identity = await page.evaluate(() => window.disrunnerDesktop.getRuntimeInfo());
+    assert.equal(identity.packaged, true);
+    if (process.env.RELEASE_VERSION !== undefined)
+      assert.equal(
+        identity.version,
+        process.env.RELEASE_VERSION,
+        'installed desktop version must match the release version',
+      );
+    assert.equal(identity.offline, true);
+    assert.equal(identity.platform, process.platform);
+    const archivePath =
+      process.platform === 'darwin'
+        ? path.resolve(path.dirname(executablePath), '../Resources/app.asar')
+        : path.join(path.dirname(executablePath), 'resources', 'app.asar');
+    const archive = await stat(archivePath);
+    assert.equal(archive.isFile(), true);
+    assert.ok(archive.size > 100000);
+    assert.equal(
+      await page.evaluate(async () => {
+        try {
+          await fetch('https://discord.com/api/v10/gateway');
+          return false;
+        } catch {
+          return true;
+        }
+      }),
+      true,
+    );
+
+    // Exercise the regular project-directory field, then start through the real controls.
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Open bundled example', exact: true }).click();
+    await page.getByRole('button', { name: 'Start bot', exact: true }).click();
+    await page
+      .getByRole('status', { name: 'Runtime phase', exact: true })
+      .getByText('running', { exact: true })
+      .waitFor();
+    const started = await page.evaluate(() => window.disrunnerDesktop.getRuntimeState());
+    assert.equal(started.phase, 'running');
+    assert.equal(typeof started.pid, 'number');
+    await page.getByRole('button', { name: 'Back to simulator', exact: true }).click();
+    const composer = page.getByRole('textbox', { name: new RegExp('^Message #') });
+    await composer.fill('/ping');
+    await composer.press('Enter');
+    await assertCallbackDiagnostic(page, started, '/ping', 'Pong! Offline and deterministic.', 1);
+    const secret = await invokeSessionCommand(page, '/secret');
+    assert.equal(secret.response?.data.flags, 64);
+    const stopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.errors));
+    assert.equal(stopped.snapshot.pid, null);
+    assert.equal(stopped.snapshot.endpoints, null);
+    await runScenarioRoundTrip(page, started.contexts[0]);
+
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('textbox', { name: 'Project directory', exact: true }).fill(negativeRoot);
+    await page.getByRole('button', { name: 'Open directory', exact: true }).click();
+    await page.getByRole('button', { name: 'Start bot', exact: true }).click();
+    await page
+      .getByRole('status', { name: 'Runtime phase', exact: true })
+      .getByText('running', { exact: true })
+      .waitFor();
+    assert.equal(
+      (await invokeSessionCommand(page, '/context')).response?.data.content,
+      'Pong from package smoke bot.',
+    );
+    await assert.rejects(invokeSessionCommand(page, '/invalid'), /Bot interaction failed/u);
+    const evidence = await page.evaluate(() => window.disrunnerDesktop.getRuntimeState());
+    assert.ok(
+      evidence.traces.some((trace) => trace.name === '/invalid' && trace.status === 'error'),
+    );
+    assert.ok(evidence.risks.some((risk) => risk.ruleId === 'INVALID_INTERACTION_CALLBACK'));
+    assert.equal((await page.evaluate(() => window.disrunnerDesktop.stopRuntime())).ok, true);
+    assert.equal(
+      (await page.evaluate(() => window.disrunnerDesktop.startRuntime())).phase,
+      'running',
+    );
+    // Closing an active app must complete normal runtime and process-tree cleanup.
+    await page
+      .evaluate(() => window.disrunnerDesktop.controlWindow('close'))
+      .catch(() => undefined);
+    await waitForExit(applicationProcess, 10000, signal);
     applicationProcess = undefined;
+    await browser.close().catch(() => undefined);
+    browser = undefined;
   } catch (error) {
     const diagnostic = sanitizeDiagnostic(processOutput);
-    if (error instanceof Error && diagnostic !== '') {
-      error.message = `${error.message}\nPackaged process output (sanitized):\n${diagnostic}`;
-    }
+    if (error instanceof Error && diagnostic !== '')
+      error.message += `\nPackaged process output (sanitized):\n${diagnostic}`;
     throw error;
   } finally {
-    inspector?.close();
+    if (page && !page.isClosed())
+      await page.evaluate(() => window.disrunnerDesktop.stopRuntime()).catch(() => undefined);
+    await browser?.close().catch(() => undefined);
     await terminateProcessTree(applicationProcess);
     await removeDirectory(userDataDirectory);
   }
 }
 
 async function runFullPackagedSmoke(signal) {
+  requireLinuxNonRoot();
   const executablePath = await findExecutable();
   const userDataDirectory = await mkdtemp(path.join(tmpdir(), 'disrunner-package-smoke-'));
-  const exampleProjectRoot = path.resolve(desktopRoot, '..', '..', 'examples', 'raw-webhook-bot');
   const negativeProjectRoot = path.join(desktopRoot, 'tests', 'fixtures', 'package-smoke-project');
   const forgedPeerProjectRoot = path.join(
     desktopRoot,
@@ -102,6 +171,7 @@ async function runFullPackagedSmoke(signal) {
     signal.throwIfAborted();
     const { _electron: electron } = await import('playwright');
     electronApplication = await electron.launch({
+      chromiumSandbox: true,
       args: ['--remote-allow-origins=*', `--user-data-dir=${userDataDirectory}`],
       env: sanitizedEnvironment(),
       executablePath,
@@ -110,6 +180,16 @@ async function runFullPackagedSmoke(signal) {
     const page = await electronApplication.firstWindow();
     await page.waitForLoadState('domcontentloaded');
     assert.match(page.url(), /^file:/u, 'packaged renderer must load from a file URL');
+    if (process.platform === 'linux') {
+      const window = await electronApplication.browserWindow(page);
+      const rendererPid = await window.evaluate((window) => window.webContents.getOSProcessId());
+      await window.dispose();
+      await captureLinuxSandbox({
+        mainPid: electronApplication.process().pid,
+        rendererPids: [rendererPid],
+        evidencePath: sandboxEvidencePath('raw-native.json'),
+      });
+    }
 
     const isolation = await page.evaluate(() => ({
       bridge: typeof window.disrunnerDesktop,
@@ -120,6 +200,12 @@ async function runFullPackagedSmoke(signal) {
 
     const runtimeInfo = await page.evaluate(() => window.disrunnerDesktop.getRuntimeInfo());
     assert.equal(runtimeInfo.packaged, true);
+    if (process.env.RELEASE_VERSION !== undefined)
+      assert.equal(
+        runtimeInfo.version,
+        process.env.RELEASE_VERSION,
+        'packaged desktop version must match the release version',
+      );
     assert.equal(runtimeInfo.offline, true);
 
     const discordRequestBlocked = await page.evaluate(async () => {
@@ -132,20 +218,25 @@ async function runFullPackagedSmoke(signal) {
     });
     assert.equal(discordRequestBlocked, true, 'Discord network request must be blocked');
 
-    await electronApplication.evaluate(async ({ dialog }, selectedProject) => {
-      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selectedProject] });
-    }, exampleProjectRoot);
-    const selected = await page.evaluate(() => window.disrunnerDesktop.selectProject());
-    assert.equal(selected?.phase, 'ready', selected?.error ?? 'project should validate');
+    const selected = await page.evaluate(() => window.disrunnerDesktop.openExample());
+    assert.equal(selected?.phase, 'ready', selected?.error ?? 'bundled example should validate');
     assert.equal(path.basename(selected?.project?.root ?? ''), 'raw-webhook-bot');
+    const marker = path.join(selected.project.root, 'user-copy-marker.txt');
+    await writeFile(marker, 'keep user changes', 'utf8');
+    const reopened = await page.evaluate(() => window.disrunnerDesktop.openExample());
+    assert.equal(reopened.project.root, selected.project.root);
+    assert.equal(
+      await readFile(marker, 'utf8'),
+      'keep user changes',
+      'opening the example again must not overwrite user files',
+    );
+    assert.equal(reopened.pid, null, 'opening the bundled example must never start the bot');
 
     const started = await page.evaluate(() => window.disrunnerDesktop.startRuntime());
     assert.equal(started.phase, 'running', started.error ?? 'runtime should start');
     assert.equal(typeof started.pid, 'number');
 
-    const composer = page.getByRole('textbox', {
-      name: `Message #${started.contexts[0].channelId}`,
-    });
+    const composer = page.locator('.composer input');
     await composer.fill('/ping');
     await composer.press('Enter');
     const pingDiagnostic = await assertCallbackDiagnostic(
@@ -174,11 +265,102 @@ async function runFullPackagedSmoke(signal) {
       2,
     );
     assert.notEqual(secretDiagnostic.requestId, pingDiagnostic.requestId);
+    await invokeSessionCommand(page, '/attachment');
+    await page.getByRole('button', { name: 'Save note.txt', exact: true }).waitFor();
+    const attachment = await page.evaluate(async (actorId) => {
+      const current = await window.disrunnerDesktop.getRuntimeState(actorId);
+      const message = current.coreState.resources.find(
+        (resource) =>
+          resource.resourceType === 'message' &&
+          resource.attachments?.some((attachment) => attachment.filename === 'note.txt'),
+      );
+      return message?.attachments?.find((attachment) => attachment.filename === 'note.txt');
+    }, started.contexts[0].actorId);
+    assert.equal(typeof attachment?.id, 'string');
+    const attachmentTarget = path.join(userDataDirectory, 'saved-note.txt');
+    await electronApplication.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, attachmentTarget);
+    assert.equal(
+      await page.evaluate((request) => window.disrunnerDesktop.saveAttachment(request), {
+        runId: started.runId,
+        attachmentId: attachment.id,
+        context: started.contexts[0],
+      }),
+      true,
+    );
+    assert.equal(await readFile(attachmentTarget, 'utf8'), 'Offline attachment ✓\n');
 
     const stopped = await page.evaluate(() => window.disrunnerDesktop.stopRuntime());
     assert.equal(stopped.ok, true, JSON.stringify(stopped.errors));
     assert.equal(stopped.snapshot.phase, 'ready', stopped.snapshot.error ?? 'runtime should stop');
     assert.equal(stopped.snapshot.pid, null);
+    await runScenarioRoundTrip(page, started.contexts[0]);
+    for (const format of ['json', 'junit', 'html', 'sarif']) {
+      const target = path.join(
+        userDataDirectory,
+        `scenario-report.${format === 'junit' ? 'xml' : format}`,
+      );
+      await electronApplication.evaluate(({ dialog }, filePath) => {
+        dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+      }, target);
+      assert.equal(
+        await page.evaluate(
+          (selectedFormat) => window.disrunnerDesktop.exportScenario(selectedFormat),
+          format,
+        ),
+        true,
+      );
+      const encoded = await readFile(target, 'utf8');
+      if (format === 'json') assert.equal(JSON.parse(encoded).status, 'failed');
+      else if (format === 'sarif') assert.equal(JSON.parse(encoded).version, '2.1.0');
+      else assert.match(encoded, format === 'junit' ? /<testsuites?\b/u : /<!doctype html>/iu);
+    }
+    const reproductionTarget = path.join(userDataDirectory, 'reproduction.json');
+    await electronApplication.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, reproductionTarget);
+    assert.equal(await page.evaluate(() => window.disrunnerDesktop.exportReproduction()), true);
+    const reproduction = JSON.parse(await readFile(reproductionTarget, 'utf8'));
+    assert.equal(reproduction.version, 1);
+    assert.equal(reproduction.kind, 'bot-rerun');
+    assert.equal(reproduction.replayable, false);
+    assert.equal(reproduction.requiresOriginalProject, true);
+    assert.equal(reproduction.report.status, 'failed');
+    await page.getByRole('button', { name: 'Guild Editor', exact: true }).click();
+    const resourceEditor = page.getByRole('textbox', {
+      name: 'Fixture resources JSON',
+      exact: true,
+    });
+    const editedResources = JSON.parse(await resourceEditor.inputValue());
+    editedResources.find((resource) => resource.resourceType === 'guild').name =
+      'Saved after cancelling quit';
+    await resourceEditor.fill(JSON.stringify(editedResources, null, 2));
+    await electronApplication.evaluate(({ app, dialog }) => {
+      globalThis.disrunnerQuitPrompted = false;
+      dialog.showMessageBoxSync = () => {
+        globalThis.disrunnerQuitPrompted = true;
+        return 0;
+      };
+      setImmediate(() => app.quit());
+    });
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (await electronApplication.evaluate(() => globalThis.disrunnerQuitPrompted)) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(
+      await electronApplication.evaluate(() => globalThis.disrunnerQuitPrompted),
+      true,
+      'the unsaved-changes prompt must allow cancelling quit',
+    );
+    await page.getByText('Unsaved changes', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Save workspace', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: 'Workspace saved.' }).waitFor();
+    assert.equal(
+      (await page.evaluate(() => window.disrunnerDesktop.getRuntimeState())).disposed,
+      false,
+      'cancelling quit must leave the session usable',
+    );
 
     await electronApplication.evaluate(async ({ dialog }, selectedProject) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selectedProject] });
@@ -295,7 +477,35 @@ async function runFullPackagedSmoke(signal) {
   }
 }
 
-// Inspector callbacks remain diagnostics; only retained public originals become chat rows.
+async function runScenarioRoundTrip(page, context) {
+  await page.getByRole('button', { name: 'Scenario Lab', exact: true }).click();
+  const source = {
+    version: 2,
+    name: 'packaged-bot-roundtrip',
+    execution: { kind: 'bot', project: '.', clock: 'realtime', timeoutMs: 10000 },
+    context: { actor: context.actorId, guild: context.guildId, channel: context.channelId },
+    steps: [{ action: 'invoke-command', command: 'ping', saveAs: 'ping' }],
+    assertions: [
+      {
+        type: 'message-content',
+        interaction: '${ping.id}',
+        equals: 'Pong! Offline and deterministic.',
+      },
+    ],
+  };
+  const editor = page.getByRole('textbox', { name: 'Scenario source', exact: true });
+  await editor.fill(JSON.stringify(source, null, 2));
+  await page.getByRole('button', { name: 'Run scenario', exact: true }).click();
+  await page.getByRole('heading', { name: 'passed', exact: true }).waitFor();
+  source.assertions[0].equals = 'Deliberately incorrect expectation.';
+  await editor.fill(JSON.stringify(source, null, 2));
+  await page.getByRole('button', { name: 'Run scenario', exact: true }).click();
+  await page.getByRole('heading', { name: 'failed', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Save workspace', exact: true }).click();
+  await page.getByRole('status').filter({ hasText: 'Workspace saved.' }).waitFor();
+}
+
+// Inspector callbacks remain diagnostics; chat rows come from authoritative viewer-filtered state.
 async function assertCallbackDiagnostic(page, started, command, content, expectedPublicOriginals) {
   // Wait for this composer invocation before selecting Trace: ephemeral replies select Payload.
   await page
@@ -350,15 +560,17 @@ async function assertCallbackDiagnostic(page, started, command, content, expecte
       assert.equal(await row.count(), 1);
       assert.equal(await row.locator('.message-content').textContent(), resource.content);
     }
-    assert.equal(await page.locator('.chat-message').count(), expectedPublicOriginals);
     assert.equal(
-      await page
-        .locator('.chat-message')
-        .getByText('Only you can see this.', { exact: true })
-        .count(),
-      0,
-      'ephemeral callbacks must stay diagnostic-only and never enter the public feed',
+      originals.some((resource) => resource.content === 'Only you can see this.'),
+      false,
+      'public snapshots must never expose private responses',
     );
+    if (command === '/secret')
+      await page
+        .locator('.chat-message.ephemeral')
+        .getByText('Only you can see this.', { exact: true })
+        .first()
+        .waitFor();
     await page.getByRole('tab', { name: 'Trace', exact: true }).click();
     return payload;
   } finally {
@@ -390,6 +602,24 @@ async function invokeSessionCommand(page, input) {
 }
 
 async function findExecutable() {
+  const override = process.env.DISRUNNER_PACKAGED_EXECUTABLE;
+  if (override !== undefined) {
+    assert.ok(path.isAbsolute(override), 'DISRUNNER_PACKAGED_EXECUTABLE must be an absolute path');
+    const info = await stat(override);
+    assert.equal(
+      info.isFile(),
+      true,
+      'packaged executable override must identify a regular executable file',
+    );
+    await access(override, process.platform === 'win32' ? constants.F_OK : constants.X_OK);
+    if (process.platform === 'win32')
+      assert.equal(
+        path.extname(override).toLowerCase(),
+        '.exe',
+        'Windows packaged executable override must be an .exe file',
+      );
+    return override;
+  }
   const preferred =
     process.platform === 'win32'
       ? [path.join(releaseRoot, 'win-unpacked', 'DisRunner.exe')]
@@ -447,21 +677,25 @@ function isExecutableName(name) {
 }
 
 async function launchApplication(executable, userData, signal, onOutput) {
+  requireLinuxNonRoot();
   signal.throwIfAborted();
-  const args = ['--inspect=127.0.0.1:0', `--user-data-dir=${userData}`];
-  if (process.platform !== 'win32' && process.getuid?.() === 0) args.push('--no-sandbox');
+  const args = [
+    '--remote-debugging-address=127.0.0.1',
+    '--remote-debugging-port=0',
+    `--user-data-dir=${userData}`,
+  ];
   const child = spawn(executable, args, {
     detached: process.platform !== 'win32',
     env: sanitizedEnvironment(),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  const inspectorUrl = await new Promise((resolve, reject) => {
+  const devtoolsUrl = await new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
       finish(
         new Error(
-          `Packaged app did not expose its Node inspector within ${INSPECTOR_READY_TIMEOUT_MS} ms.`,
+          `Packaged app did not expose its renderer CDP endpoint within ${INSPECTOR_READY_TIMEOUT_MS} ms.`,
         ),
       );
     }, INSPECTOR_READY_TIMEOUT_MS);
@@ -476,7 +710,7 @@ async function launchApplication(executable, userData, signal, onOutput) {
     const onData = (chunk) => {
       const text = Buffer.from(chunk).toString('utf8');
       onOutput(text);
-      const match = /Debugger listening on (ws:\/\/127\.0\.0\.1:\d+\/[^\s]+)/u.exec(text);
+      const match = /DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/[^\s]+)/u.exec(text);
       if (match?.[1]) finish(null, match[1]);
     };
     const finish = (error, value) => {
@@ -493,138 +727,7 @@ async function launchApplication(executable, userData, signal, onOutput) {
     child.stdout.on('data', onData);
     child.stderr.on('data', onData);
   });
-  return { process: child, inspectorUrl };
-}
-
-class InspectorClient {
-  #abortSignal;
-  #commands = new Map();
-  #id = 0;
-  #url;
-  #webSocket;
-
-  constructor(url, abortSignal) {
-    this.#url = url;
-    this.#abortSignal = abortSignal;
-  }
-
-  async connect() {
-    assert.equal(typeof WebSocket, 'function', 'Node 22 WebSocket support is required');
-    this.#abortSignal.throwIfAborted();
-    const socket = new WebSocket(this.#url);
-    this.#webSocket = socket;
-    socket.addEventListener('message', (event) => this.#onMessage(event));
-    socket.addEventListener('close', () => this.#rejectPending(new Error('Inspector closed.')));
-    socket.addEventListener('error', () =>
-      this.#rejectPending(new Error('Inspector WebSocket failed.')),
-    );
-    await new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => finish(new Error('Inspector connection timed out.')), 5_000);
-      const onAbort = () => finish(this.#abortSignal.reason ?? new Error('Smoke test aborted.'));
-      const onOpen = () => finish();
-      const onError = () => finish(new Error('Inspector connection failed.'));
-      const finish = (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        this.#abortSignal.removeEventListener('abort', onAbort);
-        socket.removeEventListener('open', onOpen);
-        socket.removeEventListener('error', onError);
-        if (error) reject(error);
-        else resolve();
-      };
-      socket.addEventListener('open', onOpen, { once: true });
-      socket.addEventListener('error', onError, { once: true });
-      this.#abortSignal.addEventListener('abort', onAbort, { once: true });
-    });
-    await this.command('Runtime.enable');
-  }
-
-  async evaluate(expression) {
-    const response = await this.command('Runtime.evaluate', {
-      expression,
-      returnByValue: true,
-      userGesture: true,
-    });
-    if (response.exceptionDetails) {
-      const description = response.exceptionDetails.exception?.description;
-      const text = response.exceptionDetails.text;
-      throw new Error(`Main-process evaluation failed: ${String(description ?? text)}`);
-    }
-    const result = response.result;
-    if (Object.hasOwn(result, 'value')) return result.value;
-    if (result.type === 'undefined') return undefined;
-    throw new Error(
-      `Inspector could not serialize evaluation result of type ${String(result.type)}.`,
-    );
-  }
-
-  command(method, params = {}) {
-    this.#abortSignal.throwIfAborted();
-    const socket = this.#webSocket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error('Inspector is not connected.'));
-    }
-    const id = ++this.#id;
-    return new Promise((resolve, reject) => {
-      const cleanup = () => {
-        clearTimeout(timer);
-        this.#abortSignal.removeEventListener('abort', onAbort);
-      };
-      const timer = setTimeout(() => {
-        this.#commands.delete(id);
-        cleanup();
-        reject(new Error(`Inspector command ${method} timed out.`));
-      }, 5_000);
-      const onAbort = () => {
-        this.#commands.delete(id);
-        cleanup();
-        reject(this.#abortSignal.reason ?? new Error('Smoke test aborted.'));
-      };
-      this.#abortSignal.addEventListener('abort', onAbort, { once: true });
-      this.#commands.set(id, {
-        reject: (error) => {
-          cleanup();
-          reject(error);
-        },
-        resolve: (value) => {
-          cleanup();
-          resolve(value);
-        },
-      });
-      socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  close() {
-    this.#rejectPending(new Error('Inspector client closed.'));
-    this.#webSocket?.close();
-    this.#webSocket = undefined;
-  }
-
-  #onMessage(event) {
-    const raw =
-      typeof event.data === 'string' ? event.data : Buffer.from(event.data).toString('utf8');
-    let message;
-    try {
-      message = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    if (typeof message.id !== 'number') return;
-    const command = this.#commands.get(message.id);
-    if (!command) return;
-    this.#commands.delete(message.id);
-    if (message.error)
-      command.reject(new Error(`Inspector error: ${String(message.error.message)}`));
-    else command.resolve(message.result);
-  }
-
-  #rejectPending(error) {
-    for (const command of this.#commands.values()) command.reject(error);
-    this.#commands.clear();
-  }
+  return { process: child, devtoolsUrl };
 }
 
 function waitForExit(child, timeoutMs, signal) {
@@ -689,22 +792,6 @@ async function removeDirectory(directory) {
   throw lastError;
 }
 
-function delay(milliseconds, signal) {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, milliseconds);
-    const onAbort = () => {
-      clearTimeout(timer);
-      cleanup();
-      reject(signal.reason ?? new Error('Packaged smoke test was aborted.'));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
 function sanitizedEnvironment() {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
@@ -741,13 +828,25 @@ function sanitizeDiagnostic(value) {
     .trim();
 }
 
-const harnessController = new AbortController();
-const harnessTimer = setTimeout(() => {
-  harnessController.abort(new Error(`Packaged smoke test exceeded ${HARNESS_TIMEOUT_MS} ms.`));
-}, HARNESS_TIMEOUT_MS);
-try {
-  if (process.platform === 'win32') await runWindowsSmoke(harnessController.signal);
-  else await runFullPackagedSmoke(harnessController.signal);
-} finally {
-  clearTimeout(harnessTimer);
+export {
+  findExecutable,
+  launchApplication,
+  terminateProcessTree,
+  waitForExit,
+  sanitizedEnvironment,
+  sanitizeDiagnostic,
+};
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const harnessController = new AbortController();
+  const harnessTimer = setTimeout(() => {
+    harnessController.abort(new Error(`Packaged smoke test exceeded ${HARNESS_TIMEOUT_MS} ms.`));
+  }, HARNESS_TIMEOUT_MS);
+  try {
+    if (process.platform === 'win32' || process.env.DISRUNNER_SMOKE_RENDERER_CDP === '1')
+      await runWindowsSmoke(harnessController.signal);
+    else await runFullPackagedSmoke(harnessController.signal);
+  } finally {
+    clearTimeout(harnessTimer);
+  }
 }

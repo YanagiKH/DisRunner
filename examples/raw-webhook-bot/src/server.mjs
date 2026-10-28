@@ -2,6 +2,14 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
+import { interactionReply } from './commands.mjs';
+import {
+  completeAfterAcknowledgement,
+  createLocalApiClient,
+  loadLocalApiConfiguration,
+  registerLocalCommands,
+} from './local-api.mjs';
+
 import {
   requireWebhookPeerSecret,
   signWebhookResponseAuthentication,
@@ -29,6 +37,7 @@ export function loadServerOptionsFromEnvironment(environment = process.env) {
   const peerSecretHex = requireWebhookPeerSecret(environment.DISRUNNER_WEBHOOK_PEER_SECRET);
   const host = requireLoopbackHost(environment.DISRUNNER_BOT_HOST ?? '127.0.0.1');
   return {
+    localApi: loadLocalApiConfiguration(environment),
     host,
     port: readInteger(environment.DISRUNNER_BOT_PORT, 'DISRUNNER_BOT_PORT', 39_001, 0, 65_535),
     publicKeyHex,
@@ -97,6 +106,8 @@ export function createWebhookServer(options) {
   const settings = normalizeServerOptions(options);
   const publicKey = ed25519PublicKey(settings.publicKeyHex);
   const replayCache = new Map();
+  const lifecycle = new AbortController();
+  const localApi = createLocalApiClient(settings.localApi, lifecycle.signal);
 
   const server = createServer(
     {
@@ -216,21 +227,43 @@ export function createWebhookServer(options) {
           sendAuthenticated(400, { code: 50035, message: 'Invalid Form Body' });
           return;
         }
-        handleInteraction(sendAuthenticated, interaction);
+        void handleInteraction(sendAuthenticated, interaction, {
+          response,
+          localApi,
+          signal: lifecycle.signal,
+          waitUntilReady: settings.waitUntilReady,
+        }).catch(() => sendAuthenticated(503, { code: 0, message: 'Local Bot is not ready.' }));
       });
     },
   );
 
   server.maxConnections = settings.maxConnections;
   server.maxRequestsPerSocket = settings.maxRequestsPerSocket;
+  server.once('close', () => lifecycle.abort());
   return server;
 }
 
 export async function startFromEnvironment(environment = process.env) {
   const options = loadServerOptionsFromEnvironment(environment);
-  const server = createWebhookServer(options);
-  await listen(server, options.port, options.host);
-  return server;
+  let ready;
+  const readiness = new Promise((resolve) => {
+    ready = resolve;
+  });
+  const server = createWebhookServer({ ...options, waitUntilReady: () => readiness });
+  try {
+    await listen(server, options.port, options.host);
+    if (options.localApi !== null) {
+      await registerLocalCommands(createLocalApiClient(options.localApi));
+      process.stdout.write('Commands registered.\n');
+    }
+    ready(true);
+    return server;
+  } catch (error) {
+    ready(false);
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    throw error;
+  }
 }
 
 function normalizeServerOptions(options) {
@@ -238,6 +271,9 @@ function normalizeServerOptions(options) {
     throw new TypeError('Webhook server options are required.');
   }
   return {
+    localApi: options.localApi ?? null,
+    waitUntilReady:
+      typeof options.waitUntilReady === 'function' ? options.waitUntilReady : undefined,
     publicKeyHex: requirePublicKey(options.publicKeyHex),
     peerSecretHex: requireWebhookPeerSecret(options.peerSecretHex),
     maxBodyBytes: requireInteger(options.maxBodyBytes, 'maxBodyBytes', 1),
@@ -318,56 +354,55 @@ function pruneReplayCache(replayCache, nowMs) {
   }
 }
 
-function handleInteraction(send, interaction) {
+async function handleInteraction(send, interaction, runtime) {
   if (typeof interaction !== 'object' || interaction === null || Array.isArray(interaction)) {
     send(400, { code: 50035, message: 'Invalid Form Body' });
     return;
   }
   if (interaction.type === 1) {
+    if (runtime.waitUntilReady !== undefined && !(await runtime.waitUntilReady())) {
+      send(503, { code: 0, message: 'Local Bot could not register its commands.' });
+      return;
+    }
     send(200, { type: 1 });
     return;
   }
-  const name = interaction.data?.name;
-  if (name === 'ping') {
-    send(200, {
-      type: 4,
-      data: { content: 'Pong! Offline and deterministic.' },
-    });
-  } else if (name === 'secret') {
-    send(200, {
-      type: 4,
-      data: { content: 'Only you can see this.', flags: 64 },
-    });
-  } else if (name === 'slow') {
-    send(200, { type: 5 });
-  } else if (interaction.type === 3 && interaction.data?.custom_id === 'open-debug-modal') {
-    send(200, {
-      type: 9,
-      data: {
-        custom_id: 'debug-modal',
-        title: 'Reproduce a failure',
-        components: [
-          {
-            type: 1,
-            components: [
-              {
-                type: 4,
-                custom_id: 'summary',
-                label: 'Summary',
-                style: 2,
-                required: true,
-              },
-            ],
-          },
-        ],
-      },
-    });
-  } else {
-    send(200, {
-      type: 4,
-      data: { content: `Unknown local command: ${String(name ?? 'interaction')}` },
+  const reply = interactionReply(interaction);
+  if (reply.afterAck !== undefined && runtime.localApi !== null) {
+    runtime.response.once('finish', () => {
+      const handlerId = `raw-${interaction.id}`;
+      process.stdout.write(
+        'DISRUNNER_HANDLER ' + JSON.stringify({ id: handlerId, phase: 'start' }) + '\n',
+      );
+      setImmediate(() => {
+        void completeAfterAcknowledgement(
+          runtime.localApi,
+          interaction,
+          reply.afterAck,
+          runtime.signal,
+        )
+          .catch(() => {
+            if (!runtime.signal.aborted) {
+              process.stderr.write('Local response could not complete.\n');
+              process.stdout.write(
+                'DISRUNNER_DIAGNOSTIC ' +
+                  JSON.stringify({
+                    code: 'bot-error',
+                    message: 'The local response did not complete after acknowledgement.',
+                  }) +
+                  '\n',
+              );
+            }
+          })
+          .finally(() => {
+            process.stdout.write(
+              'DISRUNNER_HANDLER ' + JSON.stringify({ id: handlerId, phase: 'end' }) + '\n',
+            );
+          });
+      });
     });
   }
+  send(200, reply.callback);
 }
 
 function sendJson(response, status, body, authentication) {
@@ -465,11 +500,10 @@ function listen(server, port, host) {
 
 async function runAsMain() {
   try {
-    const options = loadServerOptionsFromEnvironment();
-    const server = createWebhookServer(options);
-    await listen(server, options.port, options.host);
+    const server = await startFromEnvironment();
+    const address = server.address();
     process.stdout.write(
-      `DisRunner example bot listening on http://${options.host}:${String(options.port)}\n`,
+      `DisRunner example bot listening on http://${address.address}:${String(address.port)}\n`,
     );
 
     const shutdown = () => {

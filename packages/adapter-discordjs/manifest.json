@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "discord.js",
+  "sdk": "discord.js",
+  "sdkVersion": "14.27.0",
+  "runtime": "node",
+  "runtimeMajor": 22,
+  "modules": ["esm", "commonjs"],
+  "clock": "realtime",
+  "transport": "gateway-json-api-v10",
+  "readiness": "DISRUNNER_ADAPTER_READY"
+}

@@ -1,6 +1,6 @@
 # REST bootstrap identity profile
 
-`LocalRestEmulator` accepts an optional `bootstrap` profile that fixes the identity returned by two local REST routes. It is synthetic test data supplied by the caller. It does not contact Discord, does not use a real token, and is not a claim that any Discord SDK or library works against the emulator.
+`LocalRestEmulator` accepts an optional `bootstrap` profile that fixes the identity returned by two local REST routes. It is synthetic test data supplied by the caller. Shared raw and pinned SDK sessions supply it automatically. These two routes alone do not establish SDK compatibility; the supported versions and wider protocol subset are listed in [SDK adapters](sdk-adapters.md).
 
 ## Routes
 
@@ -9,7 +9,7 @@
 | `GET`  | `/users/@me`               | Returns `bootstrap.user`        | Unchanged: first bot user in state, else a synthetic fallback |
 | `GET`  | `/oauth2/applications/@me` | Returns `bootstrap.application` | `404` with `{"code":0,"message":"404: Not Found"}`            |
 
-Both routes use the existing request pipeline in its existing order: loopback `Host` check, then the per-instance synthetic `Authorization` value (bare or with the `Bot ` prefix, under the existing rules), then the injected `RateLimitEngine`, then routing. A wrong, missing, or `Bearer` credential returns `401` before any rate-limit bucket is consumed and never includes profile data. An exhausted bucket returns the existing `429` body and headers. Other methods and nearby paths (for example a trailing slash, `/oauth2/applications`, or `/oauth2/applications/@me/assets`) return `404`. The `/api/v10` and `/api/v9` prefixes and query strings behave as they do for every other route.
+For supported paths, both routes check loopback `Host`, then the per-instance synthetic `Authorization` value (bare or with the `Bot ` prefix), then the injected `RateLimitEngine`, then routing. A wrong, missing, or `Bearer` credential returns `401` before quota is consumed and never includes profile data. An exhausted bucket returns `429`. Other methods and nearby paths (for example a trailing slash, `/oauth2/applications`, or `/oauth2/applications/@me/assets`) return `404`. API v10 is the current profile. Older direct core profiles accept v9-prefixed/unprefixed routes; `command-registry-v2` rejects unsupported explicit API versions with `501` before ordinary authorization/routing.
 
 When no profile is configured, the application route is never inferred from a bot user in state. The profile is never written to `VirtualState`.
 
@@ -79,14 +79,14 @@ The Gateway emulator takes its own `botUserId` and `applicationId` options. To k
 
 ## Shared runtime
 
-The existing Session/runtime startup used by CLI and Desktop supplies the profile automatically for `raw-interaction-webhook`. Each start retains its generated application ID and allocates distinct bot-user and synthetic-owner IDs from that run's SnowflakeGenerator. REST `/users/@me` and Gateway `READY.user.id` share the bot-user ID. REST `/oauth2/applications/@me`, Gateway `READY.application.id`, and signed interaction `application_id` share the application ID. `/gateway/bot` returns the actual dynamically allocated Gateway URL.
+Session startup supplies the profile for `raw-interaction-webhook`, discord.js 14.27.0, and discord.py 2.6.4. The Bot ID comes from the enforcing/SDK Bot fixture when configured; the legacy raw profile generates its Bot ID. Each run allocates an application ID and synthetic owner. REST `/users/@me`, Gateway `READY.user.id`, and message authors use the same Bot ID. REST `/oauth2/applications/@me`, Gateway `READY.application.id`, and interaction `application_id` share the application ID. `/gateway/bot` returns the actual dynamically allocated Gateway URL.
 
-Display fields are bounded synthetic literals: user username `DisRunner Bot`, application name `DisRunner Test Application`, and owner username `test-owner`. They do not come from project names or user fixtures. Startup does not mutate fixture state or require Gateway IDENTIFY to discover identity. REST bootstrap is available before IDENTIFY, subject to the existing per-run authentication.
+Bootstrap display fields are bounded synthetic literals: username `DisRunner Bot`, application name `DisRunner Test Application`, and owner username `test-owner`; fixture presentation fields need not match every protocol surface. SDK and v2-registry startup can add missing synthetic Bot/everyone-role/membership records to the run-owned state. Existing explicit permissions remain authoritative and project fixture files are not rewritten. REST identity is available before Gateway IDENTIFY, subject to per-run authentication; SDK cache bootstrap uses the same retained state.
 
 Stopping closes the run's endpoints. Restarting allocates a new profile and signing credentials; old and other-session tokens are not accepted. Separate sessions keep independent profiles and keys. Snowflakes use a realtime clock, so seed alone does not promise deterministic IDs or global uniqueness across independent runs.
 
 ## Limitations
 
-- Other adapters and SDK integrations are not supported by this wiring. An adapter without interaction signing credentials fails closed rather than receiving a fabricated verification key. This does not qualify any Discord SDK or a broader compatibility milestone.
+- The runtime advertises its per-run public verification key for all supported sessions. Raw interactions use that signing key; SDK interactions use Gateway delivery and authenticated callback routes instead. Other adapters/SDK versions are unsupported.
 - `Proxy` inputs are not supported as a guarantee: Proxy reflection traps can run caller code, so freedom from side effects cannot be guaranteed for them. Ordinary own accessors are still rejected without invoking the getter.
 - These routes are local test fixtures. They do not model Discord's production behavior, teams, install parameters, or any other application field.

@@ -2,56 +2,169 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/YanagiKH/DisRunner/blob/main/docs/schemas/discord-simulator.config.schema.json",
   "title": "DisRunner project configuration",
-  "description": "Version 1 configuration for an imported bot project. Runtime validation additionally enforces the selected network policy, workspace path boundary, command registry guild ID uint64 upper bound, and referenced guild fixture existence.",
+  "description": "Version 1 project configuration shared by Desktop and CLI. Files, executable paths, ID ranges, fixture relations, SDK versions, and network endpoints are also validated at runtime.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "bot", "adapter", "profile"],
   "properties": {
-    "$schema": { "type": "string" },
-    "version": { "const": 1 },
-    "bot": { "$ref": "#/$defs/bot" },
-    "adapter": { "$ref": "#/$defs/adapter" },
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1
+    },
+    "bot": {
+      "$ref": "#/$defs/bot"
+    },
+    "adapter": {
+      "$ref": "#/$defs/adapter"
+    },
     "environment": {
       "type": "object",
-      "description": "Explicit non-secret environment values. Real Discord credentials must not be stored here.",
-      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
-      "additionalProperties": { "type": "string" },
+      "description": "At most 252 explicit non-secret environment values; four slots are reserved for runtime ports and the raw-webhook public key. Each value is additionally limited to 65,536 UTF-8 bytes and all names and values together to 1 MiB at runtime. Real Discord credentials must not be stored here.",
+      "maxProperties": 252,
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 32768
+      },
       "default": {}
     },
-    "profile": { "$ref": "#/$defs/profile" },
-    "fixtures": { "$ref": "#/$defs/fixtures" }
+    "profile": {
+      "$ref": "#/$defs/profile"
+    },
+    "fixtures": {
+      "$ref": "#/$defs/fixtures"
+    }
   },
   "allOf": [
     {
       "if": {
+        "required": ["adapter"],
         "properties": {
-          "profile": {
-            "required": ["ordinaryMessagePermissions"],
+          "adapter": {
+            "required": ["type"],
             "properties": {
-              "ordinaryMessagePermissions": {
-                "const": "guild-text-own-messages-v1"
+              "type": {
+                "const": "raw-interaction-webhook"
               }
             }
           }
-        },
-        "required": ["profile"]
-      },
-      "then": {
-        "required": ["fixtures"],
-        "properties": {
-          "fixtures": {
-            "required": ["bot"]
-          }
         }
       },
-      "else": {
-        "properties": {
-          "fixtures": {
-            "not": {
+      "then": {
+        "if": {
+          "properties": {
+            "profile": {
+              "required": ["ordinaryMessagePermissions"],
+              "properties": {
+                "ordinaryMessagePermissions": {
+                  "const": "guild-text-own-messages-v1"
+                }
+              }
+            }
+          },
+          "required": ["profile"]
+        },
+        "then": {
+          "required": ["fixtures"],
+          "properties": {
+            "fixtures": {
               "required": ["bot"]
             }
           }
+        },
+        "else": {
+          "properties": {
+            "fixtures": {
+              "not": {
+                "required": ["bot"]
+              }
+            }
+          }
         }
+      }
+    },
+    {
+      "if": {
+        "required": ["adapter"],
+        "properties": {
+          "adapter": {
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "const": "discord.js"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "bot": {
+            "properties": {
+              "runtime": {
+                "const": "node"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["adapter"],
+        "properties": {
+          "adapter": {
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "const": "discord.py"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "bot": {
+            "properties": {
+              "runtime": {
+                "const": "python"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["adapter", "profile"],
+        "properties": {
+          "adapter": {
+            "properties": {
+              "type": {
+                "enum": ["discord.js", "discord.py"]
+              }
+            }
+          },
+          "profile": {
+            "not": {
+              "required": ["ordinaryMessagePermissions"],
+              "properties": {
+                "ordinaryMessagePermissions": {
+                  "const": "legacy-unenforced"
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["fixtures"]
       }
     }
   ],
@@ -59,24 +172,50 @@
     "relativePath": {
       "type": "string",
       "minLength": 1,
-      "description": "Resolved relative to the configuration file and checked against the selected workspace boundary at runtime."
+      "description": "Resolved relative to the configuration file and checked against the selected workspace boundary at runtime.",
+      "maxLength": 4096
     },
     "bot": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "runtime", "startCommand", "workingDirectory"],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
-        "runtime": { "enum": ["node", "python", "executable"] },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "runtime": {
+          "enum": ["node", "python", "executable"]
+        },
         "startCommand": {
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "description": "Command configured by the user. DisRunner must parse/execute it without unsafe shell concatenation."
+          "description": "An executable and arguments, without a shell. Node/Python may use a bare executable name from PATH or a quoted absolute interpreter path. The command must name entryPoint from workingDirectory."
         },
-        "entryPoint": { "$ref": "#/$defs/relativePath" },
-        "workingDirectory": { "$ref": "#/$defs/relativePath" }
-      }
+        "entryPoint": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "workingDirectory": {
+          "$ref": "#/$defs/relativePath"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["runtime"],
+            "properties": {
+              "runtime": {
+                "enum": ["node", "python"]
+              }
+            }
+          },
+          "then": {
+            "required": ["entryPoint"]
+          }
+        }
+      ]
     },
     "adapter": {
       "type": "object",
@@ -84,34 +223,103 @@
       "required": ["type"],
       "properties": {
         "type": {
-          "description": "v0.1 accepts only the tested raw interaction webhook adapter. Framework and generic Gateway adapters are planned and fail closed.",
-          "enum": ["raw-interaction-webhook"]
+          "enum": ["raw-interaction-webhook", "discord.js", "discord.py"],
+          "description": "Raw signed webhook, discord.js 14.27.0, or discord.py 2.6.4. SDK dependencies must be prepared before an offline run."
         },
-        "interactionEndpoint": { "type": "string", "minLength": 1, "maxLength": 2048 },
-        "restBaseUrl": { "type": "string", "minLength": 1, "maxLength": 2048 },
-        "gatewayUrl": { "type": "string", "minLength": 1, "maxLength": 2048 }
-      }
+        "interactionEndpoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "restBaseUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "gatewayUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "const": "raw-interaction-webhook"
+              }
+            }
+          },
+          "then": {
+            "required": ["interactionEndpoint"]
+          },
+          "else": {
+            "not": {
+              "required": ["interactionEndpoint"]
+            }
+          }
+        }
+      ]
     },
     "profile": {
       "type": "object",
       "additionalProperties": false,
       "required": ["mode", "seed", "networkPolicy"],
       "properties": {
-        "mode": { "enum": ["strict", "lenient"] },
-        "seed": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "mode": {
+          "enum": ["strict", "lenient"]
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
         "intents": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "items": {
+            "enum": [
+              "GUILDS",
+              "GUILD_MEMBERS",
+              "GUILD_MODERATION",
+              "GUILD_EXPRESSIONS",
+              "GUILD_INTEGRATIONS",
+              "GUILD_WEBHOOKS",
+              "GUILD_INVITES",
+              "GUILD_VOICE_STATES",
+              "GUILD_PRESENCES",
+              "GUILD_MESSAGES",
+              "GUILD_MESSAGE_REACTIONS",
+              "GUILD_MESSAGE_TYPING",
+              "DIRECT_MESSAGES",
+              "DIRECT_MESSAGE_REACTIONS",
+              "DIRECT_MESSAGE_TYPING",
+              "MESSAGE_CONTENT",
+              "GUILD_SCHEDULED_EVENTS",
+              "AUTO_MODERATION_CONFIGURATION",
+              "AUTO_MODERATION_EXECUTION",
+              "GUILD_MESSAGE_POLLS",
+              "DIRECT_MESSAGE_POLLS"
+            ]
+          },
           "default": []
         },
-        "networkPolicy": { "const": "offline" },
-        "hotReload": { "type": "boolean", "default": false },
-        "commandRegistry": { "$ref": "#/$defs/commandRegistry" },
+        "networkPolicy": {
+          "const": "offline"
+        },
+        "hotReload": {
+          "const": false,
+          "default": false,
+          "description": "Stop and restart after code changes. Automatic reload is not supported."
+        },
+        "commandRegistry": {
+          "$ref": "#/$defs/commandRegistry"
+        },
         "ordinaryMessagePermissions": {
           "enum": ["legacy-unenforced", "guild-text-own-messages-v1"],
-          "default": "legacy-unenforced",
-          "description": "Explicit ordinary guild-text own-message permission profile; independent of payload mode."
+          "description": "Guild-text permission profile. Raw projects default to legacy-unenforced; SDK projects default to guild-text-own-messages-v1."
         }
       }
     },
@@ -120,12 +328,17 @@
       "additionalProperties": false,
       "required": ["profile", "guildIds"],
       "properties": {
-        "profile": { "const": "command-registry-v1" },
+        "profile": {
+          "enum": ["command-registry-v1", "command-registry-v2"]
+        },
         "guildIds": {
           "type": "array",
           "maxItems": 128,
           "uniqueItems": true,
-          "items": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" }
+          "items": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
         }
       }
     },
@@ -133,9 +346,15 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "guild": { "$ref": "#/$defs/relativePath" },
-        "user": { "$ref": "#/$defs/relativePath" },
-        "bot": { "$ref": "#/$defs/relativePath" }
+        "guild": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "user": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "bot": {
+          "$ref": "#/$defs/relativePath"
+        }
       }
     }
   }

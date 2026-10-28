@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "name": "Raw webhook ping",
+  "execution": {
+    "kind": "bot",
+    "project": "../../examples/raw-webhook-bot",
+    "clock": "realtime",
+    "timeoutMs": 10000
+  },
+  "context": { "actor": "3000", "guild": "1000", "channel": "2000" },
+  "steps": [
+    { "action": "invoke-command", "command": "ping", "saveAs": "ping", "timeoutMs": 3000 },
+    { "action": "await-response", "interaction": "${ping.id}", "timeoutMs": 3000 }
+  ],
+  "assertions": [
+    {
+      "type": "message-content",
+      "interaction": "${ping.id}",
+      "equals": "Pong! Offline and deterministic."
+    },
+    { "type": "no-unexpected-error" }
+  ],
+  "policy": { "failOnSeverity": "high" }
+}

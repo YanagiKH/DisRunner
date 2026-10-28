@@ -90,6 +90,34 @@ test('startup rejects a non-loopback bind host', () => {
   );
 });
 
+test('REST integration rejects remote endpoints, URL credentials and production-shaped tokens', () => {
+  const environment = {
+    DISRUNNER_OFFLINE: '1',
+    DISRUNNER_PUBLIC_KEY: publicKeyHex,
+    DISRUNNER_WEBHOOK_PEER_SECRET: PEER_SECRET_HEX,
+    DISCORD_API_BASE_URL: 'http://127.0.0.1:4242/api/v10',
+    DISCORD_TOKEN: `disrunner.offline.${'x'.repeat(32)}`,
+  };
+  assert.equal(
+    loadServerOptionsFromEnvironment(environment).localApi.baseUrl,
+    environment.DISCORD_API_BASE_URL,
+  );
+  for (const baseUrl of [
+    'https://discord.com/api/v10',
+    'http://localhost:4242/api/v10',
+    'http://user:password@127.0.0.1:4242/api/v10',
+    'http://127.0.0.1:4242/api/v10?redirect=remote',
+  ])
+    assert.throws(
+      () => loadServerOptionsFromEnvironment({ ...environment, DISCORD_API_BASE_URL: baseUrl }),
+      /DISCORD_API_BASE_URL/u,
+    );
+  assert.throws(
+    () => loadServerOptionsFromEnvironment({ ...environment, DISCORD_TOKEN: 'real-token' }),
+    /synthetic DisRunner token/u,
+  );
+});
+
 test('project fixture paths are self-contained inside the example', async () => {
   const config = JSON.parse(
     await readFile(new URL('../discord-simulator.config.json', import.meta.url), 'utf8'),

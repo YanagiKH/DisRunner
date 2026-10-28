@@ -1,25 +1,18 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main, parseArgs } from '../src/index.js';
 import type { BotTestReport } from '../src/bot-test.js';
+import { assertChildCleanup, type ChildTrace } from './helpers/child-cleanup.js';
+import { launchWindowsConsole } from './helpers/windows-console.js';
 
 const fixtures = fileURLToPath(new URL('./fixtures/bot-test/', import.meta.url));
 const executable = fileURLToPath(new URL('../dist/index.js', import.meta.url));
 const directories: string[] = [];
-beforeAll(() => {
-  // Exercise the shipped entrypoint, never stale dist or a mocked launcher.
-  const repository = fileURLToPath(new URL('../../../', import.meta.url));
-  execFileSync(
-    process.execPath,
-    [join(repository, 'node_modules/typescript/bin/tsc'), '-p', 'apps/cli/tsconfig.build.json'],
-    { cwd: repository, stdio: 'pipe' },
-  );
-});
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(directories.splice(0).map((p) => rm(p, { recursive: true, force: true })));
@@ -37,17 +30,13 @@ async function project(mode = 'normal') {
   await writeFile(configPath, JSON.stringify(config));
   return path;
 }
-interface Trace {
-  event: string;
-  pid: number;
-}
-async function traces(path: string): Promise<Trace[]> {
+async function traces(path: string): Promise<ChildTrace[]> {
   try {
     return (await readFile(join(path, 'trace.jsonl'), 'utf8'))
       .trim()
       .split('\n')
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as Trace);
+      .map((line) => JSON.parse(line) as ChildTrace);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
@@ -80,10 +69,7 @@ function args(path: string, file = 'case-pass.json') {
   return ['bot-test', join(path, file), '--project', path, '--timeout-ms', '5000'];
 }
 async function assertDead(path: string) {
-  const records = await traces(path);
-  for (const pid of new Set(records.map((trace) => trace.pid))) {
-    expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }));
-  }
+  await assertChildCleanup(await traces(path));
 }
 
 describe('bot-test command boundary', () => {
@@ -227,15 +213,32 @@ describe('bot-test command boundary', () => {
     expect((JSON.parse(result.stdout) as BotTestReport).status).toBe('invalid');
     expect(await traces(path)).toEqual([]);
   }, 15000);
-  it.each([
-    ['SIGINT', 130, 'startup-stall', 'readiness'],
-    ['SIGTERM', 143, 'pong-only', 'command'],
-  ] as const)(
-    'executable %s cancels and awaits real child cleanup',
+  const cancellationCases: [
+    NodeJS.Signals | 'Ctrl+C',
+    130 | 143,
+    'startup-stall' | 'pong-only',
+    'readiness' | 'command',
+  ][] =
+    process.platform === 'win32'
+      ? [
+          ['Ctrl+C', 130, 'startup-stall', 'readiness'],
+          ['Ctrl+C', 130, 'pong-only', 'command'],
+        ]
+      : [
+          ['SIGINT', 130, 'startup-stall', 'readiness'],
+          ['SIGTERM', 143, 'pong-only', 'command'],
+        ];
+  it.each(cancellationCases)(
+    'executable %s (exit %s, %s/%s) cancels and awaits real child cleanup',
     async (signal, code, mode, event) => {
       const path = await project(mode);
       const out = join(path, 'cancelled.json');
-      const running = launch([...args(path), '--out', out]);
+      const command = [...args(path), '--out', out];
+      const controller =
+        process.platform === 'win32'
+          ? await launchWindowsConsole([process.execPath, executable, ...command], path)
+          : null;
+      const running = controller ?? launch(command);
       try {
         const deadline = Date.now() + 4000;
         while (
@@ -244,7 +247,8 @@ describe('bot-test command boundary', () => {
         )
           await delay(10);
         expect((await traces(path)).some((trace) => trace.event === event)).toBe(true);
-        expect(running.child.kill(signal)).toBe(true);
+        if (controller) await controller.interrupt();
+        else expect(running.child.kill(signal as NodeJS.Signals)).toBe(true);
         const result = await running.result;
         expect(result.code).toBe(code);
         expect(result.signal).toBeNull();
@@ -255,7 +259,8 @@ describe('bot-test command boundary', () => {
         expect(report.cleanupErrors).toEqual([]);
         await assertDead(path);
       } finally {
-        if (running.child.exitCode === null && running.child.signalCode === null)
+        if (controller) await controller.dispose();
+        else if (running.child.exitCode === null && running.child.signalCode === null)
           running.child.kill('SIGTERM');
         await running.result;
       }

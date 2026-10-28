@@ -15,6 +15,7 @@ export interface BotSnapshotLike {
 }
 
 export interface BotRunnerLike {
+  evidence?(): Readonly<Record<string, unknown>>;
   start(config: Readonly<Record<string, unknown>>): Promise<BotSnapshotLike>;
   stop(graceMs?: number): Promise<BotSnapshotLike>;
   snapshot(): BotSnapshotLike;

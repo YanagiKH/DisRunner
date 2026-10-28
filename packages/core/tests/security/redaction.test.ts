@@ -158,6 +158,95 @@ describe('secret and PII redaction', () => {
     expect(bigintOutput.oversized).toBe('[REDACTION_UNSUPPORTED]');
   });
 
+  it('redacts multiline, escaped and short configured values throughout exports', () => {
+    const secret = 'first-private-quote"\\value\r\nsecond-private-測試\nxy';
+    const lines = secret.split(/\r?\n/u);
+    const output = sanitizeForExport(
+      {
+        whole: secret,
+        escaped: JSON.stringify(secret).slice(1, -1),
+        lines,
+        escapedLines: lines.map((line) => JSON.stringify(line).slice(1, -1)),
+        [`public-${lines[1]}`]: 'visible',
+      },
+      { sensitiveValues: [secret] },
+    );
+    expect(output.whole).toBe('[REDACTED]');
+    expect(output.escaped).toBe('[REDACTED]');
+    expect(output.lines).toEqual(['[REDACTED]', '[REDACTED]', '[REDACTED]']);
+    expect(output.escapedLines).toEqual(['[REDACTED]', '[REDACTED]', '[REDACTED]']);
+    const serialized = JSON.stringify(output);
+    for (const line of lines) expect(serialized).not.toContain(line);
+    expect(serialized).toContain('public-[REDACTED]');
+  });
+
+  it('redacts complete known values that cross a source cutoff without exposing their prefix', () => {
+    const secret = 'cutoff-private-credential-value';
+    const prefix = 'visible prefix ';
+    for (const maxStringLength of [prefix.length + 1, prefix.length + 8, prefix.length + 20]) {
+      const output = redactString(`${prefix}${secret} trailing`, {
+        sensitiveValues: [secret],
+        maxStringLength,
+      });
+      expect(output).toBe(`${prefix}[REDACTED][REDACTION_STRING_TRUNCATED]`);
+      expect(output).not.toContain(secret.slice(0, maxStringLength - prefix.length));
+    }
+    const escaped = 'line-one-private\nline-two-private';
+    expect(
+      redactString(`visible ${JSON.stringify(escaped).slice(1, -1)}`, {
+        sensitiveValues: [escaped],
+        maxStringLength: 14,
+      }),
+    ).toBe('visible [REDACTED][REDACTION_STRING_TRUNCATED]');
+  });
+
+  it('merges overlapping secret matches before replacing or clipping text', () => {
+    expect(redactString('abcdefgh-public', { sensitiveValues: ['abcdef', 'cdefgh'] })).toBe(
+      '[REDACTED]-public',
+    );
+    expect(redactString('aaaaa', { sensitiveValues: ['aaa'] })).toBe('[REDACTED]');
+  });
+
+  it('supports the complete configured environment envelope without caller-expanded variants', () => {
+    const values = Array.from({ length: 258 }, (_, index) => `private-${index}-quote"\\`);
+    values[0] = `long-private-${'x'.repeat(32_768 - 13)}`;
+    expect(values[0]).toHaveLength(32_768);
+    expect(
+      redactString(`${values[0]} ${JSON.stringify(values[257]).slice(1, -1)}`, {
+        sensitiveValues: values,
+      }),
+    ).toBe('[REDACTED] [REDACTED]');
+  });
+
+  it('fails closed with explicit markers when derived secret forms or matches exceed their budget', () => {
+    const manyLines = Array.from({ length: 5_000 }, (_, index) => `line-${index}`).join('\n');
+    expect(redactString('visible text', { sensitiveValues: [manyLines] })).toBe(
+      '[REDACTION_SENSITIVE_VALUES_LIMIT]',
+    );
+    expect(redactString('a'.repeat(100_000), { sensitiveValues: ['a'] })).toBe(
+      '[REDACTION_SENSITIVE_VALUES_LIMIT]',
+    );
+    expect(() => redactString('safe', { sensitiveValues: Array(513).fill('private') })).toThrow(
+      RangeError,
+    );
+    expect(() => redactString('safe', { sensitiveValues: ['x'.repeat(65_537)] })).toThrow(
+      RangeError,
+    );
+    expect(() =>
+      redactString('safe', { sensitiveValues: Array(33).fill('x'.repeat(65_536)) }),
+    ).toThrow(RangeError);
+    let reads = 0;
+    const accessor = ['safe'];
+    Object.defineProperty(accessor, '0', {
+      get() {
+        reads += 1;
+        return 'private';
+      },
+    });
+    expect(() => redactString('safe', { sensitiveValues: accessor })).toThrow(TypeError);
+    expect(reads).toBe(0);
+  });
+
   it('bounds sparse huge arrays and fails closed for custom properties and cycles', () => {
     const sparse: unknown[] = [];
     sparse.length = 1_000_000_000;
