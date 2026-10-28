@@ -166,6 +166,8 @@ jobs:
         run: pnpm run test:unit
       - name: Runtime-manager peer authentication tests
         run: pnpm --filter @disrunner/desktop run test:runtime-manager
+      - name: CLI integration tests
+        run: pnpm --filter @disrunner/cli run test:integration
       - name: Real SDK transport conformance
         run: node --test --test-concurrency=1 tests/conformance/*.test.mjs
       - name: Isolated offline raw webhook and SDK conformance

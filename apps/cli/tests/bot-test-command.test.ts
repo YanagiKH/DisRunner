@@ -1,25 +1,16 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main, parseArgs } from '../src/index.js';
 import type { BotTestReport } from '../src/bot-test.js';
 
 const fixtures = fileURLToPath(new URL('./fixtures/bot-test/', import.meta.url));
 const executable = fileURLToPath(new URL('../dist/index.js', import.meta.url));
 const directories: string[] = [];
-beforeAll(() => {
-  // Exercise the shipped entrypoint, never stale dist or a mocked launcher.
-  const repository = fileURLToPath(new URL('../../../', import.meta.url));
-  execFileSync(
-    process.execPath,
-    [join(repository, 'node_modules/typescript/bin/tsc'), '-p', 'apps/cli/tsconfig.build.json'],
-    { cwd: repository, stdio: 'pipe' },
-  );
-});
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(directories.splice(0).map((p) => rm(p, { recursive: true, force: true })));
