@@ -95,7 +95,7 @@ Start the desktop:
 pnpm run dev
 ```
 
-In **Settings → Runtime paths**, open the bundled example or choose your own configured project, start the Bot, and invoke `/ping`. The bundled example is copied to an editable local project. The browser renderer started by `pnpm run dev:web` is a labeled demo and cannot manage Bot processes.
+In **Settings**, choose **Open bundled example** or **Browse folders** to open your configured project, start the Bot, and invoke `/ping`. The bundled example is copied to an editable local project. The browser renderer started by `pnpm run dev:web` is a labeled demo and cannot manage Bot processes.
 
 Read [Installation](docs/installation.md), [Getting started](docs/getting-started.md), and [Project configuration](docs/project-configuration.md) for the exact workflow.
 

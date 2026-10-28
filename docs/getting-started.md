@@ -33,7 +33,7 @@ This starts the real example process, waits for authenticated readiness, sends `
 pnpm run dev
 ```
 
-In Settings, browse to `examples/raw-webhook-bot`. Review the selected executable, entry point, working directory, adapter, and fixture context, then press **Start Bot**. The runtime strip shows phase, PID, errors, and bounded process output.
+In **Settings**, use **Browse folders** to open `examples/raw-webhook-bot`. Review its `discord-simulator.config.json` for the Bot executable, entry point, working directory, adapter, and fixture, then press **Start bot**. The runtime strip shows phase, PID, errors, and bounded process output.
 
 Select an actor and channel, send `/ping`, and inspect the message and trace. The reply stays attached to its initiating channel even if you navigate elsewhere. Supported buttons/selects send real component interactions; modal submission sends its entered fields, while cancellation sends nothing.
 

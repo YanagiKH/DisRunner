@@ -1103,8 +1103,7 @@ async function gui() {
       await composer.fill(command);
       await composer.press('Enter');
     }
-    async function stop(directory) {
-      await page.getByRole('button', { name: /^(Stop bot|Retry cleanup)$/u }).click();
+    async function waitForStoppedUi(label) {
       // The main-process snapshot can settle before React commits its renderer update.
       await until(
         async () =>
@@ -1112,8 +1111,12 @@ async function gui() {
           /Live messages unavailable/u.test(
             await page.getByRole('status', { name: 'Live message feed status' }).textContent(),
           ),
-        'UI Stop bot',
+        label,
       );
+    }
+    async function stop(directory) {
+      await page.getByRole('button', { name: /^(Stop bot|Retry cleanup)$/u }).click();
+      await waitForStoppedUi('UI Stop bot');
       await released(directory);
       assert.deepEqual(await visibleMessageContents(), [], 'stopped runtime clears retained feed');
       assert.match(
@@ -1296,15 +1299,14 @@ async function gui() {
     );
     await capture('gui-unchanged-raw');
     await page.getByRole('button', { name: 'Stop bot', exact: true }).click();
-    await until(async () => (await snapshot()).phase === 'ready', 'raw control stop');
+    await waitForStoppedUi('raw control stop');
+    assert.deepEqual(await visibleMessageContents(), []);
+    await expectNoDiagnostics();
     results.push({
       surface: 'packaged-electron',
       mode: 'actor-b-restart-and-unchanged-raw',
       outcome: 'control-passed',
     });
-    assert.deepEqual(await visibleMessageContents(), []);
-    await expectNoDiagnostics();
-
     async function selectLiveFixture(label, actor = 'a') {
       const directory = await project(label, 'normal', actor);
       const file = path.join(directory, 'discord-simulator.config.json');

@@ -919,13 +919,10 @@ function SettingsSurface({
               <div className="child-boundary-warning">
                 <Info size={17} />
                 <span>
-                  <strong>Current REST coverage</strong>
+                  <strong>Browser demo</strong>
                   <small>
-                    The live Desktop runtime emulates supported REST resources and a representative
-                    shared message-create rate limit. Permission enforcement,
-                    REST-mutation-to-Gateway dispatch, and observing a deferred callback&apos;s
-                    later REST follow-up in the composer are not yet implemented; permission and
-                    event panels remain fixture previews.
+                    This browser demo uses sample state. Open the desktop application to run a
+                    configured Bot with the supported local REST and Gateway profile.
                   </small>
                 </span>
               </div>
