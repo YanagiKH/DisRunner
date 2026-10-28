@@ -67,4 +67,6 @@ Model recordings do not capture arbitrary Bot process memory. To repeat a real B
 
 Stop the Bot before switching projects. Cancellation waits for cleanup and returns a cancelled result. Startup errors identify unsupported versions, missing dependencies, invalid fixtures, or transport failures. Inspect runtime output and the [troubleshooting guide](troubleshooting.md) when a run cannot start.
 
+Closing the last desktop window stops the Bot and exits DisRunner on every platform. If the workspace has unsaved changes, you can cancel closing and keep editing.
+
 The supported SDK transports stay local, but a selected Bot still has the current OS user's process and file access. Keep production secrets out of the project and use separate OS isolation for untrusted code. See [Offline mode](offline-mode.md) and [Privacy](privacy.md).
