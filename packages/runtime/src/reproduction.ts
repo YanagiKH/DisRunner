@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
-import { open, readFile, realpath } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -9,6 +8,7 @@ import { sanitizeForExport } from '@disrunner/core';
 import { loadProjectConfiguration } from './project-config.js';
 import { parseBotScenarioV2, type BotScenarioV2, type BotScenarioV2Result } from './scenario-v2.js';
 import { openWorkspace } from './workspace.js';
+import { hashRegularFile } from './file-read.js';
 
 interface RunInputs {
   readonly schemaVersion: 1;
@@ -570,24 +570,7 @@ async function hashSource(root: string, filename: string): Promise<string | null
       path.isAbsolute(relative)
     )
       throw new TypeError('Bot source must remain within the project.');
-    const file = await open(canonical, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    try {
-      const stat = await file.stat();
-      if (!stat.isFile() || stat.size > MAX_SOURCE_BYTES) return null;
-      const digest = createHash('sha256');
-      const chunk = Buffer.alloc(65_536);
-      let count = 0;
-      for (;;) {
-        const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
-        if (bytesRead === 0) break;
-        count += bytesRead;
-        if (count > MAX_SOURCE_BYTES) return null;
-        digest.update(chunk.subarray(0, bytesRead));
-      }
-      return digest.digest('hex');
-    } finally {
-      await file.close();
-    }
+    return await hashRegularFile(canonical, MAX_SOURCE_BYTES);
   } catch {
     return null;
   }

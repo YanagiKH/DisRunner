@@ -1,4 +1,4 @@
-import { readFile, stat } from 'node:fs/promises';
+import { hashRegularFile } from './file-read.js';
 import { canViewChannel } from './viewer-permissions.js';
 import { adapterCommand } from './adapter-host.js';
 import { RuntimeActionDriver } from './runtime-actions.js';
@@ -474,14 +474,10 @@ export class DesktopRuntimeManager {
           '@disrunner/core does not export LocalGatewayServer. Desktop startup is fail-closed until the core gateway transport is available.',
         );
       }
-      let sourceHash: string | null = null;
-      if (
-        configuration.entryPoint !== null &&
-        (await stat(configuration.entryPoint)).size <= 16 * 1_048_576
-      )
-        sourceHash = createHash('sha256')
-          .update(await readFile(configuration.entryPoint))
-          .digest('hex');
+      const sourceHash =
+        configuration.entryPoint === null
+          ? null
+          : await hashRegularFile(configuration.entryPoint, 16 * 1_048_576);
       signal.throwIfAborted();
       this.#inputs = {
         schemaVersion: 1,
