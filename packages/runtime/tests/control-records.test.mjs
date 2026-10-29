@@ -27,12 +27,17 @@ async function project(t, mode = 'live') {
       : '    const shutdown = () => {';
   const insertion = original.indexOf(anchor) + anchor.length;
   assert.equal(original.split(anchor).length, 2);
-  const start = 'DISRUNNER_HANDLER {"id":"raw-9999","phase":"start"}\n';
-  const end = 'DISRUNNER_HANDLER {"id":"raw-9999","phase":"end"}\n';
-  const injected =
-    mode === 'live'
-      ? `\n  process.stdout.write('DISRUNNER_HANDLER {"id":"raw-1","phase":"end"}\\n');`
-      : `\n      writeSync(1, ${JSON.stringify(start)});\n${mode === 'shutdown-complete' ? `      setTimeout(() => writeSync(1, ${JSON.stringify(end)}), 50);\n` : ''}`;
+  const injected = {
+    live: String.raw`
+  process.stdout.write('DISRUNNER_HANDLER {"id":"raw-1","phase":"end"}\n');`,
+    'shutdown-open': String.raw`
+      writeSync(1, 'DISRUNNER_HANDLER {"id":"raw-9999","phase":"start"}\n');`,
+    'shutdown-complete': String.raw`
+      writeSync(1, 'DISRUNNER_HANDLER {"id":"raw-9999","phase":"start"}\n');
+      setTimeout(() => writeSync(1, 'DISRUNNER_HANDLER {"id":"raw-9999","phase":"end"}\n'), 50);
+`,
+  }[mode];
+  assert.equal(typeof injected, 'string');
   const modified = `${mode === 'live' ? '' : "import { writeSync } from 'node:fs';\n"}${original.slice(0, insertion)}${injected}${original.slice(insertion)}`;
   await writeFile(serverFile, modified);
   return { directory, serverFile, original };
