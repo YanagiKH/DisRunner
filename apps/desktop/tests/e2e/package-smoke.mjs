@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -164,6 +164,7 @@ async function runFullPackagedSmoke(signal) {
     'package-smoke-forged-peer-project',
   );
   let electronApplication;
+  let page;
   const onAbort = () => void electronApplication?.close().catch(() => undefined);
   signal.addEventListener('abort', onAbort, { once: true });
 
@@ -177,7 +178,7 @@ async function runFullPackagedSmoke(signal) {
       executablePath,
       timeout: 45_000,
     });
-    const page = await electronApplication.firstWindow();
+    page = await electronApplication.firstWindow();
     await page.waitForLoadState('domcontentloaded');
     assert.match(page.url(), /^file:/u, 'packaged renderer must load from a file URL');
     if (process.platform === 'linux') {
@@ -470,6 +471,48 @@ async function runFullPackagedSmoke(signal) {
     // Closing a running packaged app exercises the main-process child/server cleanup path.
     await electronApplication.close();
     electronApplication = undefined;
+  } catch (error) {
+    try {
+      if (page && !page.isClosed()) {
+        const directory = path.join(desktopRoot, 'test-results');
+        const name = `package-smoke-${process.platform}-${process.arch}`;
+        await mkdir(directory, { recursive: true });
+        const diagnostic = await page.evaluate(() => {
+          let invocation = null;
+          try {
+            const payload = JSON.parse(
+              document.querySelector('.payload-view pre code')?.textContent ?? 'null',
+            );
+            if (payload && typeof payload === 'object')
+              invocation = Object.fromEntries(
+                ['command', 'runId', 'requestId'].map((key) => [
+                  key,
+                  typeof payload[key] === 'string' ? payload[key].slice(0, 256) : null,
+                ]),
+              );
+          } catch {
+            // The selected tab may not contain a payload.
+          }
+          return {
+            toast: document.querySelector('.toast')?.textContent?.slice(0, 512) ?? null,
+            inspectorTab:
+              document.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? null,
+            traceCommand:
+              document.querySelector('.trace-details dd')?.textContent?.slice(0, 256) ?? null,
+            invocation,
+          };
+        });
+        await writeFile(
+          path.join(directory, `${name}.json`),
+          sanitizeDiagnostic(JSON.stringify(diagnostic, null, 2)) + '\n',
+          'utf8',
+        );
+        await page.screenshot({ path: path.join(directory, `${name}.png`), timeout: 5_000 });
+      }
+    } catch {
+      // Diagnostic capture must not replace the original packaged-app failure.
+    }
+    throw error;
   } finally {
     signal.removeEventListener('abort', onAbort);
     await electronApplication?.close().catch(() => undefined);
@@ -507,15 +550,28 @@ async function runScenarioRoundTrip(page, context) {
 
 // Inspector callbacks remain diagnostics; chat rows come from authoritative viewer-filtered state.
 async function assertCallbackDiagnostic(page, started, command, content, expectedPublicOriginals) {
-  // Wait for this composer invocation before selecting Trace: ephemeral replies select Payload.
-  await page
-    .locator('.toast')
-    .getByText(`${command} returned by local bot`, { exact: true })
-    .waitFor();
   const expand = page.getByRole('button', { name: 'Expand inspector', exact: true });
   const restoreCollapsed = (await expand.count()) === 1;
   if (restoreCollapsed) await expand.click();
   try {
+    // Ephemeral callbacks select Payload. Confirm their persistent result before
+    // selecting Trace, so a late callback cannot switch tabs during assertions.
+    if (command === '/secret') {
+      await page.getByRole('tab', { name: 'Payload', exact: true }).click();
+      await page.waitForFunction(
+        ({ command, runId }) => {
+          try {
+            const payload = JSON.parse(
+              document.querySelector('.payload-view pre code')?.textContent ?? 'null',
+            );
+            return payload?.command === command && payload?.runId === runId;
+          } catch {
+            return false;
+          }
+        },
+        { command, runId: started.runId },
+      );
+    }
     await page.getByRole('tab', { name: 'Trace', exact: true }).click();
     const details = page
       .locator('.outcome-panel section')
