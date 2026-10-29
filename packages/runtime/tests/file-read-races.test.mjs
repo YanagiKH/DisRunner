@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -7,13 +8,47 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { createSession, emptyWorkspace, saveWorkspace } from '../dist/index.js';
+import { createSession, emptyWorkspace, openWorkspace, saveWorkspace } from '../dist/index.js';
 
 async function directory(t) {
   const root = await fs.mkdtemp(join(tmpdir(), 'DisRunner file read race '));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   return root;
 }
+
+test('dangling workspace links stay unsafe when no-follow opens are unavailable', async (t) => {
+  const root = await directory(t);
+  assert.equal((await openWorkspace(root)).status, 'missing');
+  await fs.mkdir(join(root, '.disrunner'));
+  const target = join(root, '.disrunner', 'workspace.json');
+  try {
+    await fs.symlink('missing.json', target, 'file');
+  } catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') {
+      t.skip('Creating a symlink requires Windows privileges.');
+      return;
+    }
+    throw error;
+  }
+  const originalOpen = fs.open;
+  t.mock.method(fs, 'open', (filename, flags, ...args) =>
+    originalOpen(
+      filename,
+      filename === target && typeof flags === 'number'
+        ? flags & ~(constants.O_NOFOLLOW ?? 0)
+        : flags,
+      ...args,
+    ),
+  );
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(openWorkspace(root), { code: 'unsafe-path' });
+    assert.equal((await fs.lstat(target)).isSymbolicLink(), true);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
 
 test(
   'a workspace replaced with a pipe before opening is rejected without blocking',

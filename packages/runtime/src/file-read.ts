@@ -25,6 +25,14 @@ export async function openRegularFile(
   } catch (error) {
     if (hasCode(error, 'ELOOP') || hasCode(error, 'EISDIR'))
       throw new RegularFileError('unsafe-path');
+    let current;
+    try {
+      current = await lstat(filePath);
+    } catch {
+      throw error;
+    }
+    if (!current.isFile() || current.isSymbolicLink()) throw new RegularFileError('unsafe-path');
+    if (hasCode(error, 'ENOENT')) throw new RegularFileError('conflict');
     throw error;
   }
   try {
