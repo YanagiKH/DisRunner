@@ -98,8 +98,8 @@ jobs:
             analyses="$(gh api "repos/${GITHUB_REPOSITORY}/code-scanning/analyses?ref=refs/heads/main&per_page=100")"
             ready="$(printf '%s' "$analyses" | jq -r --arg sha "$GITHUB_SHA" '
               [.[] | select(.commit_sha == $sha and .tool.name == "CodeQL") | .category] as $categories |
-              (($categories | index("/language:javascript-typescript/")) != null and
-               ($categories | index("/language:python/")) != null)
+              (($categories | index("/language:javascript-typescript")) != null and
+               ($categories | index("/language:python")) != null)
             ')"
             if [ "$ready" = true ]; then
               found=true

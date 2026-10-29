@@ -60,6 +60,9 @@ jobs:
       - name: Test release channels and signing prerequisites
         run: node --test .github/scripts/release-policy.test.mjs .github/scripts/verify-runtime-qualification.test.mjs
 
+      - name: Test code scanning analysis and severity policy
+        run: node --test .github/scripts/code-scanning-policy.test.mjs
+
       - name: Test Linux launcher and sandbox preparation
         run: pnpm run test:linux-sandbox
 
