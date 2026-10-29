@@ -472,36 +472,46 @@ async function runFullPackagedSmoke(signal) {
     await electronApplication.close();
     electronApplication = undefined;
   } catch (error) {
+    let diagnosticTimer;
     try {
-      if (page && !page.isClosed()) {
+      if (page && !page.isClosed() && !signal.aborted) {
         const directory = path.join(desktopRoot, 'test-results');
         const name = `package-smoke-${process.platform}-${process.arch}`;
         await mkdir(directory, { recursive: true });
-        const diagnostic = await page.evaluate(() => {
-          let invocation = null;
-          try {
-            const payload = JSON.parse(
-              document.querySelector('.payload-view pre code')?.textContent ?? 'null',
-            );
-            if (payload && typeof payload === 'object')
-              invocation = Object.fromEntries(
-                ['command', 'runId', 'requestId'].map((key) => [
-                  key,
-                  typeof payload[key] === 'string' ? payload[key].slice(0, 256) : null,
-                ]),
+        const diagnostic = await Promise.race([
+          page.evaluate(() => {
+            let invocation = null;
+            try {
+              const payload = JSON.parse(
+                document.querySelector('.payload-view pre code')?.textContent ?? 'null',
               );
-          } catch {
-            // The selected tab may not contain a payload.
-          }
-          return {
-            toast: document.querySelector('.toast')?.textContent?.slice(0, 512) ?? null,
-            inspectorTab:
-              document.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? null,
-            traceCommand:
-              document.querySelector('.trace-details dd')?.textContent?.slice(0, 256) ?? null,
-            invocation,
-          };
-        });
+              if (payload && typeof payload === 'object')
+                invocation = Object.fromEntries(
+                  ['command', 'runId', 'requestId'].map((key) => [
+                    key,
+                    typeof payload[key] === 'string' ? payload[key].slice(0, 256) : null,
+                  ]),
+                );
+            } catch {
+              // The selected tab may not contain a payload.
+            }
+            return {
+              toast: document.querySelector('.toast')?.textContent?.slice(0, 512) ?? null,
+              inspectorTab:
+                document.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? null,
+              traceCommand:
+                document.querySelector('.trace-details dd')?.textContent?.slice(0, 256) ?? null,
+              invocation,
+            };
+          }),
+          new Promise((_, reject) => {
+            diagnosticTimer = setTimeout(
+              () => reject(new Error('Packaged smoke metadata capture timed out.')),
+              5_000,
+            );
+          }),
+        ]);
+        clearTimeout(diagnosticTimer);
         await writeFile(
           path.join(directory, `${name}.json`),
           sanitizeDiagnostic(JSON.stringify(diagnostic, null, 2)) + '\n',
@@ -511,6 +521,8 @@ async function runFullPackagedSmoke(signal) {
       }
     } catch {
       // Diagnostic capture must not replace the original packaged-app failure.
+    } finally {
+      clearTimeout(diagnosticTimer);
     }
     throw error;
   } finally {
