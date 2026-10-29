@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { createSession, emptyWorkspace, openWorkspace, saveWorkspace } from '../dist/index.js';
 
 async function directory(t) {
-  const root = await fs.mkdtemp(join(tmpdir(), 'DisRunner file read race '));
+  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'DisRunner file read race ')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   return root;
 }
