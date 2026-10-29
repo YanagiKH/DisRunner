@@ -14,10 +14,11 @@ interface NavigationRequest {
 declare global {
   interface Window {
     readonly navigationRequests?: readonly NavigationRequest[];
+    readonly navigationControls?: { stop: number; window: string[] };
   }
 }
 
-for (const width of [720, 1280]) {
+for (const width of [720, 851, 1025, 1081, 1241, 1280, 1321, 1441]) {
   test(`keeps guild channels and direct messages reachable at ${width}px`, async ({
     page,
   }, info) => {
@@ -46,7 +47,18 @@ for (const width of [720, 1280]) {
           { actorId, guildId: '1100', channelId: '2200' },
           { actorId, channelId: '9000' },
         ],
-        project: null,
+        project: {
+          root: '/project',
+          configPath: '/project/config.json',
+          botName: 'Navigation Bot',
+          executable: 'node',
+          args: [],
+          cwd: '/project',
+          adapter: 'raw',
+          mode: 'strict',
+          seed: 42042,
+          environmentNames: [],
+        },
         error: null,
         pid: 123,
         endpoints: null,
@@ -67,7 +79,9 @@ for (const width of [720, 1280]) {
         },
       };
       const requests: NavigationRequest[] = [];
+      const controls = { stop: 0, window: [] as string[] };
       Object.defineProperty(window, 'navigationRequests', { value: requests });
+      Object.defineProperty(window, 'navigationControls', { value: controls });
       Object.defineProperty(window, 'disrunnerDesktop', {
         value: {
           getRuntimeInfo: () =>
@@ -82,7 +96,14 @@ for (const width of [720, 1280]) {
             }),
           selectProject: () => Promise.resolve(snapshot),
           startRuntime: () => Promise.resolve(snapshot),
-          stopRuntime: () => Promise.resolve({ ok: true, errors: [], snapshot }),
+          stopRuntime: () => {
+            controls.stop += 1;
+            return Promise.resolve({
+              ok: true,
+              errors: [],
+              snapshot: { ...snapshot, phase: 'stopped', pid: null },
+            });
+          },
           invokeCommand: () => Promise.reject(new Error('Use message actions in this test.')),
           dispatchAction: (request: NavigationRequest) => {
             requests.push(request);
@@ -97,12 +118,39 @@ for (const width of [720, 1280]) {
             });
           },
           onRuntimeState: () => () => {},
-          controlWindow: () => Promise.resolve(true),
+          controlWindow: (action: string) => {
+            controls.window.push(action);
+            return Promise.resolve(true);
+          },
         },
       });
     });
     await page.goto('/');
     await expect(page.getByRole('main', { name: 'Virtual channel first' })).toBeVisible();
+
+    const expectControlsInsideWindow = async () => {
+      const viewport = page.viewportSize();
+      if (viewport === null) throw new Error('Expected a fixed test viewport.');
+      await expect(page.locator('.start-button')).toBeVisible();
+      await expect(page.locator('.stop-button')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Close window', exact: true })).toBeVisible();
+      for (const control of [
+        page.locator('.start-button'),
+        page.locator('.stop-button'),
+        page.getByRole('button', { name: 'Minimize window', exact: true }),
+        page.getByRole('button', { name: 'Maximize window', exact: true }),
+        page.getByRole('button', { name: 'Close window', exact: true }),
+      ]) {
+        if (!(await control.isVisible())) continue;
+        const bounds = await control.boundingBox();
+        if (bounds === null) throw new Error('Expected visible control bounds.');
+        expect(bounds.x).toBeGreaterThanOrEqual(0);
+        expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width);
+        expect(bounds.y).toBeGreaterThanOrEqual(0);
+        expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height);
+      }
+    };
+    await expectControlsInsideWindow();
 
     const picker = page.getByRole('combobox', { name: 'Conversation', exact: true });
     const sidebar = page.getByRole('complementary', { name: 'Virtual servers and channels' });
@@ -145,6 +193,7 @@ for (const width of [720, 1280]) {
     await expect(page.getByRole('heading', { name: 'Guild Editor', exact: true })).toBeVisible();
     await choose('Direct messages', '9000');
     await expect(page.getByRole('main', { name: 'Virtual channel 9000' })).toBeVisible();
+    await expectControlsInsideWindow();
     await page.locator('.composer input').fill('Hello direct');
     await page.locator('.composer input').press('Enter');
     await expect.poll(() => page.evaluate(() => window.navigationRequests?.length ?? 0)).toBe(1);
@@ -173,5 +222,12 @@ for (const width of [720, 1280]) {
     const guild = await page.evaluate(() => window.navigationRequests?.[1]);
     if (!guild) throw new Error('Expected the guild message action.');
     expect(guild.context).toEqual({ actorId: '3000', guildId: '1000', channelId: '2000' });
+
+    await page.getByRole('button', { name: 'Stop bot', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.navigationControls?.stop)).toBe(1);
+    await page.getByRole('button', { name: 'Close window', exact: true }).click();
+    await expect
+      .poll(() => page.evaluate(() => window.navigationControls?.window))
+      .toEqual(['close']);
   });
 }
