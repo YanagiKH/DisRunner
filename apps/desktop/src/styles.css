@@ -129,6 +129,20 @@ select {
   -webkit-app-region: no-drag;
 }
 
+.top-bar-context {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  gap: inherit;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.runner-controls,
+.window-controls {
+  flex-shrink: 0;
+}
+
 .brand-lockup {
   align-items: center;
   display: flex;
@@ -3510,6 +3524,18 @@ select {
   gap: 5px;
   height: 34px;
   padding: 0 10px;
+}
+
+@media (max-width: 1440px) {
+  .virtual-clock {
+    display: none;
+  }
+}
+
+@media (max-width: 1240px) {
+  .seed-control {
+    display: none;
+  }
 }
 
 @media (max-width: 1320px) {

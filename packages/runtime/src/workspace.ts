@@ -5,6 +5,8 @@ import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import path from 'node:path';
 
+import { openRegularFile, RegularFileError } from './file-read.js';
+
 export interface WorkspaceScenario {
   readonly name: string;
   readonly format: 'json' | 'yaml';
@@ -392,24 +394,23 @@ async function workspaceDirectory(root: string, create: boolean): Promise<string
 }
 
 async function readOptional(filePath: string): Promise<Buffer | null> {
-  let info;
+  let file;
   try {
-    info = await lstat(filePath);
+    file = await openRegularFile(filePath);
   } catch (error) {
+    if (error instanceof RegularFileError)
+      throw new WorkspaceError(
+        error.code,
+        error.code === 'unsafe-path'
+          ? 'Workspace files must be regular files, not links or directories.'
+          : 'Workspace file changed while it was being opened.',
+      );
     if (hasCode(error, 'ENOENT')) return null;
     throw error;
   }
-  if (!info.isFile() || info.isSymbolicLink())
-    throw new WorkspaceError(
-      'unsafe-path',
-      'Workspace files must be regular files, not links or directories.',
-    );
-  const handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const { handle, info } = file;
   try {
-    const opened = await handle.stat();
-    if (!opened.isFile() || opened.ino !== info.ino || opened.dev !== info.dev)
-      throw new WorkspaceError('conflict', 'Workspace file changed while it was being opened.');
-    if (opened.size > MAX_BYTES) invalid('Workspace exceeds the 8 MiB limit.');
+    if (info.size > MAX_BYTES) invalid('Workspace exceeds the 8 MiB limit.');
     const buffer = Buffer.alloc(MAX_BYTES + 1);
     let offset = 0;
     while (offset < buffer.length) {

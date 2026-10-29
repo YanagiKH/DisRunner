@@ -37,6 +37,7 @@ jobs:
         with:
           languages: javascript-typescript, python
           queries: security-extended
+          config-file: ./.github/codeql/source.yml
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: ${{ env.PNPM_VERSION }}
