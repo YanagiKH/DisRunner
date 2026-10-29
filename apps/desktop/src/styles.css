@@ -129,6 +129,20 @@ select {
   -webkit-app-region: no-drag;
 }
 
+.top-bar-context {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  gap: inherit;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.runner-controls,
+.window-controls {
+  flex-shrink: 0;
+}
+
 .brand-lockup {
   align-items: center;
   display: flex;
@@ -3513,20 +3527,13 @@ select {
 }
 
 @media (max-width: 1440px) {
-  .top-bar {
-    padding-left: 12px;
-  }
-
-  .brand-lockup {
-    min-width: 128px;
-  }
-  .brand-lockup .preview-label {
+  .virtual-clock {
     display: none;
   }
-  .workspace-switcher {
-    min-width: 125px;
-  }
-  .virtual-clock > span {
+}
+
+@media (max-width: 1240px) {
+  .seed-control {
     display: none;
   }
 }
@@ -3549,26 +3556,28 @@ select {
     grid-template-columns: 215px minmax(370px, 1fr) 215px;
   }
 
+  .top-bar {
+    padding-left: 12px;
+  }
+
+  .brand-lockup {
+    min-width: 128px;
+  }
+  .brand-lockup .preview-label {
+    display: none;
+  }
+  .workspace-switcher {
+    min-width: 125px;
+  }
+  .virtual-clock > span {
+    display: none;
+  }
+
   .editor-workspace {
     grid-template-columns: 200px minmax(400px, 1fr) 210px;
   }
   .scenario-workspace {
     grid-template-columns: 200px minmax(430px, 1fr) 220px;
-  }
-}
-
-@media (max-width: 1240px) {
-  .workspace-switcher,
-  .top-divider-soft,
-  .seed-control {
-    display: none;
-  }
-
-  .top-divider:first-of-type {
-    display: none;
-  }
-  .brand-lockup {
-    min-width: 132px;
   }
 }
 
@@ -3595,6 +3604,18 @@ select {
     grid-template-columns: 205px minmax(320px, 1fr) 205px;
   }
 
+  .workspace-switcher,
+  .top-divider-soft,
+  .seed-control {
+    display: none;
+  }
+
+  .top-divider:first-of-type {
+    display: none;
+  }
+  .brand-lockup {
+    min-width: 132px;
+  }
   .editor-workspace {
     grid-template-columns: 190px minmax(390px, 1fr);
   }
@@ -3615,7 +3636,11 @@ select {
   }
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 850px) {
+  .app-shell {
+    --runtime-strip-height: 32px;
+    grid-template-rows: 50px auto minmax(0, 1fr);
+  }
   .top-bar {
     gap: 5px;
     padding-inline: 9px;
@@ -3647,13 +3672,6 @@ select {
   .window-divider,
   .window-controls button:nth-child(-n + 2) {
     display: none;
-  }
-}
-
-@media (max-width: 850px) {
-  .app-shell {
-    --runtime-strip-height: 32px;
-    grid-template-rows: 50px auto minmax(0, 1fr);
   }
 
   .runtime-strip {

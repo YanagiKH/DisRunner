@@ -56,47 +56,51 @@ export function TopBar({
 
   return (
     <header className="top-bar">
-      <div className="brand-lockup" aria-label="DisRunner">
-        <BrandMark className="brand-mark" size={30} />
-        <strong>DisRunner</strong>
-        <span className="preview-label">{desktop ? 'Offline' : 'Visual preview shell'}</span>
-      </div>
-      <div className="top-divider" />
-      <button className="workspace-switcher" disabled type="button">
-        <span>{guildName}</span>
-        <ChevronDown size={16} />
-      </button>
-      <div className="top-divider top-divider-soft" />
-      <div className={`run-indicator ${botStatus}`} aria-live={desktop ? undefined : 'polite'}>
-        <span className="status-dot" />
-        {statusLabel[botStatus]}
-      </div>
-      <button className="mode-control" disabled type="button">
-        <ShieldCheck size={16} />
-        <span>
-          {desktop ? `Profile · ${runtime?.project?.mode ?? 'strict'}` : 'Profile preview · Strict'}
-        </span>
-      </button>
-      <div
-        className="seed-control"
-        title={desktop ? 'Simulation seed' : 'Sample deterministic random seed'}
-      >
-        {desktop ? `Seed ${runtime?.project?.seed ?? '—'}` : 'Sample seed 42042'}
-      </div>
-      <div
-        className="virtual-clock"
-        aria-label={desktop ? 'Bot clock' : 'Sample virtual time controls'}
-      >
-        <span>{desktop ? 'Clock' : 'Sample time'}</span>
-        <output>{desktop ? 'Realtime' : '12:34:56'}</output>
-        <button aria-label="Virtual time playback unavailable" disabled type="button">
-          <Play fill="currentColor" size={16} />
+      <div className="top-bar-context">
+        <div className="brand-lockup" aria-label="DisRunner">
+          <BrandMark className="brand-mark" size={30} />
+          <strong>DisRunner</strong>
+          <span className="preview-label">{desktop ? 'Offline' : 'Visual preview shell'}</span>
+        </div>
+        <div className="top-divider" />
+        <button className="workspace-switcher" disabled type="button">
+          <span>{guildName}</span>
+          <ChevronDown size={16} />
         </button>
-        <button aria-label="Virtual time advance unavailable" disabled type="button">
-          <ChevronsRight fill="currentColor" size={17} />
+        <div className="top-divider top-divider-soft" />
+        <div className={`run-indicator ${botStatus}`} aria-live={desktop ? undefined : 'polite'}>
+          <span className="status-dot" />
+          {statusLabel[botStatus]}
+        </div>
+        <button className="mode-control" disabled type="button">
+          <ShieldCheck size={16} />
+          <span>
+            {desktop
+              ? `Profile · ${runtime?.project?.mode ?? 'strict'}`
+              : 'Profile preview · Strict'}
+          </span>
         </button>
+        <div
+          className="seed-control"
+          title={desktop ? 'Simulation seed' : 'Sample deterministic random seed'}
+        >
+          {desktop ? `Seed ${runtime?.project?.seed ?? '—'}` : 'Sample seed 42042'}
+        </div>
+        <div
+          className="virtual-clock"
+          aria-label={desktop ? 'Bot clock' : 'Sample virtual time controls'}
+        >
+          <span>{desktop ? 'Clock' : 'Sample time'}</span>
+          <output>{desktop ? 'Realtime' : '12:34:56'}</output>
+          <button aria-label="Virtual time playback unavailable" disabled type="button">
+            <Play fill="currentColor" size={16} />
+          </button>
+          <button aria-label="Virtual time advance unavailable" disabled type="button">
+            <ChevronsRight fill="currentColor" size={17} />
+          </button>
+        </div>
+        <div className="top-spacer" />
       </div>
-      <div className="top-spacer" />
       <div className="runner-controls" aria-label="Bot process controls">
         <button
           className="start-button"
