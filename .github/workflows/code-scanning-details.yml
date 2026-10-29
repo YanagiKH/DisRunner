@@ -1,0 +1,89 @@
+name: Code scanning details
+
+on:
+  push:
+    branches: [KH/v1.0-code-scanning-details]
+    paths: [.github/workflows/code-scanning-details.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Inspect open high-severity findings
+    if: github.repository == 'YanagiKH/DisRunner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - name: Collect bounded finding metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: fae56cc088baf8252e065b159c695f695f74e1c4
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          details_dir="$RUNNER_TEMP/code-scanning-details"
+          mkdir -p "$details_dir"
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          cat > "$details_dir/project.jq" <<'JQ'
+          def bounded($limit): if type == "string" then .[0:$limit] else null end;
+          [.[][] | {
+            number, state,
+            rule: {
+              id: (.rule.id | bounded(200)),
+              name: (.rule.name | bounded(500)),
+              severity: .rule.severity,
+              security_severity_level: .rule.security_severity_level
+            },
+            instance: (.most_recent_instance | {
+              ref: (.ref | bounded(500)),
+              commit_sha, category, state,
+              message: (.message.text | bounded(1500)),
+              location: (.location | {path, start_line, end_line, start_column, end_column})
+            }),
+            html_url
+          }]
+          JQ
+
+          for severity in critical high; do
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&severity=$severity&per_page=100" \
+              > "$details_dir/all-$severity.raw.json"
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&severity=$severity&ref=refs/heads/main&per_page=100" \
+              > "$details_dir/main-$severity.raw.json"
+            for scope in all main; do
+              jq -f "$details_dir/project.jq" "$details_dir/$scope-$severity.raw.json" \
+                > "$details_dir/$scope-$severity.json"
+            done
+          done
+
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg diagnosticSha "$GITHUB_SHA" \
+            --arg targetSha "$TARGET_SHA" \
+            --arg mainSha "$main_sha" \
+            --arg observedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile allCritical "$details_dir/all-critical.json" \
+            --slurpfile allHigh "$details_dir/all-high.json" \
+            --slurpfile mainCritical "$details_dir/main-critical.json" \
+            --slurpfile mainHigh "$details_dir/main-high.json" \
+            '{repository: $repository, diagnosticSha: $diagnosticSha, targetSha: $targetSha,
+              observedMainSha: $mainSha, observedAt: $observedAt,
+              allRefs: {critical: $allCritical[0], high: $allHigh[0]},
+              mainRef: {critical: $mainCritical[0], high: $mainHigh[0]}}' \
+            > "$details_dir/report.json"
+          cat "$details_dir/report.json"
+      - name: Upload finding metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: code-scanning-details-${{ github.sha }}
+          path: ${{ runner.temp }}/code-scanning-details/report.json
+          if-no-files-found: error
+          retention-days: 7
