@@ -1,10 +1,11 @@
-import { open, realpath, stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { GatewayIntents, parseCommandRegistryProfile } from '@disrunner/core';
 import type { CommandRegistryProfile, OrdinaryMessagePermissionProfile } from '@disrunner/core';
 
 import { openWorkspace } from './workspace.js';
+import { openRegularFile, RegularFileError } from './file-read.js';
 import type { ProjectSummary } from './contracts.js';
 
 const CONFIG_NAME = 'discord-simulator.config.json';
@@ -537,11 +538,21 @@ function tokenizeCommand(command: string): readonly string[] {
 }
 
 async function readBoundedJson(filePath: string, limit: number, label: string): Promise<unknown> {
-  const file = await open(filePath, 'r');
+  let opened;
+  try {
+    opened = await openRegularFile(filePath);
+  } catch (error) {
+    if (error instanceof RegularFileError)
+      throw new TypeError(
+        error.code === 'unsafe-path'
+          ? `${label} must be a regular file.`
+          : `${label} changed while it was being opened.`,
+      );
+    throw error;
+  }
+  const { handle: file, info: fileStat } = opened;
   let source: string;
   try {
-    const fileStat = await file.stat();
-    if (!fileStat.isFile()) throw new TypeError(`${label} must be a regular file.`);
     if (fileStat.size > limit) throw new TypeError(`${label} exceeds the ${limit}-byte limit.`);
 
     const buffer = Buffer.allocUnsafe(limit + 1);

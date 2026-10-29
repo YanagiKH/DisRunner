@@ -94,6 +94,31 @@ test(
 );
 
 test(
+  'opening a project with a pipe configuration is rejected without blocking',
+  { skip: process.platform === 'win32', timeout: 8000 },
+  async (t) => {
+    const root = await directory(t);
+    const fifo = spawnSync('mkfifo', [join(root, 'discord-simulator.config.json')], {
+      encoding: 'utf8',
+    });
+    assert.equal(fifo.status, 0, fifo.stderr);
+    const child = String.raw`
+      import assert from 'node:assert/strict';
+      const { loadProjectConfiguration } = await import(process.argv[1]);
+      await assert.rejects(loadProjectConfiguration(process.argv[2]), {
+        name: 'TypeError', message: 'Project configuration must be a regular file.'
+      });
+    `;
+    const result = spawnSync(
+      process.execPath,
+      ['--input-type=module', '-e', child, new URL('../dist/index.js', import.meta.url).href, root],
+      { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' },
+    );
+    assert.equal(result.status, 0, result.stderr || String(result.error));
+  },
+);
+
+test(
   'entry source growth cannot bypass the startup hashing limit',
   { timeout: 20000 },
   async (t) => {
