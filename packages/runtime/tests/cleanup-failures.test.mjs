@@ -633,7 +633,7 @@ for (const item of closeCases) {
   test(
     `${item.id} close failure (pre) attempts every resource; ${item.retryId} healthy retry`,
     { skip: linuxOnly, timeout: 30_000 },
-    async () => {
+    async (t) => {
       const { harness, session, control, baseline } = await prepare('normal', item.faults);
       await healthyStart(harness, session);
       const tree = identities();
@@ -680,7 +680,26 @@ for (const item of closeCases) {
       assert.equal(session.snapshot().phase, 'ready');
 
       // Released: a later start succeeds with healthy wrappers.
-      const again = await session.start();
+      let again;
+      try {
+        again = await session.start();
+      } catch (error) {
+        try {
+          const failed = session.snapshot();
+          t.diagnostic(
+            JSON.stringify({
+              caseId: item.id,
+              phase: failed.phase,
+              interactionEndpoint: harness.lastEndpoints()?.interactionEndpoint ?? null,
+              botOutput: failed.output.slice(-32),
+              fixtureEvents: reports().slice(-64),
+            }),
+          );
+        } catch {
+          // Diagnostic collection must not replace the original startup failure.
+        }
+        throw error;
+      }
       assert.equal(again.phase, 'running');
       assertNoLeak(harness, session);
       await finish(harness, session, baseline, control, item.id);
